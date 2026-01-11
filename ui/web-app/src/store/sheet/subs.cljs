@@ -50,6 +50,27 @@
   (fn [db _]
     (get-in db [:sheet :ticking?] false)))
 
+(rf/reg-sub
+  ::tick-iteration
+  (fn [db _]
+    (get-in db [:sheet :tick-iteration] 0)))
+
+(rf/reg-sub
+  ::tick-budget
+  (fn [db _]
+    (get-in db [:sheet :tick-budget] 10)))
+
+(rf/reg-sub
+  ::tick-progress
+  :<- [::tick-iteration]
+  :<- [::tick-budget]
+  (fn [[iteration budget] _]
+    {:iteration iteration
+     :budget budget
+     :percent (if (pos? budget)
+                (min 100 (* 100 (/ iteration budget)))
+                0)}))
+
 ;; =============================================================================
 ;; Nodes Subscriptions
 ;; =============================================================================

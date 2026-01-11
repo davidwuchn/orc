@@ -13,6 +13,7 @@
     (def event-store (:event-store context)))
 
 
+  
   ;;
   ;; Stop Service ;;
   ;;

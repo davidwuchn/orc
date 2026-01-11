@@ -191,6 +191,20 @@
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
+(rf/reg-fx
+  ::set-node-check
+  (fn [{:keys [api-client sheet-id node-id check on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-node-check
+                                         :sheet-id sheet-id
+                                         :node-id node-id
+                                         :check check}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
 ;; =============================================================================
 ;; Blackboard Effects
 ;; =============================================================================
@@ -242,12 +256,26 @@
 
 (rf/reg-fx
   ::tick-tree
-  (fn [{:keys [api-client sheet-id on-success on-failure]}]
+  (fn [{:keys [api-client sheet-id tick-id on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
                                         {:command/name :sheet/tick-tree
-                                         :sheet-id sheet-id}))]
+                                         :sheet-id sheet-id
+                                         :tick-id tick-id}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::cancel-tick
+  (fn [{:keys [api-client sheet-id tick-id on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/cancel-tick
+                                         :sheet-id sheet-id
+                                         :tick-id tick-id}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))

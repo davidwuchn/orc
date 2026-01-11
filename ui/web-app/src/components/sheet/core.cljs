@@ -44,6 +44,7 @@
     :leaf "L"
     :sequence "S"
     :fallback "F"
+    :condition "?"
     "?"))
 
 (defn node-type-color [node-type]
@@ -51,6 +52,7 @@
     :leaf "bg-blue-100 border-blue-300"
     :sequence "bg-purple-100 border-purple-300"
     :fallback "bg-orange-100 border-orange-300"
+    :condition "bg-yellow-100 border-yellow-300"
     "bg-gray-100"))
 
 ;; =============================================================================
@@ -82,6 +84,13 @@
          ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
             (:instruction node)))
 
+       ;; Check preview for condition nodes
+       (when (= :condition node-type)
+         (if-let [check (:check node)]
+           ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
+              (str (:key check) " " (name (:op check)) " " (:value check)))
+           ($ :p {:class "text-xs text-gray-400 italic mt-1"} "No check set")))
+
        ;; Children count for composite nodes
        (when (#{:sequence :fallback} node-type)
          ($ :p {:class "text-xs text-gray-400 mt-1"}
@@ -96,11 +105,15 @@
     ($ :div {:class "p-2 border-2 border-dashed rounded-lg cursor-pointer hover:bg-gray-50 flex items-center justify-center"
              :on-click #(set-menu-open! true)}
        (if menu-open?
-         ($ :div {:class "flex gap-2"}
+         ($ :div {:class "flex gap-2 flex-wrap justify-center"}
             ($ button/Button {:size "sm" :variant "outline"
                               :on-click #(do (set-menu-open! false)
                                              (on-create-node :leaf parent-id index))}
                "Leaf")
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :condition parent-id index))}
+               "Cond")
             ($ button/Button {:size "sm" :variant "outline"
                               :on-click #(do (set-menu-open! false)
                                              (on-create-node :sequence parent-id index))}
@@ -209,7 +222,7 @@
                 ($ :div {:key k
                          :class (str "p-2 rounded text-sm "
                                      (if is-used? "bg-blue-50 border border-blue-200" "bg-gray-50"))}
-                   ;; Header row: key name, type badge, edit button
+                   ;; Header row: key name, type badge, edit/delete buttons
                    ($ :div {:class "flex items-center gap-2 mb-1"}
                       ($ :span {:class "font-mono font-medium"} k)
                       ($ badge/Badge {:variant "outline" :class "text-xs"}
@@ -218,7 +231,10 @@
                       ($ button/Button {:size "sm" :variant "ghost" :class "h-6 px-2"
                                         :on-click #(do (set-editing-key! k)
                                                        (set-edit-value! (str (or (:value entry) ""))))}
-                         "Edit"))
+                         "Edit")
+                      ($ button/Button {:size "sm" :variant "ghost" :class "h-6 px-2 text-red-600 hover:text-red-700"
+                                        :on-click #(handle-delete k)}
+                         "x"))
                    ;; Value row (or edit input)
                    (if (= editing-key k)
                      ($ :div {:class "flex gap-1"}
@@ -254,6 +270,18 @@
 ;; Node Editor Panel Component
 ;; =============================================================================
 
+(def condition-operators
+  "Available operators for condition checks"
+  [{:value :equals :label "="}
+   {:value :not-equals :label "!="}
+   {:value :gt :label ">"}
+   {:value :lt :label "<"}
+   {:value :gte :label ">="}
+   {:value :lte :label "<="}
+   {:value :contains :label "contains"}
+   {:value :exists :label "exists"}
+   {:value :truthy :label "truthy"}])
+
 (defui node-editor-panel [{:keys [sheet-id]}]
   (let [node (use-subscribe [::sheet-subs/selected-node])
         blackboard-keys (use-subscribe [::sheet-subs/blackboard-keys])
@@ -265,6 +293,11 @@
         [instruction-value set-instruction-value!] (use-state "")
         [reads-value set-reads-value!] (use-state [])
         [writes-value set-writes-value!] (use-state [])
+        ;; Condition check state
+        [check-key set-check-key!] (use-state "")
+        [check-op set-check-op!] (use-state :equals)
+        [check-value set-check-value!] (use-state "")
+        [check-on-fail set-check-on-fail!] (use-state :failure)
 
         ;; Initialize values when node changes
         _ (use-effect
@@ -273,7 +306,13 @@
                 (set-name-value! (:name node))
                 (set-instruction-value! (or (:instruction node) ""))
                 (set-reads-value! (vec (:reads node)))
-                (set-writes-value! (vec (:writes node)))))
+                (set-writes-value! (vec (:writes node)))
+                ;; Initialize condition check state
+                (when-let [check (:check node)]
+                  (set-check-key! (or (:key check) ""))
+                  (set-check-op! (or (:op check) :equals))
+                  (set-check-value! (str (or (:value check) "")))
+                  (set-check-on-fail! (or (:on-fail check) :failure)))))
             [node])
 
         handle-save-name (fn []
@@ -286,8 +325,17 @@
         handle-save-io (fn []
                          (rf/dispatch [::sheet-events/set-node-io api-client sheet-id (:id node) reads-value writes-value]))
 
+        handle-save-check (fn []
+                            (rf/dispatch [::sheet-events/set-node-check
+                                          api-client sheet-id (:id node)
+                                          {:key check-key
+                                           :op check-op
+                                           :value check-value
+                                           :on-fail check-on-fail}]))
+
         handle-add-child (fn [child-type]
-                           (rf/dispatch [::sheet-events/create-node api-client sheet-id child-type (:id node) nil]))
+                           (let [num-children (count (:children-ids node))]
+                             (rf/dispatch [::sheet-events/create-node api-client sheet-id child-type (:id node) num-children])))
 
         handle-delete (fn []
                         (rf/dispatch [::sheet-events/delete-node api-client sheet-id (:id node)]))]
@@ -384,14 +432,62 @@
                  ($ button/Button {:size "sm" :variant "outline" :on-click handle-save-io}
                     "Save I/O")))
 
+            ;; Condition-specific: Check configuration
+            (when (= :condition (:type node))
+              ($ :div {:class "space-y-3"}
+                 ($ label/Label "Condition Check")
+                 ;; Key selector
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Blackboard Key")
+                    ($ select/Select {:value check-key
+                                      :onValueChange #(set-check-key! %)}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue {:placeholder "Select key..."}))
+                       ($ select/SelectContent
+                          (for [k blackboard-keys]
+                            ($ select/SelectItem {:key k :value k} k)))))
+                 ;; Operator selector
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Operator")
+                    ($ select/Select {:value (name check-op)
+                                      :onValueChange #(set-check-op! (keyword %))}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue))
+                       ($ select/SelectContent
+                          (for [{:keys [value label]} condition-operators]
+                            ($ select/SelectItem {:key (name value) :value (name value)} label)))))
+                 ;; Value input (not needed for exists/truthy)
+                 (when-not (#{:exists :truthy} check-op)
+                   ($ :div {:class "space-y-1"}
+                      ($ :span {:class "text-xs text-gray-500"} "Value")
+                      ($ input/Input {:value check-value
+                                      :on-change #(set-check-value! (.. % -target -value))
+                                      :placeholder "Value to compare"})))
+                 ;; On-fail behavior
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "On Fail")
+                    ($ select/Select {:value (name check-on-fail)
+                                      :onValueChange #(set-check-on-fail! (keyword %))}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue))
+                       ($ select/SelectContent
+                          ($ select/SelectItem {:value "failure"} "Failure (stop)")
+                          ($ select/SelectItem {:value "running"} "Running (retry)"))))
+                 ($ button/Button {:size "sm" :on-click handle-save-check
+                                   :disabled (empty? check-key)}
+                    "Save Check")))
+
             ;; Add child (for composite nodes)
             (when (#{:sequence :fallback} (:type node))
               ($ :div {:class "space-y-2"}
                  ($ label/Label "Add Child")
-                 ($ :div {:class "flex gap-2"}
+                 ($ :div {:class "flex gap-2 flex-wrap"}
                     ($ button/Button {:size "sm" :variant "outline"
                                       :on-click #(handle-add-child :leaf)}
                        "+ Leaf")
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :condition)}
+                       "+ Cond")
                     ($ button/Button {:size "sm" :variant "outline"
                                       :on-click #(handle-add-child :sequence)}
                        "+ Seq")
@@ -419,13 +515,16 @@
 
 (defui sheet-toolbar [{:keys [sheet sheet-id]}]
   (let [ticking? (use-subscribe [::sheet-subs/sheet-ticking?])
+        tick-progress (use-subscribe [::sheet-subs/tick-progress])
         root-node (use-subscribe [::sheet-subs/root-node])
         ctx (context/use-context)
         api-client (:api/client ctx)
         navigate! (:router/navigate! ctx)
 
         handle-tick (fn []
-                      (rf/dispatch [::sheet-events/tick-tree api-client sheet-id]))]
+                      (rf/dispatch [::sheet-events/tick-tree api-client sheet-id]))
+        handle-stop (fn []
+                      (rf/dispatch [::sheet-events/stop-ticking api-client sheet-id]))]
 
     ($ :div {:class "flex items-center justify-between p-4 border-b bg-white"}
        ($ :div {:class "flex items-center gap-4"}
@@ -433,14 +532,17 @@
              "< Back")
           ($ :h1 {:class "text-xl font-semibold"}
              (:name sheet)))
-       ($ :div {:class "flex items-center gap-2"}
-          ($ button/Button {:variant "default"
-                            :disabled (or ticking? (not root-node))
-                            :on-click handle-tick}
-             (if ticking?
-               ($ :span {:class "flex items-center gap-2"}
-                  ($ spinner/Spinner {:class "w-4 h-4"})
-                  "Ticking...")
+       ($ :div {:class "flex items-center gap-3"}
+          (when ticking?
+            ($ :div {:class "flex items-center gap-2 text-sm text-gray-600"}
+               ($ spinner/Spinner {:class "w-4 h-4"})
+               ($ :span (str "Iteration " (:iteration tick-progress) "/" (:budget tick-progress)))))
+          (if ticking?
+            ($ button/Button {:variant "outline" :on-click handle-stop}
+               "Stop")
+            ($ button/Button {:variant "default"
+                              :disabled (not root-node)
+                              :on-click handle-tick}
                "Tick Tree"))))))
 
 ;; =============================================================================

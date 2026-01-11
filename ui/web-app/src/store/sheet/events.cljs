@@ -11,13 +11,15 @@
 
 (rf/reg-event-fx
   ::load-sheets-list-screen
-  (fn [_ctx [_ api-client]]
-    {:db (-> (:db _ctx)
-             (assoc-in [:sheets :loading?] true)
-             (assoc-in [:sheets :error] nil))
-     ::sheet-fx/load-sheets-list-screen {:api-client api-client
-                                         :on-success [::load-sheets-list-screen-success]
-                                         :on-failure [::load-sheets-list-screen-failure]}}))
+  (fn [{:keys [db]} [_ api-client]]
+    ;; Only show loading state if we don't have data yet
+    (let [has-data? (seq (get-in db [:sheets :list]))]
+      {:db (cond-> db
+             (not has-data?) (assoc-in [:sheets :loading?] true)
+             true (assoc-in [:sheets :error] nil))
+       ::sheet-fx/load-sheets-list-screen {:api-client api-client
+                                           :on-success [::load-sheets-list-screen-success]
+                                           :on-failure [::load-sheets-list-screen-failure]}})))
 
 (rf/reg-event-db
   ::load-sheets-list-screen-success
@@ -41,25 +43,29 @@
 (rf/reg-event-fx
   ::load-sheet-view-screen
   (fn [{:keys [db]} [_ api-client sheet-id]]
-    {:db (-> db
-             (assoc-in [:sheet :loading?] true)
-             (assoc-in [:sheet :error] nil))
-     ::sheet-fx/load-sheet-view-screen {:api-client api-client
-                                        :sheet-id sheet-id
-                                        :on-success [::load-sheet-view-screen-success]
-                                        :on-failure [::load-sheet-view-screen-failure]}}))
+    ;; Only show loading state if we don't have data yet
+    (let [has-data? (some? (get-in db [:sheet :data]))]
+      {:db (cond-> db
+             (not has-data?) (assoc-in [:sheet :loading?] true)
+             true (assoc-in [:sheet :error] nil))
+       ::sheet-fx/load-sheet-view-screen {:api-client api-client
+                                          :sheet-id sheet-id
+                                          :on-success [::load-sheet-view-screen-success]
+                                          :on-failure [::load-sheet-view-screen-failure]}})))
 
 (rf/reg-event-db
   ::load-sheet-view-screen-success
   (fn [db [_ result]]
     (let [nodes-by-id (into {} (map (juxt :id identity) (:nodes result)))
-          blackboard-by-key (into {} (map (juxt :key identity) (:blackboard result)))]
-      (-> db
-          (assoc-in [:sheet :loading?] false)
-          (assoc-in [:sheet :data] (:sheet result))
-          (assoc-in [:sheet :nodes] nodes-by-id)
-          (assoc-in [:sheet :blackboard] blackboard-by-key)
-          (assoc-in [:sheet :layout] (:layout result))))))
+          blackboard-by-key (into {} (map (juxt :key identity) (:blackboard result)))
+          tick (:tick result)]
+      (cond-> (-> db
+                  (assoc-in [:sheet :loading?] false)
+                  (assoc-in [:sheet :data] (:sheet result))
+                  (assoc-in [:sheet :nodes] nodes-by-id)
+                  (assoc-in [:sheet :blackboard] blackboard-by-key)
+                  (assoc-in [:sheet :layout] (:layout result)))
+        tick (assoc-in [:sheet :tick-iteration] (:iteration tick))))))
 
 (rf/reg-event-db
   ::load-sheet-view-screen-failure
@@ -242,6 +248,16 @@
                                      :on-success [::node-command-success api-client sheet-id]
                                      :on-failure [::node-operation-failure]}}))
 
+(rf/reg-event-fx
+  ::set-node-check
+  (fn [_ [_ api-client sheet-id node-id check]]
+    {::sheet-fx/set-node-check {:api-client api-client
+                                :sheet-id sheet-id
+                                :node-id node-id
+                                :check check
+                                :on-success [::node-command-success api-client sheet-id]
+                                :on-failure [::node-operation-failure]}}))
+
 ;; =============================================================================
 ;; Blackboard Events
 ;; =============================================================================
@@ -279,20 +295,74 @@
 ;; Execution Events
 ;; =============================================================================
 
-(rf/reg-event-fx
-  ::tick-tree
-  (fn [{:keys [db]} [_ api-client sheet-id]]
-    {:db (assoc-in db [:sheet :ticking?] true)
-     ::sheet-fx/tick-tree {:api-client api-client
-                           :sheet-id sheet-id
-                           :on-success [::tick-tree-success api-client sheet-id]
-                           :on-failure [::tick-tree-failure]}}))
+;; Polling interval for checking tree status (ms)
+(def tick-poll-interval 1000)
+
+;; Max iterations budget (client-side tracking)
+(def default-tick-budget 10)
 
 (rf/reg-event-fx
-  ::tick-tree-success
+  ::tick-tree
+  (fn [{:keys [db]} [_ api-client sheet-id & [{:keys [budget]}]]]
+    (let [tick-id (random-uuid)]
+      {:db (-> db
+               (assoc-in [:sheet :ticking?] true)
+               (assoc-in [:sheet :tick-id] tick-id)
+               (assoc-in [:sheet :tick-budget] (or budget default-tick-budget))
+               (assoc-in [:sheet :tick-iteration] 0))
+       ::sheet-fx/tick-tree {:api-client api-client
+                             :sheet-id sheet-id
+                             :tick-id tick-id
+                             :on-success [::tick-tree-started api-client sheet-id]
+                             :on-failure [::tick-tree-failure]}})))
+
+(rf/reg-event-fx
+  ::tick-tree-started
   (fn [{:keys [db]} [_ api-client sheet-id _response]]
-    {:db (assoc-in db [:sheet :ticking?] false)
-     :dispatch [::load-sheet-view-screen api-client sheet-id]}))
+    ;; Command accepted - start polling for status
+    {:db (update-in db [:sheet :tick-iteration] (fnil inc 0))
+     :dispatch-later [{:ms tick-poll-interval
+                       :dispatch [::poll-tick-status api-client sheet-id]}]}))
+
+(rf/reg-event-fx
+  ::poll-tick-status
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    (if (get-in db [:sheet :ticking?])
+      ;; Still ticking - fetch latest state
+      {::sheet-fx/load-sheet-view-screen
+       {:api-client api-client
+        :sheet-id sheet-id
+        :on-success [::poll-tick-status-success api-client sheet-id]
+        :on-failure [::tick-tree-failure]}}
+      ;; Stopped ticking - do nothing
+      {})))
+
+(rf/reg-event-fx
+  ::poll-tick-status-success
+  (fn [{:keys [db]} [_ api-client sheet-id result]]
+    (let [nodes-by-id (into {} (map (juxt :id identity) (:nodes result)))
+          blackboard-by-key (into {} (map (juxt :key identity) (:blackboard result)))
+          root-node-id (get-in result [:sheet :root-node-id])
+          root-node (get nodes-by-id root-node-id)
+          root-status (:status root-node)
+          still-running? (= :running root-status)
+          tick (:tick result)
+          iteration (or (:iteration tick) 0)
+          budget (get-in db [:sheet :tick-budget] default-tick-budget)
+          budget-exhausted? (>= iteration budget)]
+      (cond-> {:db (-> db
+                       (assoc-in [:sheet :data] (:sheet result))
+                       (assoc-in [:sheet :nodes] nodes-by-id)
+                       (assoc-in [:sheet :blackboard] blackboard-by-key)
+                       (assoc-in [:sheet :layout] (:layout result))
+                       (assoc-in [:sheet :tick-iteration] iteration))}
+        ;; If still running and budget not exhausted, poll again
+        (and still-running? (not budget-exhausted?))
+        (assoc :dispatch-later [{:ms tick-poll-interval
+                                 :dispatch [::poll-tick-status api-client sheet-id]}])
+        ;; If done or budget exhausted, stop ticking
+        (or (not still-running?) budget-exhausted?)
+        (update :db #(assoc-in % [:sheet :ticking?] false))))))
 
 (rf/reg-event-db
   ::tick-tree-failure
@@ -300,6 +370,31 @@
     (-> db
         (assoc-in [:sheet :ticking?] false)
         (assoc-in [:sheet :error] error))))
+
+(rf/reg-event-fx
+  ::stop-ticking
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    (let [tick-id (get-in db [:sheet :tick-id])]
+      (cond-> {:db (assoc-in db [:sheet :ticking?] false)}
+        tick-id (assoc ::sheet-fx/cancel-tick
+                       {:api-client api-client
+                        :sheet-id sheet-id
+                        :tick-id tick-id
+                        :on-success [::cancel-tick-success]
+                        :on-failure [::cancel-tick-failure]})))))
+
+(rf/reg-event-db
+  ::cancel-tick-success
+  (fn [db _]
+    ;; Already stopped ticking, nothing more to do
+    db))
+
+(rf/reg-event-db
+  ::cancel-tick-failure
+  (fn [db [_ error]]
+    ;; Log error but don't show to user - tick already stopped locally
+    (js/console.error "Failed to cancel tick:" (clj->js error))
+    db))
 
 (rf/reg-event-fx
   ::tick-node

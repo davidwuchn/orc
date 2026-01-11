@@ -14,7 +14,7 @@
 
 (def node-type
   "Behavior tree node types"
-  [:enum :leaf :sequence :fallback])
+  [:enum :leaf :sequence :fallback :condition])
 
 (def node-status
   "Node execution status"
@@ -27,6 +27,14 @@
 (def decorator-type
   "Decorator types that modify node behavior"
   [:enum :retry :timeout :repeat])
+
+(def condition-op
+  "Operators for condition node checks"
+  [:enum :equals :not-equals :gt :lt :gte :lte :contains :exists :truthy])
+
+(def on-fail-behavior
+  "What to return when a condition check fails"
+  [:enum :failure :running])
 
 ;; =============================================================================
 ;; Domain Value Objects
@@ -43,6 +51,14 @@
   [:map
    [:type field-type]
    [:value :any]])
+
+(def condition-check
+  "A condition check definition for condition nodes"
+  [:map
+   [:key :string]
+   [:op condition-op]
+   [:value {:optional true} :any]
+   [:on-fail {:optional true} on-fail-behavior]])
 
 ;; =============================================================================
 ;; Domain Schemas (for use in query results)
@@ -70,6 +86,8 @@
     [:reads [:vector :string]]
     [:writes [:vector :string]]
     [:decorators [:vector decorator]]
+    ;; Condition-only fields
+    [:check {:optional true} condition-check]
     ;; Execution tracking
     [:last-error {:optional true} :string]]
 
@@ -164,6 +182,12 @@
     [:node-id :uuid]
     [:decorators [:vector decorator]]]
 
+   :sheet/set-node-check
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:check condition-check]]
+
    ;; -------------------------------------------------------------------------
    ;; Blackboard Commands
    ;; -------------------------------------------------------------------------
@@ -200,6 +224,11 @@
     [:node-id :uuid]
     [:tick-id {:optional true} :uuid]
     [:overrides {:optional true} [:map-of :string :any]]]
+
+   :sheet/cancel-tick
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]]
 
    ;; Internal commands (issued by todo processors)
    :sheet/complete-node-execution
@@ -305,6 +334,13 @@
     [:decorators [:vector decorator]]
     [:previous-decorators {:optional true} [:vector decorator]]]
 
+   :sheet/node-check-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:check condition-check]
+    [:previous-check {:optional true} condition-check]]
+
    ;; -------------------------------------------------------------------------
    ;; Blackboard Events
    ;; -------------------------------------------------------------------------
@@ -335,7 +371,8 @@
    :sheet/tree-tick-started
    [:map
     [:sheet-id :uuid]
-    [:tick-id :uuid]]
+    [:tick-id :uuid]
+    [:iteration {:optional true} :int]]
 
    :sheet/node-execution-started
    [:map
@@ -357,7 +394,13 @@
    [:map
     [:sheet-id :uuid]
     [:tick-id :uuid]
-    [:root-status [:enum :success :failure :running]]]})
+    [:iteration {:optional true} :int]
+    [:root-status [:enum :success :failure :running]]]
+
+   :sheet/tick-cancelled
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]]})
 
 ;; =============================================================================
 ;; Query Schemas (Fat Query Model - one query per screen)

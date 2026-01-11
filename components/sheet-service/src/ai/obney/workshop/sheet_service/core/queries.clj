@@ -27,7 +27,7 @@
 
 (defquery :sheet sheet-view-screen
   "Fat query for sheet view screen.
-   Returns sheet metadata, all nodes, blackboard, and layout."
+   Returns sheet metadata, all nodes, blackboard, layout, and current tick."
   [{{:keys [sheet-id]} :query
     :keys [event-store]}]
   (let [sheet (rm/get-sheet event-store sheet-id)]
@@ -41,9 +41,11 @@
                         (get nodes-by-id root-id))
             tree-layout (if root-node
                           (layout/compute-layout root-node nodes-by-id)
-                          [])]
+                          [])
+            current-tick (rm/get-current-tick event-store sheet-id)]
         {:query/result
-         {:sheet sheet
-          :nodes (vec nodes)
-          :blackboard (vec blackboard)
-          :layout tree-layout}}))))
+         (cond-> {:sheet sheet
+                  :nodes (vec nodes)
+                  :blackboard (vec blackboard)
+                  :layout tree-layout}
+           current-tick (assoc :tick current-tick))}))))

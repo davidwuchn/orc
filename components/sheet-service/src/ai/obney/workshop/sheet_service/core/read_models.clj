@@ -29,6 +29,7 @@
     :sheet/node-instruction-set
     :sheet/node-io-set
     :sheet/node-decorators-set
+    :sheet/node-check-set
     :sheet/node-execution-started
     :sheet/node-execution-completed})
 
@@ -43,7 +44,8 @@
   #{:sheet/tree-tick-started
     :sheet/node-execution-started
     :sheet/node-execution-completed
-    :sheet/tree-tick-completed})
+    :sheet/tree-tick-completed
+    :sheet/tick-cancelled})
 
 (def all-sheet-events
   "All events for a complete sheet view"
@@ -119,7 +121,8 @@
                 :name (case (:type event)
                         :leaf "New Leaf"
                         :sequence "Sequence"
-                        :fallback "Fallback")
+                        :fallback "Fallback"
+                        :condition "Condition")
                 :parent-id parent-id
                 :children-ids []
                 :status :idle
@@ -127,6 +130,7 @@
                 :reads []
                 :writes []
                 :decorators []
+                :check nil
                 :last-error nil})
         ;; Add to parent's children if parent exists
         (cond-> parent-id
@@ -204,6 +208,10 @@
   [state event]
   (assoc-in state [(:node-id event) :decorators] (:decorators event)))
 
+(defmethod nodes* :sheet/node-check-set
+  [state event]
+  (assoc-in state [(:node-id event) :check] (:check event)))
+
 (defmethod nodes* :sheet/node-execution-started
   [state event]
   (assoc-in state [(:node-id event) :status] :running))
@@ -264,13 +272,23 @@
 
 (defmethod ticks* :sheet/tree-tick-started
   [state event]
-  (assoc state (:tick-id event)
-         {:id (:tick-id event)
-          :sheet-id (:sheet-id event)
-          :status :running
-          :started-at (str (:event/timestamp event))
-          :completed-at nil
-          :root-status nil}))
+  (let [tick-id (:tick-id event)
+        iteration (or (:iteration event) 1)
+        existing (get state tick-id)]
+    (if existing
+      ;; Re-tick - update iteration count
+      (-> state
+          (assoc-in [tick-id :iteration] iteration)
+          (assoc-in [tick-id :status] :running))
+      ;; New tick
+      (assoc state tick-id
+             {:id tick-id
+              :sheet-id (:sheet-id event)
+              :status :running
+              :iteration iteration
+              :started-at (str (:event/timestamp event))
+              :completed-at nil
+              :root-status nil}))))
 
 (defmethod ticks* :sheet/tree-tick-completed
   [state event]
@@ -278,6 +296,12 @@
       (assoc-in [(:tick-id event) :status] :completed)
       (assoc-in [(:tick-id event) :root-status] (:root-status event))
       (assoc-in [(:tick-id event) :completed-at] (str (:event/timestamp event)))))
+
+(defmethod ticks* :sheet/tick-cancelled
+  [state event]
+  (-> state
+      (assoc-in [(:tick-id event) :status] :cancelled)
+      (assoc-in [(:tick-id event) :cancelled-at] (str (:event/timestamp event)))))
 
 (defmethod ticks* :default [state _] state)
 
@@ -351,6 +375,28 @@
                                  {:types tick-events
                                   :tags #{[:tick tick-id]}})]
     (get (ticks {} events) tick-id)))
+
+(defn is-tick-cancelled?
+  "Check if a tick has been cancelled"
+  [event-store tick-id]
+  (let [tick (get-tick event-store tick-id)]
+    (= :cancelled (:status tick))))
+
+(defn get-ticks-for-sheet
+  "Get all ticks for a sheet"
+  [event-store sheet-id]
+  (let [events (event-store/read event-store
+                                 {:types tick-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (vals (ticks {} events))))
+
+(defn get-current-tick
+  "Get the current running tick for a sheet, if any"
+  [event-store sheet-id]
+  (->> (get-ticks-for-sheet event-store sheet-id)
+       (filter #(= :running (:status %)))
+       (sort-by :started-at)
+       last))
 
 (defn get-root-node
   "Get the root node for a sheet"

@@ -291,6 +291,37 @@
                          :decorators (vec decorators)}
                   (seq (:decorators node)) (assoc :previous-decorators (:decorators node)))})]})))
 
+(defcommand :sheet set-node-check
+  "Set the condition check for a condition node."
+  [{{:keys [sheet-id node-id check]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        check-key (:key check)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :condition (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only condition nodes can have checks"}
+
+      (not (contains? blackboard check-key))
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Blackboard key '" check-key "' not declared")}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-check-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :check check}
+                  (:check node) (assoc :previous-check (:check node)))})]})))
+
 ;; =============================================================================
 ;; Blackboard Commands
 ;; =============================================================================
@@ -473,3 +504,15 @@
                      :status :failure}
               error (assoc :error error)
               duration-ms (assoc :duration-ms duration-ms))})]})
+
+(defcommand :sheet cancel-tick
+  "Cancel a running tick. Prevents further re-ticks."
+  [{{:keys [sheet-id tick-id]} :command
+    :keys [event-store]}]
+  {:command-result/events
+   [(->event
+     {:type :sheet/tick-cancelled
+      :tags #{[:sheet sheet-id]
+              [:tick tick-id]}
+      :body {:sheet-id sheet-id
+             :tick-id tick-id}})]})

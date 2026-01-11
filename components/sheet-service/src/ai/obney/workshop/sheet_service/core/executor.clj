@@ -18,21 +18,35 @@
 
 (def field-type->malli-spec
   "Maps blackboard field types to Malli specs for DSCloj.
-   Using :any for numbers due to Malli validation quirks with composite specs."
+   Using :any for numbers due to Malli validation quirks with composite specs.
+   Note: yesno uses :string because DSCloj's boolean parsing is unreliable."
   {:text     :string
    :number   :any  ;; Could be int, double, or string representation
-   :yesno    :boolean
+   :yesno    :string  ;; Use string "yes"/"no" - DSCloj boolean parsing broken
    :list     [:vector :any]
    :document :string
    :image    :string
    :table    [:vector [:map-of :string :any]]})
 
+(defn- sanitize-field-name
+  "Sanitize field name for DSCloj - remove ? and other problematic chars"
+  [key-name]
+  (-> key-name
+      (clojure.string/replace "?" "")
+      (clojure.string/replace "!" "")
+      (clojure.string/replace #"[^a-zA-Z0-9_-]" "_")))
+
 (defn- build-field
   "Build a DSCloj field definition from a blackboard key and its entry"
   [key-name blackboard-entry]
-  {:name (keyword key-name)
-   :spec (get field-type->malli-spec (:type blackboard-entry) :string)
-   :description (str "Blackboard key: " key-name " (type: " (name (:type blackboard-entry)) ")")})
+  (let [field-type (:type blackboard-entry)
+        safe-name (sanitize-field-name key-name)]
+    {:name (keyword safe-name)
+     :original-key key-name  ;; Keep original for mapping back
+     :spec (get field-type->malli-spec field-type :string)
+     :description (if (= :yesno field-type)
+                    (str "Blackboard key: " key-name " - output 'yes' or 'no'")
+                    (str "Blackboard key: " key-name " (type: " (name field-type) ")"))}))
 
 ;; =============================================================================
 ;; Module Builder
@@ -45,25 +59,31 @@
      node - The leaf node map with :instruction, :reads, :writes
      blackboard - Map of key -> {:key, :type, :value, :version}
 
-   Returns a DSCloj module map with :inputs, :outputs, :instructions"
+   Returns a DSCloj module map with :inputs, :outputs, :instructions
+   and :output-key-mapping for converting sanitized names back to originals"
   [node blackboard]
   (let [inputs (mapv (fn [key-name]
                        (if-let [entry (get blackboard key-name)]
                          (build-field key-name entry)
-                         {:name (keyword key-name)
+                         {:name (keyword (sanitize-field-name key-name))
+                          :original-key key-name
                           :spec :string
                           :description (str "Input: " key-name)}))
                      (:reads node))
         outputs (mapv (fn [key-name]
                         (if-let [entry (get blackboard key-name)]
                           (build-field key-name entry)
-                          {:name (keyword key-name)
+                          {:name (keyword (sanitize-field-name key-name))
+                           :original-key key-name
                            :spec :string
                            :description (str "Output: " key-name)}))
-                      (:writes node))]
+                      (:writes node))
+        ;; Build mapping from sanitized name -> original key
+        output-key-mapping (into {} (map (fn [o] [(name (:name o)) (:original-key o)]) outputs))]
     {:inputs inputs
      :outputs outputs
-     :instructions (or (:instruction node) "Execute this task.")}))
+     :instructions (or (:instruction node) "Execute this task.")
+     :output-key-mapping output-key-mapping}))
 
 (defn gather-inputs
   "Gather input values from the blackboard for the node's reads.
@@ -72,11 +92,11 @@
      node - The leaf node with :reads
      blackboard - Map of key -> {:key, :type, :value, :version}
 
-   Returns a map of keyword -> value for DSCloj"
+   Returns a map of keyword -> value for DSCloj (using sanitized names)"
   [node blackboard]
   (reduce (fn [acc key-name]
             (if-let [entry (get blackboard key-name)]
-              (assoc acc (keyword key-name) (:value entry))
+              (assoc acc (keyword (sanitize-field-name key-name)) (:value entry))
               acc))
           {}
           (:reads node)))
@@ -102,12 +122,17 @@
   [node blackboard provider & {:keys [options] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
         module (build-module node blackboard)
-        inputs (gather-inputs node blackboard)]
+        inputs (gather-inputs node blackboard)
+        output-key-mapping (:output-key-mapping module)
+        ;; Remove the mapping from module before passing to DSCloj
+        dscloj-module (dissoc module :output-key-mapping)]
     (try
-      (let [result (dscloj/predict provider module inputs options)
-            ;; Convert keyword keys back to strings for blackboard
+      (let [result (dscloj/predict provider dscloj-module inputs options)
+            ;; Convert sanitized keys back to original blackboard keys
             outputs (reduce-kv (fn [acc k v]
-                                 (assoc acc (name k) v))
+                                 (let [sanitized-name (name k)
+                                       original-key (get output-key-mapping sanitized-name sanitized-name)]
+                                   (assoc acc original-key v)))
                                {}
                                result)
             duration-ms (- (System/currentTimeMillis) start-time)]
