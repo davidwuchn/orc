@@ -12,7 +12,10 @@
             [store.core :as store]
             [store.auth.effects]
             [store.auth.events]
-            [store.auth.subs]))
+            [store.auth.subs]
+            [store.sheet.effects]
+            [store.sheet.events]
+            [store.sheet.subs]))
 
 (defui app []
   ($ :<>

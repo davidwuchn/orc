@@ -19,6 +19,8 @@
             [ai.obney.workshop.user-service.interface.schemas]
             [ai.obney.workshop.crm-service.interface :as crm-service]
             [ai.obney.workshop.crm-service.interface.schemas]
+            [ai.obney.workshop.sheet-service.interface :as sheet-service]
+            [ai.obney.workshop.sheet-service.interface.schemas]
 
             [clojure.set :as set]
             [com.brunobonacci.mulog :as u]
@@ -154,7 +156,8 @@
                :topics (:topics %)})
    (concat
     (vals user-service/todo-processors)
-    (vals crm-service/todo-processors))))
+    (vals crm-service/todo-processors)
+    (vals sheet-service/todo-processors))))
 
 (defmethod ig/halt-key! ::todo-processors [_ todo-processors]
   (doseq [tp todo-processors]

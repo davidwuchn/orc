@@ -3,6 +3,7 @@
         web-api/web-api {:local/root "../../bases/web-api"}
         web-api/user-service {:local/root "../../components/user-service"}
         web-api/crm-service {:local/root "../../components/crm-service"}
+        web-api/sheet-service {:local/root "../../components/sheet-service"}
 
         web-api/crypto {:local/root "../../components/crypto"}
         web-api/crypto-kms {:local/root "../../components/crypto-kms"}

@@ -34,6 +34,7 @@
                                ;; Services
                                poly/user-service                                {:local/root "components/user-service"}
                                poly/crm-service                                 {:local/root "components/crm-service"}
+                               poly/sheet-service                               {:local/root "components/sheet-service"}
 
                                ;; Bases
                                poly/web-api                                     {:local/root "bases/web-api"}}}

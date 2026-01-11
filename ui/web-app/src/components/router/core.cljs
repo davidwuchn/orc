@@ -7,11 +7,14 @@
             [components.auth.interface :as auth]
             [components.context.interface :as context]
             [store.auth.subs :as auth-subs]
-            [components.home.interface :as home]))
+            [components.home.interface :as home]
+            [components.sheet.interface :as sheet]))
 
 (def routes
   [["/" {:name :root :redirect "/home"}]
    ["/home" {:name :home :view home/main :protected? true}]
+   ["/sheets" {:name :sheets :view sheet/main :protected? true}]
+   ["/sheet" {:name :sheet :view sheet/main :protected? true}]
    ["/auth"
     ["" {:name :auth :view auth/main}]
     ["/*path" {:name :auth-sub :view auth/main}]]])
@@ -67,6 +70,8 @@
   (pushy/start! history))
 
 (defn navigate!
+  "Navigate to a route by name with optional query parameters.
+   Example: (navigate! :sheet {:sheet-id \"abc-123\"})"
   ([route-name]
    (navigate! route-name {}))
   ([route-name params]
@@ -74,7 +79,7 @@
          path (:path route-match)
          query-string (when (seq params)
                         (->> params
-                             (map (fn [[k v]] (str (name k) "=" (js/encodeURIComponent v))))
+                             (map (fn [[k v]] (str (name k) "=" (js/encodeURIComponent (str v)))))
                              (str/join "&")
                              (str "?")))]
      (when path
