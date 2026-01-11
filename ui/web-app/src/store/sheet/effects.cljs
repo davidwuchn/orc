@@ -1,5 +1,5 @@
 (ns store.sheet.effects
-  "Sheet store effects - handles API calls for sheet operations."
+  "Behavior Tree Sheet effects - handles API calls."
   (:require [re-frame.core :as rf]
             [cljs.core.async :refer [go <!]]
             [components.api.interface :as api]
@@ -32,15 +32,18 @@
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
+;; =============================================================================
+;; Sheet Effects
+;; =============================================================================
+
 (rf/reg-fx
   ::create-sheet
-  (fn [{:keys [api-client name description on-success on-failure]}]
+  (fn [{:keys [api-client name on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        (cond-> {:command/name :sheet/create-sheet
-                                                 :name name}
-                                          description (assoc :description description))))]
+                                        {:command/name :sheet/create-sheet
+                                         :name name}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
@@ -71,89 +74,164 @@
             (rf/dispatch (conj on-success response))))))))
 
 ;; =============================================================================
-;; Cell Effects
+;; Node Effects
 ;; =============================================================================
 
 (rf/reg-fx
-  ::create-cell
-  (fn [{:keys [api-client sheet-id address on-success on-failure]}]
+  ::create-node
+  (fn [{:keys [api-client sheet-id node-type parent-id index on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/create-cell
-                                         :sheet-id sheet-id
-                                         :address address}))]
+                                        (cond-> {:command/name :sheet/create-node
+                                                 :sheet-id sheet-id
+                                                 :type node-type}
+                                          parent-id (assoc :parent-id parent-id)
+                                          index (assoc :index index))))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::set-cell-literal
-  (fn [{:keys [api-client sheet-id cell-id fields on-success on-failure]}]
+  ::move-node
+  (fn [{:keys [api-client sheet-id node-id new-parent-id index on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/set-cell-literal
+                                        {:command/name :sheet/move-node
                                          :sheet-id sheet-id
-                                         :cell-id cell-id
-                                         :fields fields}))]
+                                         :node-id node-id
+                                         :new-parent-id new-parent-id
+                                         :index index}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::set-cell-signature
-  (fn [{:keys [api-client sheet-id cell-id signature on-success on-failure]}]
+  ::reorder-node
+  (fn [{:keys [api-client sheet-id node-id index on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/set-cell-signature
+                                        {:command/name :sheet/reorder-node
                                          :sheet-id sheet-id
-                                         :cell-id cell-id
-                                         :signature signature}))]
+                                         :node-id node-id
+                                         :index index}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::bind-input
-  (fn [{:keys [api-client sheet-id cell-id input-name source-cell-id source-field-name on-success on-failure]}]
+  ::delete-node
+  (fn [{:keys [api-client sheet-id node-id on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/bind-input
+                                        {:command/name :sheet/delete-node
                                          :sheet-id sheet-id
-                                         :cell-id cell-id
-                                         :input-name input-name
-                                         :source-cell-id source-cell-id
-                                         :source-field-name source-field-name}))]
+                                         :node-id node-id}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::unbind-input
-  (fn [{:keys [api-client sheet-id cell-id input-name on-success on-failure]}]
+  ::set-node-name
+  (fn [{:keys [api-client sheet-id node-id name on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/unbind-input
+                                        {:command/name :sheet/set-node-name
                                          :sheet-id sheet-id
-                                         :cell-id cell-id
-                                         :input-name input-name}))]
+                                         :node-id node-id
+                                         :name name}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::delete-cell
-  (fn [{:keys [api-client sheet-id cell-id on-success on-failure]}]
+  ::set-node-instruction
+  (fn [{:keys [api-client sheet-id node-id instruction on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/delete-cell
+                                        {:command/name :sheet/set-node-instruction
                                          :sheet-id sheet-id
-                                         :cell-id cell-id}))]
+                                         :node-id node-id
+                                         :instruction instruction}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-node-io
+  (fn [{:keys [api-client sheet-id node-id reads writes on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-node-io
+                                         :sheet-id sheet-id
+                                         :node-id node-id
+                                         :reads reads
+                                         :writes writes}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-node-decorators
+  (fn [{:keys [api-client sheet-id node-id decorators on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-node-decorators
+                                         :sheet-id sheet-id
+                                         :node-id node-id
+                                         :decorators decorators}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+;; =============================================================================
+;; Blackboard Effects
+;; =============================================================================
+
+(rf/reg-fx
+  ::declare-key
+  (fn [{:keys [api-client sheet-id key type on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/declare-key
+                                         :sheet-id sheet-id
+                                         :key key
+                                         :type type}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-key-value
+  (fn [{:keys [api-client sheet-id key value on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-key-value
+                                         :sheet-id sheet-id
+                                         :key key
+                                         :value value}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::delete-key
+  (fn [{:keys [api-client sheet-id key on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/delete-key
+                                         :sheet-id sheet-id
+                                         :key key}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
@@ -163,28 +241,27 @@
 ;; =============================================================================
 
 (rf/reg-fx
-  ::request-execution
-  (fn [{:keys [api-client sheet-id cell-id on-success on-failure]}]
+  ::tick-tree
+  (fn [{:keys [api-client sheet-id on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/request-cell-execution
-                                         :sheet-id sheet-id
-                                         :cell-id cell-id}))]
+                                        {:command/name :sheet/tick-tree
+                                         :sheet-id sheet-id}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
-  ::cancel-execution
-  (fn [{:keys [api-client sheet-id execution-id on-success on-failure]}]
+  ::tick-node
+  (fn [{:keys [api-client sheet-id node-id overrides on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
-                                        {:command/name :sheet/cancel-cell-execution
-                                         :sheet-id sheet-id
-                                         :execution-id execution-id}))]
+                                        (cond-> {:command/name :sheet/tick-node
+                                                 :sheet-id sheet-id
+                                                 :node-id node-id}
+                                          overrides (assoc :overrides overrides))))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
-

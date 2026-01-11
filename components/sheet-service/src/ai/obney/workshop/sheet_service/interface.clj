@@ -1,5 +1,5 @@
 (ns ai.obney.workshop.sheet-service.interface
-  "Sheet Service public interface.
+  "Behavior Tree Sheet Service public interface.
 
    This namespace loads all core modules for side-effect registration
    and re-exports the public API."
@@ -11,10 +11,8 @@
             ;; Re-export from interface sub-namespaces
             [ai.obney.workshop.sheet-service.interface.todo-processors :as tp]
             [ai.obney.workshop.sheet-service.interface.read-models :as rm]
-            ;; Agent runtime for custom configurations
-            [ai.obney.workshop.sheet-service.core.agent-runtime :as agent]
-            ;; Dependency graph utilities
-            [ai.obney.workshop.sheet-service.core.dependency-graph :as dg]))
+            ;; Tree layout utilities
+            [ai.obney.workshop.sheet-service.core.tree-layout :as layout]))
 
 ;; =============================================================================
 ;; Todo Processors
@@ -26,33 +24,28 @@
 ;; Read Models
 ;; =============================================================================
 
+;; Sheet functions
 (def get-sheet rm/get-sheet)
 (def get-sheets-all rm/get-sheets-all)
-(def get-cell rm/get-cell)
-(def get-cells-for-sheet rm/get-cells-for-sheet)
-(def get-dependency-graph-for-sheet rm/get-dependency-graph-for-sheet)
-(def get-dependent-cells rm/get-dependent-cells)
-(def get-execution rm/get-execution)
-(def get-executions-for-cell rm/get-executions-for-cell)
-(def get-executions-for-sheet rm/get-executions-for-sheet)
-(def get-sheet-view rm/get-sheet-view)
+
+;; Node functions
+(def get-node rm/get-node)
+(def get-nodes-for-sheet rm/get-nodes-for-sheet)
+(def get-nodes-by-id rm/get-nodes-by-id)
+(def get-root-node rm/get-root-node)
+(def get-children rm/get-children)
+(def get-descendants rm/get-descendants)
+
+;; Blackboard functions
+(def get-blackboard-for-sheet rm/get-blackboard-for-sheet)
+(def get-blackboard-by-key rm/get-blackboard-by-key)
+
+;; Tick functions
+(def get-tick rm/get-tick)
 
 ;; =============================================================================
-;; Agent Runtime
+;; Tree Layout
 ;; =============================================================================
 
-(def create-mock-runtime agent/create-mock-runtime)
-(def create-configurable-runtime agent/create-configurable-runtime)
-(def create-echo-runtime agent/create-echo-runtime)
-
-;; =============================================================================
-;; Dependency Graph Utilities
-;; =============================================================================
-
-(def would-create-cycle? dg/would-create-cycle?)
-(def find-cycles dg/find-cycles)
-(def has-cycles? dg/has-cycles?)
-(def topological-sort dg/topological-sort)
-(def all-inputs-bound? dg/all-inputs-bound?)
-(def is-eligible-for-execution? dg/is-eligible-for-execution?)
-(def is-gate-cell? dg/is-gate-cell?)
+(def compute-layout layout/compute-layout)
+(def compute-tree-depth layout/compute-tree-depth)

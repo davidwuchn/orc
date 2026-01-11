@@ -1,5 +1,5 @@
 (ns store.sheet.subs
-  "Sheet store subscriptions - derived state for sheet views."
+  "Behavior Tree Sheet subscriptions - derived state for tree views."
   (:require [re-frame.core :as rf]))
 
 ;; =============================================================================
@@ -45,122 +45,169 @@
   (fn [db _]
     (get-in db [:sheet :error])))
 
-;; =============================================================================
-;; Cells Subscriptions
-;; =============================================================================
-
 (rf/reg-sub
-  ::cells
+  ::sheet-ticking?
   (fn [db _]
-    (get-in db [:sheet :cells] {})))
+    (get-in db [:sheet :ticking?] false)))
+
+;; =============================================================================
+;; Nodes Subscriptions
+;; =============================================================================
 
 (rf/reg-sub
-  ::cells-list
-  :<- [::cells]
-  (fn [cells _]
-    (vals cells)))
-
-(rf/reg-sub
-  ::cell
-  :<- [::cells]
-  (fn [cells [_ cell-id]]
-    (get cells cell-id)))
-
-(rf/reg-sub
-  ::selected-cell-id
+  ::nodes
   (fn [db _]
-    (get-in db [:sheet :selected-cell-id])))
+    (get-in db [:sheet :nodes] {})))
 
 (rf/reg-sub
-  ::selected-cell
-  :<- [::cells]
-  :<- [::selected-cell-id]
-  (fn [[cells selected-id] _]
+  ::nodes-list
+  :<- [::nodes]
+  (fn [nodes _]
+    (vals nodes)))
+
+(rf/reg-sub
+  ::node
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (get nodes node-id)))
+
+(rf/reg-sub
+  ::root-node
+  :<- [::sheet]
+  :<- [::nodes]
+  (fn [[sheet nodes] _]
+    (when-let [root-id (:root-node-id sheet)]
+      (get nodes root-id))))
+
+(rf/reg-sub
+  ::selected-node-id
+  (fn [db _]
+    (get-in db [:sheet :selected-node-id])))
+
+(rf/reg-sub
+  ::selected-node
+  :<- [::nodes]
+  :<- [::selected-node-id]
+  (fn [[nodes selected-id] _]
     (when selected-id
-      (get cells selected-id))))
-
-;; =============================================================================
-;; Dependency Graph Subscriptions
-;; =============================================================================
+      (get nodes selected-id))))
 
 (rf/reg-sub
-  ::dependency-graph
+  ::editing-node-id
   (fn [db _]
-    (get-in db [:sheet :dependency-graph] {:nodes {} :edges #{}})))
-
-(rf/reg-sub
-  ::cell-dependents
-  :<- [::dependency-graph]
-  (fn [graph [_ cell-id]]
-    (->> (:edges graph)
-         (filter #(= (:from %) cell-id))
-         (map :to)
-         set)))
-
-(rf/reg-sub
-  ::cell-dependencies
-  :<- [::dependency-graph]
-  (fn [graph [_ cell-id]]
-    (->> (:edges graph)
-         (filter #(= (:to %) cell-id))
-         (map :from)
-         set)))
+    (get-in db [:sheet :editing-node-id])))
 
 ;; =============================================================================
-;; Cell Grid Subscriptions (for rendering)
+;; Tree Layout Subscriptions
 ;; =============================================================================
 
 (rf/reg-sub
-  ::cells-by-address
-  :<- [::cells-list]
-  (fn [cells _]
-    (into {} (map (juxt :address identity) cells))))
+  ::layout
+  (fn [db _]
+    (get-in db [:sheet :layout] [])))
 
 (rf/reg-sub
-  ::grid-bounds
-  :<- [::cells-list]
-  (fn [cells _]
-    "Calculate the min/max row and column bounds for the grid."
-    (if (empty? cells)
-      {:min-col "A" :max-col "E" :min-row 1 :max-row 10}
-      (let [addresses (map :address cells)
-            parse-address (fn [addr]
-                            (let [[_ col row] (re-matches #"([A-Z]+)(\d+)" addr)]
-                              {:col col :row (js/parseInt row)}))
-            parsed (map parse-address addresses)
-            cols (map :col parsed)
-            rows (map :row parsed)]
-        {:min-col (apply min-key identity cols)
-         :max-col (apply max-key identity cols)
-         :min-row (apply min rows)
-         :max-row (apply max rows)}))))
+  ::layout-by-node-id
+  :<- [::layout]
+  (fn [layout _]
+    (into {} (map (juxt :node-id identity) layout))))
+
+(rf/reg-sub
+  ::tree-depth
+  :<- [::layout]
+  (fn [layout _]
+    (if (empty? layout)
+      0
+      (inc (apply max (map :row layout))))))
+
+(rf/reg-sub
+  ::grid-dimensions
+  :<- [::tree-depth]
+  (fn [depth _]
+    {:rows (max 1 depth)
+     :cols 12})) ;; Default 12 columns for grid
 
 ;; =============================================================================
-;; Cell Status Helpers
+;; Blackboard Subscriptions
 ;; =============================================================================
 
 (rf/reg-sub
-  ::cell-is-formula?
-  :<- [::cells]
-  (fn [cells [_ cell-id]]
-    (some? (get-in cells [cell-id :signature]))))
+  ::blackboard
+  (fn [db _]
+    (get-in db [:sheet :blackboard] {})))
 
 (rf/reg-sub
-  ::cell-is-executing?
-  :<- [::cells]
-  (fn [cells [_ cell-id]]
-    (= :running (get-in cells [cell-id :execution-status]))))
+  ::blackboard-list
+  :<- [::blackboard]
+  (fn [blackboard _]
+    (vals blackboard)))
 
 (rf/reg-sub
-  ::cell-can-execute?
-  :<- [::cells]
-  (fn [cells [_ cell-id]]
-    (let [cell (get cells cell-id)]
-      (and (:signature cell)
-           (let [required-inputs (set (map :name (get-in cell [:signature :inputs])))
-                 bound-inputs (set (keys (:input-bindings cell)))]
-             (every? bound-inputs required-inputs))
-           (not= :running (:execution-status cell))))))
+  ::blackboard-entry
+  :<- [::blackboard]
+  (fn [blackboard [_ key]]
+    (get blackboard key)))
+
+(rf/reg-sub
+  ::blackboard-keys
+  :<- [::blackboard]
+  (fn [blackboard _]
+    (keys blackboard)))
+
+;; =============================================================================
+;; Node Status Helpers
+;; =============================================================================
+
+(rf/reg-sub
+  ::node-is-leaf?
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (= :leaf (get-in nodes [node-id :type]))))
+
+(rf/reg-sub
+  ::node-is-running?
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (= :running (get-in nodes [node-id :status]))))
+
+(rf/reg-sub
+  ::node-can-tick?
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (let [node (get nodes node-id)]
+      (and (= :leaf (:type node))
+           (some? (:instruction node))
+           (not= :running (:status node))))))
+
+(rf/reg-sub
+  ::node-children
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (let [node (get nodes node-id)]
+      (mapv #(get nodes %) (:children-ids node)))))
+
+;; =============================================================================
+;; Node IO (reads/writes) Helpers
+;; =============================================================================
+
+(rf/reg-sub
+  ::node-reads
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (get-in nodes [node-id :reads] [])))
+
+(rf/reg-sub
+  ::node-writes
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (get-in nodes [node-id :writes] [])))
+
+(rf/reg-sub
+  ::keys-used-by-node
+  :<- [::nodes]
+  (fn [nodes [_ node-id]]
+    (let [node (get nodes node-id)]
+      (set (concat (:reads node) (:writes node))))))
 
 ;; =============================================================================
 ;; Field Type Options
@@ -171,26 +218,29 @@
   (fn [_ _]
     [{:value :text :label "Text"}
      {:value :number :label "Number"}
+     {:value :yesno :label "Yes/No"}
      {:value :list :label "List"}
      {:value :document :label "Document"}
      {:value :image :label "Image"}
-     {:value :table :label "Table"}
-     {:value :yes-no :label "Yes/No"}]))
+     {:value :table :label "Table"}]))
+
+(rf/reg-sub
+  ::node-types
+  (fn [_ _]
+    [{:value :leaf :label "Leaf" :description "Executes an instruction"}
+     {:value :sequence :label "Sequence" :description "Runs children until one fails"}
+     {:value :fallback :label "Fallback" :description "Runs children until one succeeds"}]))
 
 ;; =============================================================================
-;; Available Source Cells (for binding inputs)
+;; Status Color Mapping
 ;; =============================================================================
 
 (rf/reg-sub
-  ::available-source-cells
-  :<- [::cells-list]
-  :<- [::selected-cell-id]
-  (fn [[cells selected-id] _]
-    "Get cells that can be used as input sources (excludes selected cell)."
-    (->> cells
-         (remove #(= (:id %) selected-id))
-         (filter #(seq (:fields %)))  ;; Only cells with fields
-         (map (fn [cell]
-                {:cell-id (:id cell)
-                 :address (:address cell)
-                 :fields (keys (:fields cell))})))))
+  ::status-color
+  (fn [_ [_ status]]
+    (case status
+      :idle "gray"
+      :running "blue"
+      :success "green"
+      :failure "red"
+      "gray")))

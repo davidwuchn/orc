@@ -1,196 +1,339 @@
 (ns ai.obney.workshop.sheet-service.core.todo-processors
-  "Sheet Service todo processors (policies).
+  "Behavior Tree Sheet todo processors (policies).
 
-   These are event-driven side effects that respond to domain events
-   and trigger follow-up commands:
-   - Cascade execution when upstream cells change
-   - Check eligibility when inputs are bound
-   - Execute cells when requested"
+   These are event-driven side effects that respond to domain events:
+   - Execute leaf nodes when tree tick starts
+   - Handle sequence/fallback composite node logic
+   - Update blackboard with node outputs"
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
-            [ai.obney.workshop.sheet-service.core.dependency-graph :as dg]
-            [ai.obney.workshop.sheet-service.core.agent-runtime :as agent]
             [ai.obney.grain.event-store-v2.interface :refer [->event]]))
 
 ;; =============================================================================
-;; Helper Functions
+;; Tick Execution Processor
 ;; =============================================================================
 
-(defn resolve-inputs
-  "Resolve input values from bound source cells.
-   Returns a map of input-name -> field-value."
-  [event-store sheet-id cell]
-  (reduce-kv
-   (fn [acc input-name binding]
-     (let [source-cell (rm/get-cell event-store sheet-id (:source-cell-id binding))
-           field-value (get-in source-cell [:fields (:source-field-name binding)])]
-       (assoc acc input-name (or field-value {:type :text :value nil}))))
-   {}
-   (:input-bindings cell)))
-
-(defn should-continue-cycle?
-  "Check if a completed gate cell indicates the cycle should continue.
-   Returns true if the yes-no output is true, false otherwise."
-  [cell outputs]
-  (when (dg/is-gate-cell? cell)
-    (let [yes-no-output (some (fn [[name value]]
-                                (when (= :yes-no (:type value))
-                                  value))
-                              outputs)]
-      (true? (:value yes-no-output)))))
-
-;; =============================================================================
-;; Cascade Trigger Processor
-;; =============================================================================
-
-(defn trigger-downstream-cells
-  "When a cell's value changes, find and trigger eligible downstream cells.
-   Called when:
-   - A literal cell's value is set
-   - A formula cell completes execution
-
-   For gate cells with yes-no output:
-   - If value is true, re-trigger cycle (handled by normal propagation)
-   - If value is false, stop cycling"
+(defn execute-tree-tick
+  "When a tree tick starts, begin executing from the root node.
+   This initiates the tick by starting execution on the root."
   [{:keys [event event-store]}]
   (let [sheet-id (:sheet-id event)
-        cell-id (:cell-id event)
-        dep-graph (rm/get-dependency-graph-for-sheet event-store sheet-id)
-        cells-map (into {} (map (juxt :id identity)
-                                (rm/get-cells-for-sheet event-store sheet-id)))
-        ;; Get direct dependents that are eligible for execution
-        eligible-dependents (dg/get-eligible-dependents dep-graph cells-map cell-id)]
-    (if (seq eligible-dependents)
-      {:result/events
-       (mapv (fn [dep-id]
-               (let [cell (get cells-map dep-id)
-                     exec-id (random-uuid)
-                     inputs (resolve-inputs event-store sheet-id cell)]
-                 (->event
-                  {:type :sheet/cell-execution-requested
-                   :tags #{[:sheet sheet-id]
-                           [:cell dep-id]
-                           [:execution exec-id]}
-                   :body {:sheet-id sheet-id
-                          :cell-id dep-id
-                          :execution-id exec-id
-                          :inputs inputs
-                          :signature (:signature cell)}})))
-             eligible-dependents)}
-      {})))
-
-;; =============================================================================
-;; Eligibility Check Processor
-;; =============================================================================
-
-(defn check-execution-eligibility
-  "When inputs are bound or signature is set, check if cell is ready to execute.
-   If the cell has a signature, all inputs are bound, and it's idle, trigger execution."
-  [{:keys [event event-store]}]
-  (let [sheet-id (:sheet-id event)
-        cell-id (:cell-id event)
-        cell (rm/get-cell event-store sheet-id cell-id)]
-    (when (and (:signature cell)
-               (dg/all-inputs-bound? cell)
-               (= :idle (:execution-status cell)))
-      (let [exec-id (random-uuid)
-            inputs (resolve-inputs event-store sheet-id cell)]
+        tick-id (:tick-id event)
+        sheet (rm/get-sheet event-store sheet-id)
+        root-id (:root-node-id sheet)
+        root-node (when root-id (rm/get-node event-store sheet-id root-id))]
+    (when root-node
+      (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
+            ;; For leaf nodes, gather inputs from blackboard
+            inputs (if (= :leaf (:type root-node))
+                     (reduce (fn [acc k]
+                               (if-let [entry (get blackboard k)]
+                                 (assoc acc k (:value entry))
+                                 acc))
+                             {}
+                             (:reads root-node))
+                     {})]
         {:result/events
          [(->event
-           {:type :sheet/cell-execution-requested
+           {:type :sheet/node-execution-started
             :tags #{[:sheet sheet-id]
-                    [:cell cell-id]
-                    [:execution exec-id]}
+                    [:node root-id]
+                    [:tick tick-id]}
             :body {:sheet-id sheet-id
-                   :cell-id cell-id
-                   :execution-id exec-id
-                   :inputs inputs
-                   :signature (:signature cell)}})]}))))
+                   :tick-id tick-id
+                   :node-id root-id
+                   :inputs inputs}})]}))))
 
 ;; =============================================================================
-;; Cell Executor Processor
+;; Node Execution Processor
 ;; =============================================================================
 
-(defn execute-cell-with-agent
-  "Execute a formula cell using the agent runtime.
-   This processor handles the actual agent invocation."
-  [{:keys [event event-store agent-runtime]}]
+(defn execute-leaf-node
+  "Execute a leaf node when node-execution-started is emitted.
+   For now, this is a mock execution that returns success.
+   In a real implementation, this would invoke an AI agent."
+  [{:keys [event event-store]}]
   (let [sheet-id (:sheet-id event)
-        cell-id (:cell-id event)
-        execution-id (:execution-id event)
-        inputs (:inputs event)
-        signature (:signature event)
-        ;; Use provided runtime or create a mock one
-        runtime (or agent-runtime (agent/create-mock-runtime))
-        start-time (System/currentTimeMillis)]
-    (try
-      (let [outputs (agent/execute runtime signature inputs)
+        tick-id (:tick-id event)
+        node-id (:node-id event)
+        node (rm/get-node event-store sheet-id node-id)]
+    (when (= :leaf (:type node))
+      ;; Mock execution - in real implementation, invoke AI agent here
+      (let [start-time (System/currentTimeMillis)
+            ;; Simulate some outputs based on writes
+            mock-outputs (into {}
+                               (map (fn [k] [k (str "mock-value-for-" k)])
+                                    (:writes node)))
             duration-ms (- (System/currentTimeMillis) start-time)]
         {:result/events
          [(->event
-           {:type :sheet/cell-execution-completed
+           {:type :sheet/node-execution-completed
             :tags #{[:sheet sheet-id]
-                    [:cell cell-id]
-                    [:execution execution-id]
-                    [:cell-data cell-id]}
-            :body {:sheet-id sheet-id
-                   :cell-id cell-id
-                   :execution-id execution-id
-                   :outputs outputs
-                   :duration-ms duration-ms}})]})
-      (catch Exception e
-        (let [duration-ms (- (System/currentTimeMillis) start-time)]
+                    [:node node-id]
+                    [:tick tick-id]}
+            :body (cond-> {:sheet-id sheet-id
+                           :tick-id tick-id
+                           :node-id node-id
+                           :status :success}
+                    (seq mock-outputs) (assoc :writes mock-outputs)
+                    true (assoc :duration-ms duration-ms))})]}))))
+
+;; =============================================================================
+;; Composite Node Execution Processor
+;; =============================================================================
+
+(defn execute-composite-node
+  "Handle execution of sequence/fallback nodes.
+   When started, begin executing the first child.
+   When a child completes, decide whether to continue or finish."
+  [{:keys [event event-store]}]
+  (let [sheet-id (:sheet-id event)
+        tick-id (:tick-id event)
+        node-id (:node-id event)
+        ;; Use get-nodes-by-id to get proper parent-child relationships
+        nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
+        node (get nodes-by-id node-id)]
+    (when (#{:sequence :fallback} (:type node))
+      (let [children-ids (:children-ids node)]
+        (if (empty? children-ids)
+          ;; No children - sequence succeeds, fallback fails
           {:result/events
            [(->event
-             {:type :sheet/cell-execution-failed
+             {:type :sheet/node-execution-completed
               :tags #{[:sheet sheet-id]
-                      [:cell cell-id]
-                      [:execution execution-id]}
+                      [:node node-id]
+                      [:tick tick-id]}
               :body {:sheet-id sheet-id
-                     :cell-id cell-id
-                     :execution-id execution-id
-                     :error (or (.getMessage e) "Unknown error")
-                     :duration-ms duration-ms}})]})))))
+                     :tick-id tick-id
+                     :node-id node-id
+                     :status (if (= :sequence (:type node)) :success :failure)}})]}
+          ;; Start first child
+          (let [first-child-id (first children-ids)
+                first-child (get nodes-by-id first-child-id)
+                blackboard (rm/get-blackboard-by-key event-store sheet-id)
+                inputs (if (= :leaf (:type first-child))
+                         (reduce (fn [acc k]
+                                   (if-let [entry (get blackboard k)]
+                                     (assoc acc k (:value entry))
+                                     acc))
+                                 {}
+                                 (:reads first-child))
+                         {})]
+            {:result/events
+             [(->event
+               {:type :sheet/node-execution-started
+                :tags #{[:sheet sheet-id]
+                        [:node first-child-id]
+                        [:tick tick-id]}
+                :body {:sheet-id sheet-id
+                       :tick-id tick-id
+                       :node-id first-child-id
+                       :inputs inputs}})]}))))))
 
 ;; =============================================================================
-;; Signature Change Handler
+;; Child Completion Handler
 ;; =============================================================================
 
-(defn handle-signature-change
-  "When a cell's signature changes and it has an in-flight execution,
-   the result is no longer relevant. This could trigger a cancellation.
-   For now, we just let the execution complete and the result will be
-   applied to the new signature (which may produce mismatched outputs)."
+(defn handle-child-completion
+  "When a child node completes, handle the parent's logic.
+   For sequences: continue on success, fail on failure.
+   For fallbacks: succeed on success, continue on failure."
   [{:keys [event event-store]}]
-  ;; TODO: Consider implementing cancellation when signature changes mid-execution
-  ;; For now, we rely on the fact that execution results are validated against
-  ;; the current signature when applied
-  {})
+  (let [sheet-id (:sheet-id event)
+        tick-id (:tick-id event)
+        child-id (:node-id event)
+        child-status (:status event)
+        ;; Use get-nodes-by-id to get proper parent-child relationships
+        nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
+        child (get nodes-by-id child-id)
+        parent-id (:parent-id child)]
+    (when parent-id
+      (let [parent (get nodes-by-id parent-id)
+            siblings (:children-ids parent)
+            child-index (.indexOf (vec siblings) child-id)
+            next-child-id (get (vec siblings) (inc child-index))
+            blackboard (rm/get-blackboard-by-key event-store sheet-id)]
+        (case (:type parent)
+          :sequence
+          (case child-status
+            :success
+            (if next-child-id
+              ;; Continue to next child
+              (let [next-child (get nodes-by-id next-child-id)
+                    inputs (if (= :leaf (:type next-child))
+                             (reduce (fn [acc k]
+                                       (if-let [entry (get blackboard k)]
+                                         (assoc acc k (:value entry))
+                                         acc))
+                                     {}
+                                     (:reads next-child))
+                             {})]
+                {:result/events
+                 [(->event
+                   {:type :sheet/node-execution-started
+                    :tags #{[:sheet sheet-id]
+                            [:node next-child-id]
+                            [:tick tick-id]}
+                    :body {:sheet-id sheet-id
+                           :tick-id tick-id
+                           :node-id next-child-id
+                           :inputs inputs}})]})
+              ;; All children succeeded - sequence succeeds
+              {:result/events
+               [(->event
+                 {:type :sheet/node-execution-completed
+                  :tags #{[:sheet sheet-id]
+                          [:node parent-id]
+                          [:tick tick-id]}
+                  :body {:sheet-id sheet-id
+                         :tick-id tick-id
+                         :node-id parent-id
+                         :status :success}})]})
+            :failure
+            ;; Child failed - sequence fails
+            {:result/events
+             [(->event
+               {:type :sheet/node-execution-completed
+                :tags #{[:sheet sheet-id]
+                        [:node parent-id]
+                        [:tick tick-id]}
+                :body {:sheet-id sheet-id
+                       :tick-id tick-id
+                       :node-id parent-id
+                       :status :failure}})]}
+            ;; :running - do nothing, wait
+            nil)
+
+          :fallback
+          (case child-status
+            :success
+            ;; Child succeeded - fallback succeeds
+            {:result/events
+             [(->event
+               {:type :sheet/node-execution-completed
+                :tags #{[:sheet sheet-id]
+                        [:node parent-id]
+                        [:tick tick-id]}
+                :body {:sheet-id sheet-id
+                       :tick-id tick-id
+                       :node-id parent-id
+                       :status :success}})]}
+            :failure
+            (if next-child-id
+              ;; Continue to next child
+              (let [next-child (get nodes-by-id next-child-id)
+                    inputs (if (= :leaf (:type next-child))
+                             (reduce (fn [acc k]
+                                       (if-let [entry (get blackboard k)]
+                                         (assoc acc k (:value entry))
+                                         acc))
+                                     {}
+                                     (:reads next-child))
+                             {})]
+                {:result/events
+                 [(->event
+                   {:type :sheet/node-execution-started
+                    :tags #{[:sheet sheet-id]
+                            [:node next-child-id]
+                            [:tick tick-id]}
+                    :body {:sheet-id sheet-id
+                           :tick-id tick-id
+                           :node-id next-child-id
+                           :inputs inputs}})]})
+              ;; All children failed - fallback fails
+              {:result/events
+               [(->event
+                 {:type :sheet/node-execution-completed
+                  :tags #{[:sheet sheet-id]
+                          [:node parent-id]
+                          [:tick tick-id]}
+                  :body {:sheet-id sheet-id
+                         :tick-id tick-id
+                         :node-id parent-id
+                         :status :failure}})]})
+            ;; :running - do nothing, wait
+            nil)
+
+          ;; Unknown parent type
+          nil)))))
+
+;; =============================================================================
+;; Blackboard Update Processor
+;; =============================================================================
+
+(defn update-blackboard-on-completion
+  "When a node completes with writes, update the blackboard."
+  [{:keys [event event-store]}]
+  (let [sheet-id (:sheet-id event)
+        writes (:writes event)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)]
+    (when (seq writes)
+      {:result/events
+       (vec
+        (for [[k v] writes
+              :let [entry (get blackboard k)]
+              :when entry]
+          (->event
+           {:type :sheet/key-value-set
+            :tags #{[:sheet sheet-id]}
+            :body {:sheet-id sheet-id
+                   :key k
+                   :value v
+                   :version (inc (:version entry))}})))})))
+
+;; =============================================================================
+;; Tree Tick Completion
+;; =============================================================================
+
+(defn complete-tree-tick
+  "When the root node completes, complete the tree tick."
+  [{:keys [event event-store]}]
+  (let [sheet-id (:sheet-id event)
+        tick-id (:tick-id event)
+        node-id (:node-id event)
+        status (:status event)
+        sheet (rm/get-sheet event-store sheet-id)]
+    (when (= node-id (:root-node-id sheet))
+      {:result/events
+       [(->event
+         {:type :sheet/tree-tick-completed
+          :tags #{[:sheet sheet-id]
+                  [:tick tick-id]}
+          :body {:sheet-id sheet-id
+                 :tick-id tick-id
+                 :root-status status}})]})))
 
 ;; =============================================================================
 ;; Todo Processor Registry
 ;; =============================================================================
 
 (def todo-processors
-  "Registry of todo processors for the sheet service."
-  {;; Trigger downstream cells when values change
-   :sheet/trigger-downstream-on-literal
-   {:handler-fn #'trigger-downstream-cells
-    :topics [:sheet/cell-literal-set]}
+  "Registry of todo processors for the behavior tree sheet service."
+  {;; Start tick execution
+   :sheet/start-tree-tick
+   {:handler-fn #'execute-tree-tick
+    :topics [:sheet/tree-tick-started]}
 
-   :sheet/trigger-downstream-on-completion
-   {:handler-fn #'trigger-downstream-cells
-    :topics [:sheet/cell-execution-completed]}
+   ;; Execute leaf nodes
+   :sheet/execute-leaf-node
+   {:handler-fn #'execute-leaf-node
+    :topics [:sheet/node-execution-started]}
 
-   ;; Check if cell becomes eligible for execution
-   :sheet/check-eligibility-on-bind
-   {:handler-fn #'check-execution-eligibility
-    :topics [:sheet/input-bound]}
+   ;; Execute composite nodes
+   :sheet/execute-composite-node
+   {:handler-fn #'execute-composite-node
+    :topics [:sheet/node-execution-started]}
 
-   :sheet/check-eligibility-on-signature
-   {:handler-fn #'check-execution-eligibility
-    :topics [:sheet/cell-signature-defined]}
+   ;; Handle child completion
+   :sheet/handle-child-completion
+   {:handler-fn #'handle-child-completion
+    :topics [:sheet/node-execution-completed]}
 
-   ;; Execute cells when requested
-   :sheet/execute-cell
-   {:handler-fn #'execute-cell-with-agent
-    :topics [:sheet/cell-execution-requested]}})
+   ;; Update blackboard
+   :sheet/update-blackboard
+   {:handler-fn #'update-blackboard-on-completion
+    :topics [:sheet/node-execution-completed]}
+
+   ;; Complete tree tick
+   :sheet/complete-tree-tick
+   {:handler-fn #'complete-tree-tick
+    :topics [:sheet/node-execution-completed]}})

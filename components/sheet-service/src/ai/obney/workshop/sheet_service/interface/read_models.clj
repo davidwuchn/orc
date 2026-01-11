@@ -1,8 +1,11 @@
 (ns ai.obney.workshop.sheet-service.interface.read-models
-  "Public interface for sheet service read models."
+  "Public interface for behavior tree sheet service read models."
   (:require [ai.obney.workshop.sheet-service.core.read-models :as core]))
 
-;; Sheet read model functions
+;; =============================================================================
+;; Sheet Read Model Functions
+;; =============================================================================
+
 (defn get-sheet
   "Get a single sheet by ID"
   [event-store sheet-id]
@@ -13,46 +16,59 @@
   [event-store]
   (core/get-sheets-all event-store))
 
-;; Cell read model functions
-(defn get-cell
-  "Get a single cell by ID"
-  [event-store sheet-id cell-id]
-  (core/get-cell event-store sheet-id cell-id))
+;; =============================================================================
+;; Node Read Model Functions
+;; =============================================================================
 
-(defn get-cells-for-sheet
-  "Get all cells in a sheet"
+(defn get-node
+  "Get a single node by ID"
+  [event-store sheet-id node-id]
+  (core/get-node event-store sheet-id node-id))
+
+(defn get-nodes-for-sheet
+  "Get all nodes in a sheet"
   [event-store sheet-id]
-  (core/get-cells-for-sheet event-store sheet-id))
+  (core/get-nodes-for-sheet event-store sheet-id))
 
-;; Dependency graph functions
-(defn get-dependency-graph-for-sheet
-  "Get the dependency graph for a sheet"
+(defn get-nodes-by-id
+  "Get all nodes in a sheet as a map keyed by node-id"
   [event-store sheet-id]
-  (core/get-dependency-graph-for-sheet event-store sheet-id))
+  (core/get-nodes-by-id event-store sheet-id))
 
-(defn get-dependent-cells
-  "Get cells that depend on the given cell"
-  [event-store sheet-id cell-id]
-  (core/get-dependent-cells event-store sheet-id cell-id))
-
-;; Execution read model functions
-(defn get-execution
-  "Get a single execution by ID"
-  [event-store execution-id]
-  (core/get-execution event-store execution-id))
-
-(defn get-executions-for-cell
-  "Get all executions for a cell"
-  [event-store cell-id]
-  (core/get-executions-for-cell event-store cell-id))
-
-(defn get-executions-for-sheet
-  "Get all executions in a sheet"
+(defn get-root-node
+  "Get the root node for a sheet"
   [event-store sheet-id]
-  (core/get-executions-for-sheet event-store sheet-id))
+  (core/get-root-node event-store sheet-id))
 
-;; Complete view
-(defn get-sheet-view
-  "Get complete sheet view with all cells and dependency graph"
+(defn get-children
+  "Get child nodes of a parent node"
+  [event-store sheet-id parent-id]
+  (core/get-children event-store sheet-id parent-id))
+
+(defn get-descendants
+  "Get all descendant nodes of a node (recursive)"
+  [event-store sheet-id node-id]
+  (core/get-descendants event-store sheet-id node-id))
+
+;; =============================================================================
+;; Blackboard Read Model Functions
+;; =============================================================================
+
+(defn get-blackboard-for-sheet
+  "Get the blackboard for a sheet as a list of entries"
   [event-store sheet-id]
-  (core/get-sheet-view event-store sheet-id))
+  (core/get-blackboard-for-sheet event-store sheet-id))
+
+(defn get-blackboard-by-key
+  "Get the blackboard for a sheet as a map keyed by key name"
+  [event-store sheet-id]
+  (core/get-blackboard-by-key event-store sheet-id))
+
+;; =============================================================================
+;; Tick Read Model Functions
+;; =============================================================================
+
+(defn get-tick
+  "Get a single tick by ID"
+  [event-store tick-id]
+  (core/get-tick event-store tick-id))

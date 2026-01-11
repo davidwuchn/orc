@@ -1,55 +1,48 @@
 (ns ai.obney.workshop.sheet-service.interface.schemas
-  "Sheet Service schemas for cells, formulas, and agent orchestration.
+  "Behavior Tree Sheet schemas.
 
-   This is a spreadsheet-based system for orchestrating AI agents.
-   Cells contain either literal values or agent formulas.
-   Dependencies between cells form a DAG with controlled cycles via gate cells."
+   This is a behavior tree visualization system where:
+   - The grid represents a tree (rows = depth levels, cells subdivide horizontally)
+   - Nodes are leaf (execute), sequence (run all until failure), or fallback (run until success)
+   - Data flows through a shared blackboard
+   - Nodes return status: success, failure, or running"
   (:require [ai.obney.grain.schema-util.interface :refer [defschemas]]))
 
 ;; =============================================================================
-;; Domain Schemas
+;; Domain Enums
 ;; =============================================================================
 
+(def node-type
+  "Behavior tree node types"
+  [:enum :leaf :sequence :fallback])
+
+(def node-status
+  "Node execution status"
+  [:enum :idle :running :success :failure])
+
 (def field-type
-  "Supported field types for cell values"
-  [:enum :text :number :list :document :image :table :yes-no])
+  "Supported field types for blackboard values"
+  [:enum :text :number :yesno :list :document :image :table])
+
+(def decorator-type
+  "Decorator types that modify node behavior"
+  [:enum :retry :timeout :repeat])
+
+;; =============================================================================
+;; Domain Value Objects
+;; =============================================================================
+
+(def decorator
+  "Decorator that modifies node execution behavior"
+  [:map
+   [:type decorator-type]
+   [:config :map]])
 
 (def field-value
-  "A typed field value"
+  "A typed field value for blackboard entries"
   [:map
    [:type field-type]
    [:value :any]])
-
-(def field-definition
-  "Definition of a field in a signature"
-  [:map
-   [:name :string]
-   [:type field-type]
-   [:description {:optional true} :string]])
-
-(def signature
-  "Formula cell signature - defines agent behavior"
-  [:map
-   [:instruction :string]
-   [:inputs [:vector field-definition]]
-   [:outputs [:vector field-definition]]])
-
-(def input-binding
-  "Binding of an input to a source cell field"
-  [:map
-   [:source-cell-id :uuid]
-   [:source-field-name :string]])
-
-(def cell-status
-  "Cell value status"
-  [:enum :valid :stale :error])
-
-(def execution-status
-  "Cell execution status"
-  [:enum :idle :pending :running :completed :failed :cancelled])
-
-;; Address validation: A1-style (A-ZZ columns, 1-999 rows)
-(def address-regex #"^[A-Z]{1,2}[1-9][0-9]{0,2}$")
 
 ;; =============================================================================
 ;; Domain Schemas (for use in query results)
@@ -60,30 +53,39 @@
    [:map
     [:id :uuid]
     [:name :string]
-    [:description {:optional true} :string]
-    [:created-at {:optional true} :string]
-    [:updated-at {:optional true} :string]]
+    [:root-node-id {:optional true} :uuid]
+    [:created-at {:optional true} :string]]
 
-   ::cell
+   ::node
    [:map
     [:id :uuid]
     [:sheet-id :uuid]
-    [:address :string]
-    [:fields [:map-of :string field-value]]
-    [:signature {:optional true} signature]
-    [:input-bindings [:map-of :string input-binding]]
-    [:status cell-status]
-    [:execution-status execution-status]
-    [:last-error {:optional true} :string]
-    [:last-execution-id {:optional true} :uuid]]
+    [:type node-type]
+    [:name :string]
+    [:parent-id {:optional true} :uuid]
+    [:children-ids [:vector :uuid]]
+    [:status node-status]
+    ;; Leaf-only fields
+    [:instruction {:optional true} :string]
+    [:reads [:vector :string]]
+    [:writes [:vector :string]]
+    [:decorators [:vector decorator]]
+    ;; Execution tracking
+    [:last-error {:optional true} :string]]
 
-   ::dependency-graph
+   ::blackboard-entry
    [:map
-    [:nodes [:map-of :uuid [:set :uuid]]]
-    [:edges [:set [:map
-                   [:from :uuid]
-                   [:to :uuid]
-                   [:input-name :string]]]]]})
+    [:key :string]
+    [:type field-type]
+    [:value {:optional true} :any]
+    [:version :int]]
+
+   ::node-layout
+   [:map
+    [:node-id :uuid]
+    [:row :int]
+    [:start-col :double]
+    [:end-col :double]]})
 
 ;; =============================================================================
 ;; Command Schemas
@@ -96,8 +98,7 @@
 
    :sheet/create-sheet
    [:map
-    [:name :string]
-    [:description {:optional true} :string]]
+    [:name :string]]
 
    :sheet/rename-sheet
    [:map
@@ -109,77 +110,114 @@
     [:sheet-id :uuid]]
 
    ;; -------------------------------------------------------------------------
-   ;; Cell Commands
+   ;; Node Commands
    ;; -------------------------------------------------------------------------
 
-   :sheet/create-cell
+   :sheet/create-node
    [:map
     [:sheet-id :uuid]
-    [:address [:re address-regex]]
-    [:cell-id {:optional true} :uuid]]
+    [:node-id {:optional true} :uuid]
+    [:type node-type]
+    [:parent-id {:optional true} :uuid]
+    [:index {:optional true} :int]]
 
-   :sheet/set-cell-literal
+   :sheet/move-node
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:fields [:map-of :string field-value]]]
+    [:node-id :uuid]
+    [:new-parent-id :uuid]
+    [:index :int]]
 
-   :sheet/set-cell-signature
+   :sheet/reorder-node
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:signature signature]]
+    [:node-id :uuid]
+    [:index :int]]
 
-   :sheet/bind-input
+   :sheet/delete-node
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:input-name :string]
-    [:source-cell-id :uuid]
-    [:source-field-name :string]]
+    [:node-id :uuid]]
 
-   :sheet/unbind-input
+   :sheet/set-node-name
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:input-name :string]]
+    [:node-id :uuid]
+    [:name :string]]
 
-   :sheet/delete-cell
+   :sheet/set-node-instruction
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]]
+    [:node-id :uuid]
+    [:instruction :string]]
+
+   :sheet/set-node-io
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:reads [:vector :string]]
+    [:writes [:vector :string]]]
+
+   :sheet/set-node-decorators
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:decorators [:vector decorator]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Blackboard Commands
+   ;; -------------------------------------------------------------------------
+
+   :sheet/declare-key
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:type field-type]]
+
+   :sheet/set-key-value
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:value :any]]
+
+   :sheet/delete-key
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]]
 
    ;; -------------------------------------------------------------------------
    ;; Execution Commands
    ;; -------------------------------------------------------------------------
 
-   :sheet/request-cell-execution
+   :sheet/tick-tree
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id {:optional true} :uuid]]
+    [:tick-id {:optional true} :uuid]]
 
-   :sheet/cancel-cell-execution
+   :sheet/tick-node
    [:map
     [:sheet-id :uuid]
-    [:execution-id :uuid]]
+    [:node-id :uuid]
+    [:tick-id {:optional true} :uuid]
+    [:overrides {:optional true} [:map-of :string :any]]]
 
    ;; Internal commands (issued by todo processors)
-   :sheet/complete-cell-execution
+   :sheet/complete-node-execution
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id :uuid]
-    [:outputs [:map-of :string field-value]]
-    [:duration-ms :int]]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:status [:enum :success :failure]]
+    [:writes [:map-of :string :any]]
+    [:duration-ms {:optional true} :int]]
 
-   :sheet/fail-cell-execution
+   :sheet/fail-node-execution
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id :uuid]
+    [:tick-id :uuid]
+    [:node-id :uuid]
     [:error :string]
-    [:duration-ms :int]]})
+    [:duration-ms {:optional true} :int]]})
 
 ;; =============================================================================
 ;; Event Schemas
@@ -193,8 +231,7 @@
    :sheet/sheet-created
    [:map
     [:sheet-id :uuid]
-    [:name :string]
-    [:description {:optional true} :string]]
+    [:name :string]]
 
    :sheet/sheet-renamed
    [:map
@@ -207,81 +244,120 @@
     [:sheet-id :uuid]]
 
    ;; -------------------------------------------------------------------------
-   ;; Cell Events
+   ;; Node Events
    ;; -------------------------------------------------------------------------
 
-   :sheet/cell-created
+   :sheet/node-created
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:address :string]]
+    [:node-id :uuid]
+    [:type node-type]
+    [:parent-id {:optional true} :uuid]
+    [:index {:optional true} :int]]
 
-   :sheet/cell-literal-set
+   :sheet/node-moved
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:fields [:map-of :string field-value]]
-    [:previous-fields {:optional true} [:map-of :string field-value]]]
+    [:node-id :uuid]
+    [:old-parent-id {:optional true} :uuid]
+    [:new-parent-id :uuid]
+    [:index :int]]
 
-   :sheet/cell-signature-defined
+   :sheet/node-reordered
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:signature signature]
-    [:previous-signature {:optional true} signature]]
+    [:node-id :uuid]
+    [:old-index :int]
+    [:new-index :int]]
 
-   :sheet/input-bound
+   :sheet/node-deleted
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:input-name :string]
-    [:source-cell-id :uuid]
-    [:source-field-name :string]]
+    [:node-id :uuid]]
 
-   :sheet/input-unbound
+   :sheet/node-name-set
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:input-name :string]
-    [:previous-binding {:optional true} input-binding]]
+    [:node-id :uuid]
+    [:name :string]
+    [:previous-name {:optional true} :string]]
 
-   :sheet/cell-deleted
+   :sheet/node-instruction-set
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]]
+    [:node-id :uuid]
+    [:instruction :string]
+    [:previous-instruction {:optional true} :string]]
+
+   :sheet/node-io-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:reads [:vector :string]]
+    [:writes [:vector :string]]
+    [:previous-reads {:optional true} [:vector :string]]
+    [:previous-writes {:optional true} [:vector :string]]]
+
+   :sheet/node-decorators-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:decorators [:vector decorator]]
+    [:previous-decorators {:optional true} [:vector decorator]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Blackboard Events
+   ;; -------------------------------------------------------------------------
+
+   :sheet/key-declared
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:type field-type]]
+
+   :sheet/key-value-set
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:value :any]
+    [:previous-value {:optional true} :any]
+    [:version :int]]
+
+   :sheet/key-deleted
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]]
 
    ;; -------------------------------------------------------------------------
    ;; Execution Events
    ;; -------------------------------------------------------------------------
 
-   :sheet/cell-execution-requested
+   :sheet/tree-tick-started
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id :uuid]
-    [:inputs [:map-of :string field-value]]
-    [:signature signature]]
+    [:tick-id :uuid]]
 
-   :sheet/cell-execution-completed
+   :sheet/node-execution-started
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id :uuid]
-    [:outputs [:map-of :string field-value]]
-    [:duration-ms :int]]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:inputs [:map-of :string :any]]]
 
-   :sheet/cell-execution-failed
+   :sheet/node-execution-completed
    [:map
     [:sheet-id :uuid]
-    [:cell-id :uuid]
-    [:execution-id :uuid]
-    [:error :string]
-    [:duration-ms :int]]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:status [:enum :success :failure :running]]
+    [:writes {:optional true} [:map-of :string :any]]
+    [:duration-ms {:optional true} :int]]
 
-   :sheet/cell-execution-cancelled
+   :sheet/tree-tick-completed
    [:map
     [:sheet-id :uuid]
-    [:execution-id :uuid]]})
+    [:tick-id :uuid]
+    [:root-status [:enum :success :failure :running]]]})
 
 ;; =============================================================================
 ;; Query Schemas (Fat Query Model - one query per screen)
@@ -301,7 +377,7 @@
     [:total :int]]
 
    ;; -------------------------------------------------------------------------
-   ;; Sheet View Screen (/sheet/:sheet-id)
+   ;; Sheet View Screen (/sheet?sheet-id=...)
    ;; -------------------------------------------------------------------------
 
    :sheet/sheet-view-screen
@@ -311,5 +387,6 @@
    :sheet/sheet-view-screen-result
    [:map
     [:sheet ::sheet]
-    [:cells [:vector ::cell]]
-    [:dependency-graph ::dependency-graph]]})
+    [:nodes [:vector ::node]]
+    [:blackboard [:vector ::blackboard-entry]]
+    [:layout [:vector ::node-layout]]]})

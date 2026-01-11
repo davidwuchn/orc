@@ -1,5 +1,5 @@
 (ns components.sheet.core
-  "Sheet UI components for the agent orchestration spreadsheet."
+  "Behavior Tree Sheet UI components."
   (:require [uix.core :as uix :refer [defui $ use-state use-effect]]
             [re-frame.core :as rf]
             [re-frame.uix :refer [use-subscribe]]
@@ -18,497 +18,413 @@
             [store.sheet.subs :as sheet-subs]))
 
 ;; =============================================================================
-;; Utility Functions
+;; Status Helpers
 ;; =============================================================================
 
-(defn col-letter->index
-  "Convert column letter(s) to zero-based index. A=0, B=1, Z=25, AA=26"
-  [col]
-  (reduce (fn [acc c]
-            (+ (* acc 26) (- (.charCodeAt c 0) 64)))
-          0
-          col))
+(defn status-color [status]
+  (case status
+    :idle "bg-gray-200"
+    :running "bg-blue-400 animate-pulse"
+    :success "bg-green-400"
+    :failure "bg-red-400"
+    "bg-gray-200"))
 
-(defn index->col-letter
-  "Convert zero-based index to column letter(s)."
-  [idx]
-  (loop [n (inc idx)
-         result ""]
-    (if (<= n 0)
-      result
-      (let [remainder (mod (dec n) 26)]
-        (recur (quot (dec n) 26)
-               (str (char (+ 65 remainder)) result))))))
+(defn node-type-icon [node-type]
+  (case node-type
+    :leaf "L"
+    :sequence "S"
+    :fallback "F"
+    "?"))
 
-(defn parse-address
-  "Parse a cell address like 'A1' into {:col 'A' :row 1}"
-  [addr]
-  (when addr
-    (let [[_ col row] (re-matches #"([A-Z]+)(\d+)" addr)]
-      {:col col :row (js/parseInt row)})))
+(defn node-type-color [node-type]
+  (case node-type
+    :leaf "bg-blue-100 border-blue-300"
+    :sequence "bg-purple-100 border-purple-300"
+    :fallback "bg-orange-100 border-orange-300"
+    "bg-gray-100"))
 
 ;; =============================================================================
-;; Status Badge Component
+;; Node Cell Component
 ;; =============================================================================
 
-(defui cell-status-badge [{:keys [status execution-status]}]
-  (let [[variant extra-class label] (case execution-status
-                                      :running ["secondary" "animate-pulse" "Running"]
-                                      :completed ["default" "bg-green-500" "Done"]
-                                      :failed ["destructive" "" "Failed"]
-                                      :pending ["secondary" "" "Pending"]
-                                      (case status
-                                        :stale ["outline" "border-yellow-500 text-yellow-600" "Stale"]
-                                        :error ["destructive" "" "Error"]
-                                        :valid ["outline" "" "Ready"]
-                                        ["outline" "" ""]))]
-    (when (and label (not= label ""))
-      ($ badge/Badge {:variant variant :class (str "text-xs " extra-class)}
-         label))))
-
-;; =============================================================================
-;; Cell Component
-;; =============================================================================
-
-(defui grid-cell [{:keys [cell selected? on-select]}]
-  (let [is-formula? (some? (:signature cell))
-        has-fields? (seq (:fields cell))
-        first-field-value (when has-fields?
-                            (-> (:fields cell) vals first :value))]
-    ($ :div {:class (str "border-r border-b p-2 min-h-[60px] cursor-pointer transition-colors "
+(defui node-cell [{:keys [node layout selected? on-select]}]
+  (let [node-type (:type node)
+        status (:status node)
+        col-start (int (* (:start-col layout) 12))
+        col-span (max 1 (int (* (- (:end-col layout) (:start-col layout)) 12)))]
+    ($ :div {:class (str "p-2 border-2 rounded-lg cursor-pointer transition-all "
+                         (node-type-color node-type) " "
                          (if selected?
-                           "bg-blue-50 ring-2 ring-blue-500 ring-inset"
-                           "hover:bg-gray-50"))
-             :on-click #(on-select (:id cell))}
-       ;; Cell address badge
-       ($ :div {:class "flex items-center justify-between mb-1"}
-          ($ :span {:class "text-xs text-gray-400 font-mono"}
-             (:address cell))
-          (when is-formula?
-            ($ badge/Badge {:variant "outline" :class "text-xs h-4 px-1"}
-               "fx")))
+                           "ring-2 ring-blue-500 ring-offset-2"
+                           "hover:shadow-md"))
+             :style {:grid-column (str (inc col-start) " / span " col-span)}
+             :on-click #(on-select (:id node))}
+       ;; Header row: type icon + name
+       ($ :div {:class "flex items-center gap-2 mb-1"}
+          ($ :div {:class "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border bg-white"}
+             (node-type-icon node-type))
+          ($ :span {:class "font-medium text-sm truncate flex-1"}
+             (:name node))
+          ($ :div {:class (str "w-3 h-3 rounded-full " (status-color status))}))
 
-       ;; Cell content
-       (if has-fields?
-         ($ :div {:class "text-sm truncate"}
-            (str first-field-value))
-         (when is-formula?
-           ($ :div {:class "text-xs text-gray-400 italic truncate"}
-              (get-in cell [:signature :instruction]))))
+       ;; Instruction preview for leaf nodes
+       (when (and (= :leaf node-type) (:instruction node))
+         ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
+            (:instruction node)))
 
-       ;; Status indicator
-       (when (or (not= :idle (:execution-status cell))
-                 (not= :valid (:status cell)))
-         ($ :div {:class "mt-1"}
-            ($ cell-status-badge {:status (:status cell)
-                                  :execution-status (:execution-status cell)}))))))
-
-(defui empty-cell [{:keys [address on-create]}]
-  ($ :div {:class "border-r border-b p-2 min-h-[60px] cursor-pointer hover:bg-gray-50 flex items-center justify-center group"
-           :on-click #(on-create address)}
-     ($ :span {:class "text-gray-300 group-hover:text-gray-500 text-xl"}
-        "+")))
+       ;; Children count for composite nodes
+       (when (#{:sequence :fallback} node-type)
+         ($ :p {:class "text-xs text-gray-400 mt-1"}
+            (str (count (:children-ids node)) " children"))))))
 
 ;; =============================================================================
-;; Sheet Grid Component
+;; Empty Row Cell (for adding nodes)
 ;; =============================================================================
 
-(defui sheet-grid [{:keys [sheet-id]}]
-  (let [cells-by-addr (use-subscribe [::sheet-subs/cells-by-address])
-        selected-id (use-subscribe [::sheet-subs/selected-cell-id])
+(defui add-node-cell [{:keys [sheet-id parent-id index on-create-node]}]
+  (let [[menu-open? set-menu-open!] (use-state false)]
+    ($ :div {:class "p-2 border-2 border-dashed rounded-lg cursor-pointer hover:bg-gray-50 flex items-center justify-center"
+             :on-click #(set-menu-open! true)}
+       (if menu-open?
+         ($ :div {:class "flex gap-2"}
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :leaf parent-id index))}
+               "Leaf")
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :sequence parent-id index))}
+               "Seq")
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :fallback parent-id index))}
+               "Fall"))
+         ($ :span {:class "text-gray-400 text-2xl"} "+")))))
+
+;; =============================================================================
+;; Tree Grid Component
+;; =============================================================================
+
+(defui tree-grid [{:keys [sheet-id]}]
+  (let [layout (use-subscribe [::sheet-subs/layout])
+        layout-by-id (use-subscribe [::sheet-subs/layout-by-node-id])
+        nodes (use-subscribe [::sheet-subs/nodes])
+        root-node (use-subscribe [::sheet-subs/root-node])
+        selected-id (use-subscribe [::sheet-subs/selected-node-id])
+        tree-depth (use-subscribe [::sheet-subs/tree-depth])
         ctx (context/use-context)
         api-client (:api/client ctx)
 
-        ;; Generate column headers A-J (10 columns)
-        columns (mapv index->col-letter (range 10))
-        ;; Generate row numbers 1-20
-        rows (range 1 21)
+        handle-select (fn [node-id]
+                        (rf/dispatch [::sheet-events/select-node node-id]))
 
-        handle-select (fn [cell-id]
-                        (rf/dispatch [::sheet-events/select-cell cell-id]))
+        handle-create-node (fn [node-type parent-id index]
+                             (rf/dispatch [::sheet-events/create-node
+                                           api-client sheet-id node-type parent-id index]))
 
-        handle-create (fn [address]
-                        (rf/dispatch [::sheet-events/create-cell api-client sheet-id address]))]
+        ;; Group layout items by row
+        rows-data (group-by :row layout)
+        num-rows (if (empty? layout) 1 (inc (apply max (map :row layout))))]
 
-    ($ :div {:class "overflow-auto"}
-       ($ :table {:class "border-collapse"}
-          ;; Column headers
-          ($ :thead
-             ($ :tr {:class "bg-gray-100"}
-                ($ :th {:class "border p-2 w-12"} "")
-                (for [col columns]
-                  ($ :th {:key col :class "border p-2 min-w-[120px] text-center font-medium text-gray-600"}
-                     col))))
+    ($ :div {:class "p-4"}
+       (if root-node
+         ;; Tree exists - render grid
+         ($ :div {:class "space-y-2"}
+            (for [row-idx (range num-rows)]
+              (let [row-items (get rows-data row-idx [])]
+                ($ :div {:key row-idx
+                         :class "grid gap-2"
+                         :style {:grid-template-columns "repeat(12, 1fr)"}}
+                   (for [item row-items]
+                     (let [node (get nodes (:node-id item))]
+                       ($ node-cell {:key (:node-id item)
+                                     :node node
+                                     :layout item
+                                     :selected? (= (:id node) selected-id)
+                                     :on-select handle-select})))))))
 
-          ;; Grid rows
-          ($ :tbody
-             (for [row rows]
-               ($ :tr {:key row}
-                  ;; Row header
-                  ($ :td {:class "border p-2 bg-gray-100 text-center font-medium text-gray-600"}
-                     row)
-                  ;; Cells
-                  (for [col columns]
-                    (let [address (str col row)
-                          cell (get cells-by-addr address)]
-                      ($ :td {:key address :class "p-0"}
-                         (if cell
-                           ($ grid-cell {:cell cell
-                                         :selected? (= (:id cell) selected-id)
-                                         :on-select handle-select})
-                           ($ empty-cell {:address address
-                                          :on-create handle-create}))))))))))))
+         ;; No tree yet - show create root button
+         ($ :div {:class "flex flex-col items-center justify-center py-12"}
+            ($ :p {:class "text-gray-500 mb-4"} "No tree yet. Create a root node.")
+            ($ :div {:class "flex gap-2"}
+               ($ button/Button {:on-click #(handle-create-node :sequence nil nil)}
+                  "Create Sequence Root")
+               ($ button/Button {:variant "outline"
+                                 :on-click #(handle-create-node :fallback nil nil)}
+                  "Create Fallback Root")))))))
 
 ;; =============================================================================
-;; Field Editor Component
+;; Blackboard Panel Component
 ;; =============================================================================
 
-(defui field-editor [{:keys [field-name field-value on-change]}]
-  (let [field-type (:type field-value)
-        value (:value field-value)]
-    ($ :div {:class "space-y-1"}
-       ($ label/Label {:class "text-sm font-medium"} field-name)
-       (case field-type
-         :text ($ input/Input {:value (or value "")
-                               :on-change #(on-change field-name
-                                                      {:type :text
-                                                       :value (.. % -target -value)})})
-         :number ($ input/Input {:type "number"
-                                 :value (or value "")
-                                 :on-change #(on-change field-name
-                                                        {:type :number
-                                                         :value (js/parseFloat (.. % -target -value))})})
-         :yes-no ($ :div {:class "flex items-center gap-2"}
-                    ($ input/Input {:type "checkbox"
-                                    :checked (boolean value)
-                                    :on-change #(on-change field-name
-                                                          {:type :yes-no
-                                                           :value (.. % -target -checked)})
-                                    :class "w-4 h-4"})
-                    ($ :span {:class "text-sm"}
-                       (if value "Yes" "No")))
-         :document ($ textarea/Textarea {:value (or value "")
-                                         :rows 4
-                                         :on-change #(on-change field-name
-                                                                {:type :document
-                                                                 :value (.. % -target -value)})})
-         ;; Default: text input
-         ($ input/Input {:value (str value)
-                         :on-change #(on-change field-name
-                                                {:type field-type
-                                                 :value (.. % -target -value)})})))))
+(defui blackboard-panel [{:keys [sheet-id]}]
+  (let [blackboard-list (use-subscribe [::sheet-subs/blackboard-list])
+        field-types (use-subscribe [::sheet-subs/field-types])
+        selected-node (use-subscribe [::sheet-subs/selected-node])
+        ctx (context/use-context)
+        api-client (:api/client ctx)
 
-;; =============================================================================
-;; Cell Editor Panel
-;; =============================================================================
+        [new-key set-new-key!] (use-state "")
+        [new-type set-new-type!] (use-state :text)
+        [editing-key set-editing-key!] (use-state nil)
+        [edit-value set-edit-value!] (use-state "")
 
-(defui literal-cell-editor [{:keys [cell sheet-id api-client]}]
-  (let [[fields set-fields!] (use-state (or (:fields cell) {}))
-        [new-field-name set-new-field-name!] (use-state "")
-        [new-field-type set-new-field-type!] (use-state :text)
+        keys-used-by-selected (when selected-node
+                                (set (concat (:reads selected-node) (:writes selected-node))))
 
-        handle-field-change (fn [name value]
-                              (set-fields! (assoc fields name value)))
+        handle-declare (fn []
+                         (when (seq new-key)
+                           (rf/dispatch [::sheet-events/declare-key api-client sheet-id new-key new-type])
+                           (set-new-key! "")))
 
-        handle-add-field (fn []
-                           (when (and (seq new-field-name)
-                                      (not (contains? fields new-field-name)))
-                             (set-fields! (assoc fields new-field-name
-                                                 {:type new-field-type :value nil}))
-                             (set-new-field-name! "")))
+        handle-save-value (fn [key]
+                            (rf/dispatch [::sheet-events/set-key-value api-client sheet-id key edit-value])
+                            (set-editing-key! nil))
 
-        handle-save (fn []
-                      (rf/dispatch [::sheet-events/set-cell-literal
-                                    api-client sheet-id (:id cell) fields]))]
+        handle-delete (fn [key]
+                        (rf/dispatch [::sheet-events/delete-key api-client sheet-id key]))]
 
-    ($ :div {:class "space-y-4"}
-       ($ :h3 {:class "text-lg font-semibold"} "Literal Cell")
-       ($ :p {:class "text-sm text-gray-500"} (:address cell))
+    ($ :div {:class "p-4 border-t"}
+       ($ :h3 {:class "font-semibold mb-3"} "Blackboard")
 
-       ($ separator/Separator)
+       ;; Existing keys
+       (if (empty? blackboard-list)
+         ($ :p {:class "text-gray-400 text-sm mb-3"} "No keys declared")
+         ($ :div {:class "space-y-2 mb-4"}
+            (for [entry blackboard-list]
+              (let [k (:key entry)
+                    is-used? (and keys-used-by-selected (keys-used-by-selected k))]
+                ($ :div {:key k
+                         :class (str "flex items-center gap-2 p-2 rounded text-sm "
+                                     (if is-used? "bg-blue-50 border border-blue-200" "bg-gray-50"))}
+                   ($ :span {:class "font-mono font-medium"} k)
+                   ($ badge/Badge {:variant "outline" :class "text-xs"}
+                      (name (:type entry)))
+                   (if (= editing-key k)
+                     ($ :div {:class "flex-1 flex gap-1"}
+                        ($ input/Input {:value edit-value
+                                        :on-change #(set-edit-value! (.. % -target -value))
+                                        :class "h-7 text-xs flex-1"})
+                        ($ button/Button {:size "sm" :variant "ghost" :class "h-7 px-2"
+                                          :on-click #(handle-save-value k)}
+                           "Save"))
+                     ($ :div {:class "flex-1 flex items-center gap-2"}
+                        ($ :span {:class "text-gray-600 truncate"}
+                           (str (or (:value entry) "(nil)")))
+                        ($ button/Button {:size "sm" :variant "ghost" :class "h-7 px-2"
+                                          :on-click #(do (set-editing-key! k)
+                                                         (set-edit-value! (str (or (:value entry) ""))))}
+                           "Edit"))))))))
 
-       ;; Existing fields
-       (when (seq fields)
-         ($ :div {:class "space-y-3"}
-            (for [[name value] fields]
-              ($ :div {:key name}
-                 ($ field-editor {:field-name name
-                                  :field-value value
-                                  :on-change handle-field-change})))))
-
-       ;; Add new field
+       ;; Add new key
        ($ :div {:class "flex gap-2"}
-          ($ input/Input {:placeholder "Field name"
-                          :value new-field-name
-                          :on-change #(set-new-field-name! (.. % -target -value))
+          ($ input/Input {:placeholder "Key name"
+                          :value new-key
+                          :on-change #(set-new-key! (.. % -target -value))
                           :class "flex-1"})
-          ($ select/Select {:value (name new-field-type)
-                            :onValueChange #(set-new-field-type! (keyword %))}
-             ($ select/SelectTrigger {:class "w-28"}
-                ($ select/SelectValue {:placeholder "Type"}))
+          ($ select/Select {:value (name new-type)
+                            :onValueChange #(set-new-type! (keyword %))}
+             ($ select/SelectTrigger {:class "w-24"}
+                ($ select/SelectValue))
              ($ select/SelectContent
-                ($ select/SelectItem {:value "text"} "Text")
-                ($ select/SelectItem {:value "number"} "Number")
-                ($ select/SelectItem {:value "yes-no"} "Yes/No")
-                ($ select/SelectItem {:value "document"} "Document")))
-          ($ button/Button {:variant "outline" :on-click handle-add-field}
-             "Add"))
-
-       ;; Save button
-       ($ button/Button {:on-click handle-save :class "w-full"}
-          "Save"))))
-
-(defui formula-cell-editor [{:keys [cell sheet-id api-client]}]
-  (let [signature (:signature cell)
-        bindings (:input-bindings cell)
-        available-sources (use-subscribe [::sheet-subs/available-source-cells])
-        can-execute? (use-subscribe [::sheet-subs/cell-can-execute? (:id cell)])
-        is-executing? (use-subscribe [::sheet-subs/cell-is-executing? (:id cell)])
-
-        handle-execute (fn []
-                         (rf/dispatch [::sheet-events/request-execution
-                                       api-client sheet-id (:id cell)]))]
-
-    ($ :div {:class "space-y-4"}
-       ($ :h3 {:class "text-lg font-semibold"} "Formula Cell")
-       ($ :p {:class "text-sm text-gray-500"} (:address cell))
-
-       ($ separator/Separator)
-
-       ;; Instruction
-       ($ :div {:class "space-y-1"}
-          ($ label/Label "Instruction")
-          ($ :p {:class "text-sm bg-gray-50 p-2 rounded"}
-             (:instruction signature)))
-
-       ;; Input bindings
-       (when (seq (:inputs signature))
-         ($ :div {:class "space-y-2"}
-            ($ label/Label "Inputs")
-            (for [input-def (:inputs signature)]
-              (let [input-name (:name input-def)
-                    binding (get bindings input-name)]
-                ($ :div {:key input-name :class "flex items-center gap-2 text-sm"}
-                   ($ :span {:class "w-24 font-medium"} input-name)
-                   ($ :span {:class "text-gray-400"} (str "(" (name (:type input-def)) ")"))
-                   (if binding
-                     ($ :span {:class "text-green-600"}
-                        (str "← " (:source-cell-id binding) "." (:source-field-name binding)))
-                     ($ :span {:class "text-yellow-600"} "Unbound")))))))
-
-       ;; Outputs
-       (when (seq (:outputs signature))
-         ($ :div {:class "space-y-2"}
-            ($ label/Label "Outputs")
-            (for [output-def (:outputs signature)]
-              (let [output-name (:name output-def)
-                    value (get-in cell [:fields output-name])]
-                ($ :div {:key output-name :class "text-sm"}
-                   ($ :div {:class "flex items-center gap-2"}
-                      ($ :span {:class "font-medium"} output-name)
-                      ($ :span {:class "text-gray-400"} (str "(" (name (:type output-def)) ")")))
-                   (if value
-                     ($ :p {:class "mt-1 bg-gray-50 p-2 rounded truncate"}
-                        (str (:value value)))
-                     ($ :p {:class "mt-1 text-gray-400 italic"} "(pending)")))))))
-
-       ;; Status
-       ($ :div {:class "flex items-center gap-2"}
-          ($ label/Label "Status")
-          ($ cell-status-badge {:status (:status cell)
-                                :execution-status (:execution-status cell)}))
-
-       ;; Error message
-       (when (:last-error cell)
-         ($ :div {:class "text-sm text-red-600 bg-red-50 p-2 rounded"}
-            (:last-error cell)))
-
-       ;; Execute button
-       ($ button/Button {:on-click handle-execute
-                         :disabled (or (not can-execute?) is-executing?)
-                         :class "w-full"}
-          (if is-executing?
-            ($ :span {:class "flex items-center gap-2"}
-               ($ spinner/Spinner {:class "w-4 h-4"})
-               "Executing...")
-            "Execute")))))
+                (for [ft field-types]
+                  ($ select/SelectItem {:key (name (:value ft)) :value (name (:value ft))}
+                     (:label ft)))))
+          ($ button/Button {:size "sm" :on-click handle-declare}
+             "+")))))
 
 ;; =============================================================================
-;; Signature Editor (for creating new formula cells)
+;; Node Editor Panel Component
 ;; =============================================================================
 
-(defui signature-editor [{:keys [cell sheet-id api-client]}]
-  (let [[instruction set-instruction!] (use-state "")
-        [inputs set-inputs!] (use-state [])
-        [outputs set-outputs!] (use-state [])
-        [new-input set-new-input!] (use-state {:name "" :type :text})
-        [new-output set-new-output!] (use-state {:name "" :type :text})
-
-        handle-add-input (fn []
-                           (when (seq (:name new-input))
-                             (set-inputs! (conj inputs new-input))
-                             (set-new-input! {:name "" :type :text})))
-
-        handle-add-output (fn []
-                            (when (seq (:name new-output))
-                              (set-outputs! (conj outputs new-output))
-                              (set-new-output! {:name "" :type :text})))
-
-        ;; Include any pending output that hasn't been added yet
-        all-outputs (if (seq (:name new-output))
-                      (conj outputs new-output)
-                      outputs)
-        all-inputs (if (seq (:name new-input))
-                     (conj inputs new-input)
-                     inputs)
-        can-save? (and (seq instruction) (seq all-outputs))
-
-        handle-save (fn []
-                      (when can-save?
-                        (rf/dispatch [::sheet-events/set-cell-signature
-                                      api-client sheet-id (:id cell)
-                                      {:instruction instruction
-                                       :inputs all-inputs
-                                       :outputs all-outputs}])))]
-
-    ($ :div {:class "space-y-4"}
-       ($ :h3 {:class "text-lg font-semibold"} "Create Formula")
-       ($ :p {:class "text-sm text-gray-500"} (:address cell))
-
-       ($ separator/Separator)
-
-       ;; Instruction
-       ($ :div {:class "space-y-1"}
-          ($ label/Label "Instruction")
-          ($ textarea/Textarea {:value instruction
-                                :on-change #(set-instruction! (.. % -target -value))
-                                :placeholder "Describe what this cell should do..."
-                                :rows 3}))
-
-       ;; Inputs
-       ($ :div {:class "space-y-2"}
-          ($ label/Label "Inputs")
-          (when (seq inputs)
-            ($ :div {:class "space-y-1"}
-               (for [[idx input] (map-indexed vector inputs)]
-                 ($ :div {:key idx :class "flex items-center gap-2 text-sm"}
-                    ($ :span (:name input))
-                    ($ :span {:class "text-gray-400"} (str "(" (name (:type input)) ")"))))))
-          ($ :div {:class "flex gap-2"}
-             ($ input/Input {:placeholder "Input name"
-                             :value (:name new-input)
-                             :on-change #(set-new-input! (assoc new-input :name (.. % -target -value)))
-                             :class "flex-1"})
-             ($ select/Select {:value (name (:type new-input))
-                               :onValueChange #(set-new-input! (assoc new-input :type (keyword %)))}
-                ($ select/SelectTrigger {:class "w-24"}
-                   ($ select/SelectValue))
-                ($ select/SelectContent
-                   ($ select/SelectItem {:value "text"} "Text")
-                   ($ select/SelectItem {:value "number"} "Number")
-                   ($ select/SelectItem {:value "document"} "Doc")))
-             ($ button/Button {:variant "outline" :size "sm" :on-click handle-add-input}
-                "+")))
-
-       ;; Outputs
-       ($ :div {:class "space-y-2"}
-          ($ label/Label "Outputs")
-          (when (seq outputs)
-            ($ :div {:class "space-y-1"}
-               (for [[idx output] (map-indexed vector outputs)]
-                 ($ :div {:key idx :class "flex items-center gap-2 text-sm"}
-                    ($ :span (:name output))
-                    ($ :span {:class "text-gray-400"} (str "(" (name (:type output)) ")"))))))
-          ($ :div {:class "flex gap-2"}
-             ($ input/Input {:placeholder "Output name"
-                             :value (:name new-output)
-                             :on-change #(set-new-output! (assoc new-output :name (.. % -target -value)))
-                             :class "flex-1"})
-             ($ select/Select {:value (name (:type new-output))
-                               :onValueChange #(set-new-output! (assoc new-output :type (keyword %)))}
-                ($ select/SelectTrigger {:class "w-24"}
-                   ($ select/SelectValue))
-                ($ select/SelectContent
-                   ($ select/SelectItem {:value "text"} "Text")
-                   ($ select/SelectItem {:value "number"} "Number")
-                   ($ select/SelectItem {:value "yes-no"} "Yes/No")
-                   ($ select/SelectItem {:value "document"} "Doc")))
-             ($ button/Button {:variant "outline" :size "sm" :on-click handle-add-output}
-                "+")))
-
-       ;; Save button
-       ($ button/Button {:on-click handle-save
-                         :disabled (not can-save?)
-                         :class "w-full"}
-          "Create Formula"))))
-
-;; =============================================================================
-;; Cell Editor Panel
-;; =============================================================================
-
-(defui cell-editor-panel []
-  (let [cell (use-subscribe [::sheet-subs/selected-cell])
-        sheet (use-subscribe [::sheet-subs/sheet])
+(defui node-editor-panel [{:keys [sheet-id]}]
+  (let [node (use-subscribe [::sheet-subs/selected-node])
+        blackboard-keys (use-subscribe [::sheet-subs/blackboard-keys])
         ctx (context/use-context)
         api-client (:api/client ctx)
 
-        [mode set-mode!] (use-state nil) ;; :literal or :formula
+        [editing-name? set-editing-name!] (use-state false)
+        [name-value set-name-value!] (use-state "")
+        [instruction-value set-instruction-value!] (use-state "")
+        [reads-value set-reads-value!] (use-state [])
+        [writes-value set-writes-value!] (use-state [])
 
-        handle-convert-to-literal (fn []
-                                    (set-mode! :literal))
+        ;; Initialize values when node changes
+        _ (use-effect
+            (fn []
+              (when node
+                (set-name-value! (:name node))
+                (set-instruction-value! (or (:instruction node) ""))
+                (set-reads-value! (vec (:reads node)))
+                (set-writes-value! (vec (:writes node)))))
+            [node])
 
-        handle-convert-to-formula (fn []
-                                    (set-mode! :formula))]
+        handle-save-name (fn []
+                           (rf/dispatch [::sheet-events/set-node-name api-client sheet-id (:id node) name-value])
+                           (set-editing-name! false))
 
-    (when cell
-      (let [sheet-id (:id sheet)
-            is-formula? (some? (:signature cell))
-            effective-mode (or mode (if is-formula? :formula :literal))]
+        handle-save-instruction (fn []
+                                  (rf/dispatch [::sheet-events/set-node-instruction api-client sheet-id (:id node) instruction-value]))
 
-        ($ :div {:class "w-96 border-l bg-white h-full overflow-auto"}
-           ($ :div {:class "p-4 space-y-4"}
-              ;; Mode toggle
-              (when-not (:signature cell)
-                ($ :div {:class "flex gap-2"}
-                   ($ button/Button {:variant (if (= effective-mode :literal) "default" "outline")
-                                     :size "sm"
-                                     :on-click handle-convert-to-literal}
-                      "Literal")
-                   ($ button/Button {:variant (if (= effective-mode :formula) "default" "outline")
-                                     :size "sm"
-                                     :on-click handle-convert-to-formula}
-                      "Formula")))
+        handle-save-io (fn []
+                         (rf/dispatch [::sheet-events/set-node-io api-client sheet-id (:id node) reads-value writes-value]))
 
-              ;; Editor based on mode
-              (if (or (= effective-mode :formula) is-formula?)
-                (if is-formula?
-                  ($ formula-cell-editor {:cell cell
-                                          :sheet-id sheet-id
-                                          :api-client api-client})
-                  ;; Show signature editor for new formula cells
-                  ($ signature-editor {:cell cell
-                                       :sheet-id sheet-id
-                                       :api-client api-client}))
-                ($ literal-cell-editor {:cell cell
-                                        :sheet-id sheet-id
-                                        :api-client api-client}))))))))
+        handle-add-child (fn [child-type]
+                           (rf/dispatch [::sheet-events/create-node api-client sheet-id child-type (:id node) nil]))
+
+        handle-delete (fn []
+                        (rf/dispatch [::sheet-events/delete-node api-client sheet-id (:id node)]))]
+
+    (if node
+      ($ :div {:class "w-80 border-l bg-white h-full overflow-auto"}
+         ($ :div {:class "p-4 space-y-4"}
+            ;; Node header
+            ($ :div {:class "flex items-center gap-2"}
+               ($ :div {:class (str "w-8 h-8 rounded-full flex items-center justify-center font-bold border "
+                                    (node-type-color (:type node)))}
+                  (node-type-icon (:type node)))
+               (if editing-name?
+                 ($ :div {:class "flex-1 flex gap-1"}
+                    ($ input/Input {:value name-value
+                                    :on-change #(set-name-value! (.. % -target -value))
+                                    :class "h-8"})
+                    ($ button/Button {:size "sm" :on-click handle-save-name}
+                       "Save"))
+                 ($ :div {:class "flex-1 flex items-center gap-2"}
+                    ($ :h3 {:class "font-semibold"} (:name node))
+                    ($ button/Button {:size "sm" :variant "ghost"
+                                      :on-click #(set-editing-name! true)}
+                       "Edit"))))
+
+            ($ separator/Separator)
+
+            ;; Status
+            ($ :div {:class "flex items-center gap-2"}
+               ($ label/Label "Status")
+               ($ badge/Badge {:variant "outline"
+                               :class (case (:status node)
+                                        :running "border-blue-500 text-blue-600"
+                                        :success "border-green-500 text-green-600"
+                                        :failure "border-red-500 text-red-600"
+                                        "")}
+                  (name (:status node))))
+
+            ;; Error if any
+            (when (:last-error node)
+              ($ :div {:class "text-sm text-red-600 bg-red-50 p-2 rounded"}
+                 (:last-error node)))
+
+            ;; Leaf-specific: Instruction
+            (when (= :leaf (:type node))
+              ($ :div {:class "space-y-2"}
+                 ($ label/Label "Instruction")
+                 ($ textarea/Textarea {:value instruction-value
+                                       :on-change #(set-instruction-value! (.. % -target -value))
+                                       :rows 4
+                                       :placeholder "What should this node do?"})
+                 ($ button/Button {:size "sm" :on-click handle-save-instruction}
+                    "Save Instruction")))
+
+            ;; Leaf-specific: Reads/Writes
+            (when (= :leaf (:type node))
+              ($ :div {:class "space-y-3"}
+                 ;; Reads
+                 ($ :div {:class "space-y-1"}
+                    ($ label/Label "Reads (inputs)")
+                    ($ :div {:class "flex flex-wrap gap-1"}
+                       (for [k reads-value]
+                         ($ badge/Badge {:key k :variant "secondary" :class "cursor-pointer"
+                                         :on-click #(set-reads-value! (vec (remove #{k} reads-value)))}
+                            (str k " x")))
+                       ($ select/Select {:value ""
+                                         :onValueChange #(when (seq %)
+                                                           (set-reads-value! (conj reads-value %)))}
+                          ($ select/SelectTrigger {:class "w-20 h-6 text-xs"}
+                             ($ select/SelectValue {:placeholder "+"}))
+                          ($ select/SelectContent
+                             (for [k blackboard-keys]
+                               (when-not (some #{k} reads-value)
+                                 ($ select/SelectItem {:key k :value k} k)))))))
+
+                 ;; Writes
+                 ($ :div {:class "space-y-1"}
+                    ($ label/Label "Writes (outputs)")
+                    ($ :div {:class "flex flex-wrap gap-1"}
+                       (for [k writes-value]
+                         ($ badge/Badge {:key k :variant "secondary" :class "cursor-pointer"
+                                         :on-click #(set-writes-value! (vec (remove #{k} writes-value)))}
+                            (str k " x")))
+                       ($ select/Select {:value ""
+                                         :onValueChange #(when (seq %)
+                                                           (set-writes-value! (conj writes-value %)))}
+                          ($ select/SelectTrigger {:class "w-20 h-6 text-xs"}
+                             ($ select/SelectValue {:placeholder "+"}))
+                          ($ select/SelectContent
+                             (for [k blackboard-keys]
+                               (when-not (some #{k} writes-value)
+                                 ($ select/SelectItem {:key k :value k} k)))))))
+
+                 ($ button/Button {:size "sm" :variant "outline" :on-click handle-save-io}
+                    "Save I/O")))
+
+            ;; Add child (for composite nodes)
+            (when (#{:sequence :fallback} (:type node))
+              ($ :div {:class "space-y-2"}
+                 ($ label/Label "Add Child")
+                 ($ :div {:class "flex gap-2"}
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :leaf)}
+                       "+ Leaf")
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :sequence)}
+                       "+ Seq")
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :fallback)}
+                       "+ Fall"))))
+
+            ($ separator/Separator)
+
+            ;; Delete button
+            ($ button/Button {:variant "destructive" :size "sm" :class "w-full"
+                              :disabled (seq (:children-ids node))
+                              :on-click handle-delete}
+               (if (seq (:children-ids node))
+                 "Delete children first"
+                 "Delete Node"))))
+
+      ;; No node selected
+      ($ :div {:class "w-80 border-l bg-gray-50 h-full flex items-center justify-center"}
+         ($ :p {:class "text-gray-400"} "Select a node to edit")))))
 
 ;; =============================================================================
 ;; Sheet Toolbar
 ;; =============================================================================
 
-(defui sheet-toolbar [{:keys [sheet]}]
-  (let [ctx (context/use-context)
-        navigate! (:router/navigate! ctx)]
+(defui sheet-toolbar [{:keys [sheet sheet-id]}]
+  (let [ticking? (use-subscribe [::sheet-subs/sheet-ticking?])
+        root-node (use-subscribe [::sheet-subs/root-node])
+        ctx (context/use-context)
+        api-client (:api/client ctx)
+        navigate! (:router/navigate! ctx)
+
+        handle-tick (fn []
+                      (rf/dispatch [::sheet-events/tick-tree api-client sheet-id]))]
+
     ($ :div {:class "flex items-center justify-between p-4 border-b bg-white"}
        ($ :div {:class "flex items-center gap-4"}
           ($ button/Button {:variant "ghost" :size "sm" :on-click #(navigate! :sheets)}
-             "← Back")
+             "< Back")
           ($ :h1 {:class "text-xl font-semibold"}
              (:name sheet)))
        ($ :div {:class "flex items-center gap-2"}
-          ($ button/Button {:variant "outline" :size "sm"}
-             "Settings")))))
+          ($ button/Button {:variant "default"
+                            :disabled (or ticking? (not root-node))
+                            :on-click handle-tick}
+             (if ticking?
+               ($ :span {:class "flex items-center gap-2"}
+                  ($ spinner/Spinner {:class "w-4 h-4"})
+                  "Ticking...")
+               "Tick Tree"))))))
 
 ;; =============================================================================
 ;; Main Sheet Page
@@ -543,11 +459,15 @@
 
       sheet
       ($ :div {:class "flex flex-col h-full"}
-         ($ sheet-toolbar {:sheet sheet})
+         ($ sheet-toolbar {:sheet sheet :sheet-id sheet-id})
          ($ :div {:class "flex flex-1 overflow-hidden"}
-            ($ :div {:class "flex-1 overflow-auto bg-gray-50 p-4"}
-               ($ sheet-grid {:sheet-id sheet-id}))
-            ($ cell-editor-panel)))
+            ;; Main area: tree + blackboard
+            ($ :div {:class "flex-1 flex flex-col overflow-hidden"}
+               ($ :div {:class "flex-1 overflow-auto bg-gray-50"}
+                  ($ tree-grid {:sheet-id sheet-id}))
+               ($ blackboard-panel {:sheet-id sheet-id}))
+            ;; Editor panel
+            ($ node-editor-panel {:sheet-id sheet-id})))
 
       :else
       ($ :div {:class "flex items-center justify-center h-full"}
@@ -562,27 +482,24 @@
         [creating? set-creating!] (use-state false)
         ctx (context/use-context)
         api-client (:api/client ctx)
-        navigate! (:router/navigate! ctx)
 
         handle-create (fn []
                         (set-creating! true)
                         (rf/dispatch [::sheet-events/create-sheet
-                                      api-client name nil
+                                      api-client name
                                       (fn [_]
                                         (set-creating! false)
-                                        (on-close)
-                                        ;; Reload sheets list
-                                        (rf/dispatch [::sheet-events/load-sheets-list-screen api-client]))]))]
+                                        (on-close))]))]
     ($ dialog/Dialog {:open open? :onOpenChange #(when-not creating? (on-close))}
        ($ dialog/DialogContent
           ($ dialog/DialogHeader
-             ($ dialog/DialogTitle "Create New Sheet"))
+             ($ dialog/DialogTitle "Create New Behavior Tree"))
           ($ :div {:class "space-y-4 py-4"}
              ($ :div {:class "space-y-2"}
                 ($ label/Label "Name")
                 ($ input/Input {:value name
                                 :on-change #(set-name! (.. % -target -value))
-                                :placeholder "My Agent Sheet"
+                                :placeholder "My Behavior Tree"
                                 :disabled creating?})))
           ($ dialog/DialogFooter
              ($ button/Button {:variant "outline" :on-click on-close :disabled creating?}
@@ -607,27 +524,25 @@
 
     ($ :div {:class "container mx-auto py-8 px-4"}
        ($ :div {:class "flex items-center justify-between mb-8"}
-          ($ :h1 {:class "text-2xl font-bold"} "Agent Sheets")
+          ($ :h1 {:class "text-2xl font-bold"} "Behavior Trees")
           ($ button/Button {:on-click #(set-dialog-open! true)}
-             "+ New Sheet"))
+             "+ New Tree"))
 
        (if loading?
          ($ :div {:class "flex items-center justify-center py-12"}
             ($ spinner/Spinner {:class "w-8 h-8"}))
          (if (empty? sheets)
            ($ :div {:class "text-center py-12"}
-              ($ :p {:class "text-gray-500 mb-4"} "No sheets yet")
+              ($ :p {:class "text-gray-500 mb-4"} "No behavior trees yet")
               ($ button/Button {:on-click #(set-dialog-open! true)}
-                 "Create your first sheet"))
+                 "Create your first tree"))
            ($ :div {:class "grid gap-4 md:grid-cols-2 lg:grid-cols-3"}
               (for [sheet sheets]
                 ($ card/Card {:key (:id sheet)
                               :class "cursor-pointer hover:shadow-md transition-shadow"
                               :on-click #(navigate! :sheet {:sheet-id (str (:id sheet))})}
                    ($ card/CardHeader
-                      ($ card/CardTitle (:name sheet))
-                      (when (:description sheet)
-                        ($ card/CardDescription (:description sheet))))
+                      ($ card/CardTitle (:name sheet)))
                    ($ card/CardFooter {:class "text-sm text-gray-500"}
                       (str "Created: " (:created-at sheet))))))))
 

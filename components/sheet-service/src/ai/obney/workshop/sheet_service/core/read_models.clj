@@ -1,9 +1,9 @@
 (ns ai.obney.workshop.sheet-service.core.read-models
-  "Sheet Service read models - projections built from events.
+  "Behavior Tree Sheet read models - projections built from events.
 
    This namespace provides:
    - Event type sets for querying
-   - Multimethod projections for sheets, cells, executions, and dependency graph
+   - Multimethod projections for sheets, nodes, blackboard, and ticks
    - Helper functions for common queries"
   (:require [ai.obney.grain.event-store-v2.interface :as event-store]))
 
@@ -15,38 +15,39 @@
   "Events that affect sheet read model"
   #{:sheet/sheet-created
     :sheet/sheet-renamed
-    :sheet/sheet-deleted})
+    :sheet/sheet-deleted
+    :sheet/node-created    ;; first root node sets root-node-id
+    :sheet/node-deleted})  ;; deleting root clears root-node-id
 
-(def cell-events
-  "Events that affect cell read model"
-  #{:sheet/cell-created
-    :sheet/cell-literal-set
-    :sheet/cell-signature-defined
-    :sheet/input-bound
-    :sheet/input-unbound
-    :sheet/cell-execution-requested
-    :sheet/cell-execution-completed
-    :sheet/cell-execution-failed
-    :sheet/cell-execution-cancelled
-    :sheet/cell-deleted})
+(def node-events
+  "Events that affect node read model"
+  #{:sheet/node-created
+    :sheet/node-moved
+    :sheet/node-reordered
+    :sheet/node-deleted
+    :sheet/node-name-set
+    :sheet/node-instruction-set
+    :sheet/node-io-set
+    :sheet/node-decorators-set
+    :sheet/node-execution-started
+    :sheet/node-execution-completed})
 
-(def execution-events
-  "Events that affect execution history read model"
-  #{:sheet/cell-execution-requested
-    :sheet/cell-execution-completed
-    :sheet/cell-execution-failed
-    :sheet/cell-execution-cancelled})
+(def blackboard-events
+  "Events that affect blackboard read model"
+  #{:sheet/key-declared
+    :sheet/key-value-set
+    :sheet/key-deleted})
 
-(def dependency-events
-  "Events that affect dependency graph read model"
-  #{:sheet/cell-created
-    :sheet/input-bound
-    :sheet/input-unbound
-    :sheet/cell-deleted})
+(def tick-events
+  "Events that affect tick/execution read model"
+  #{:sheet/tree-tick-started
+    :sheet/node-execution-started
+    :sheet/node-execution-completed
+    :sheet/tree-tick-completed})
 
 (def all-sheet-events
   "All events for a complete sheet view"
-  (into sheet-events cell-events))
+  (clojure.set/union sheet-events node-events blackboard-events tick-events))
 
 ;; =============================================================================
 ;; Sheets Projection
@@ -61,15 +62,29 @@
   (assoc state (:sheet-id event)
          {:id (:sheet-id event)
           :name (:name event)
-          :description (:description event)
-          :created-at (str (:event/timestamp event))
-          :updated-at (str (:event/timestamp event))}))
+          :root-node-id nil
+          :created-at (str (:event/timestamp event))}))
 
 (defmethod sheets* :sheet/sheet-renamed
   [state event]
-  (-> state
-      (assoc-in [(:sheet-id event) :name] (:new-name event))
-      (assoc-in [(:sheet-id event) :updated-at] (str (:event/timestamp event)))))
+  (assoc-in state [(:sheet-id event) :name] (:new-name event)))
+
+(defmethod sheets* :sheet/node-created
+  [state event]
+  ;; When creating a node with no parent, it becomes the root
+  (if (nil? (:parent-id event))
+    (assoc-in state [(:sheet-id event) :root-node-id] (:node-id event))
+    state))
+
+(defmethod sheets* :sheet/node-deleted
+  [state event]
+  ;; If deleting the root node, clear root-node-id
+  (let [sheet-id (:sheet-id event)
+        node-id (:node-id event)
+        current-root (get-in state [sheet-id :root-node-id])]
+    (if (= current-root node-id)
+      (assoc-in state [sheet-id :root-node-id] nil)
+      state)))
 
 (defmethod sheets* :sheet/sheet-deleted
   [state event]
@@ -83,213 +98,193 @@
   (reduce sheets* initial-state events))
 
 ;; =============================================================================
-;; Cells Projection
+;; Nodes Projection
 ;; =============================================================================
 
-(defmulti cells*
-  "Apply event to cells read model"
+(defmulti nodes*
+  "Apply event to nodes read model"
   (fn [_state event] (:event/type event)))
 
-(defmethod cells* :sheet/cell-created
+(defmethod nodes* :sheet/node-created
   [state event]
-  (assoc state (:cell-id event)
-         {:id (:cell-id event)
-          :sheet-id (:sheet-id event)
-          :address (:address event)
-          :fields {}
-          :signature nil
-          :input-bindings {}
-          :status :valid
-          :execution-status :idle
-          :last-execution-id nil
-          :last-error nil
-          :created-at (str (:event/timestamp event))
-          :updated-at (str (:event/timestamp event))}))
-
-(defmethod cells* :sheet/cell-literal-set
-  [state event]
-  (let [cell-id (:cell-id event)]
+  (let [node-id (:node-id event)
+        parent-id (:parent-id event)
+        index (or (:index event) 0)]
     (-> state
-        (assoc-in [cell-id :fields] (:fields event))
-        (assoc-in [cell-id :signature] nil)
-        (assoc-in [cell-id :input-bindings] {})
-        (assoc-in [cell-id :status] :valid)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+        ;; Create the new node
+        (assoc node-id
+               {:id node-id
+                :sheet-id (:sheet-id event)
+                :type (:type event)
+                :name (case (:type event)
+                        :leaf "New Leaf"
+                        :sequence "Sequence"
+                        :fallback "Fallback")
+                :parent-id parent-id
+                :children-ids []
+                :status :idle
+                :instruction nil
+                :reads []
+                :writes []
+                :decorators []
+                :last-error nil})
+        ;; Add to parent's children if parent exists
+        (cond-> parent-id
+          (update-in [parent-id :children-ids]
+                     (fn [children]
+                       (let [children (or children [])]
+                         (vec (concat (take index children)
+                                      [node-id]
+                                      (drop index children))))))))))
 
-(defmethod cells* :sheet/cell-signature-defined
+(defmethod nodes* :sheet/node-moved
   [state event]
-  (let [cell-id (:cell-id event)]
+  (let [node-id (:node-id event)
+        old-parent-id (:old-parent-id event)
+        new-parent-id (:new-parent-id event)
+        index (:index event)]
     (-> state
-        (assoc-in [cell-id :signature] (:signature event))
-        (assoc-in [cell-id :fields] {})
-        (assoc-in [cell-id :status] :stale)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+        ;; Update node's parent-id
+        (assoc-in [node-id :parent-id] new-parent-id)
+        ;; Remove from old parent's children
+        (cond-> old-parent-id
+          (update-in [old-parent-id :children-ids]
+                     (fn [children]
+                       (vec (remove #(= % node-id) children)))))
+        ;; Add to new parent's children at index
+        (update-in [new-parent-id :children-ids]
+                   (fn [children]
+                     (let [children (or children [])]
+                       (vec (concat (take index children)
+                                    [node-id]
+                                    (drop index children)))))))))
 
-(defmethod cells* :sheet/input-bound
+(defmethod nodes* :sheet/node-reordered
   [state event]
-  (let [cell-id (:cell-id event)]
+  (let [node-id (:node-id event)
+        parent-id (get-in state [node-id :parent-id])
+        new-index (:new-index event)]
+    (if parent-id
+      (update-in state [parent-id :children-ids]
+                 (fn [children]
+                   (let [without-node (vec (remove #(= % node-id) children))]
+                     (vec (concat (take new-index without-node)
+                                  [node-id]
+                                  (drop new-index without-node))))))
+      state)))
+
+(defmethod nodes* :sheet/node-deleted
+  [state event]
+  (let [node-id (:node-id event)
+        parent-id (get-in state [node-id :parent-id])]
     (-> state
-        (assoc-in [cell-id :input-bindings (:input-name event)]
-                  {:source-cell-id (:source-cell-id event)
-                   :source-field-name (:source-field-name event)})
-        (assoc-in [cell-id :status] :stale)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+        ;; Remove from parent's children
+        (cond-> parent-id
+          (update-in [parent-id :children-ids]
+                     (fn [children]
+                       (vec (remove #(= % node-id) children)))))
+        ;; Remove the node itself
+        (dissoc node-id))))
 
-(defmethod cells* :sheet/input-unbound
+(defmethod nodes* :sheet/node-name-set
   [state event]
-  (let [cell-id (:cell-id event)]
-    (-> state
-        (update-in [cell-id :input-bindings] dissoc (:input-name event))
-        (assoc-in [cell-id :status] :stale)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+  (assoc-in state [(:node-id event) :name] (:name event)))
 
-(defmethod cells* :sheet/cell-execution-requested
+(defmethod nodes* :sheet/node-instruction-set
   [state event]
-  (let [cell-id (:cell-id event)]
-    (-> state
-        (assoc-in [cell-id :execution-status] :running)
-        (assoc-in [cell-id :last-execution-id] (:execution-id event))
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+  (assoc-in state [(:node-id event) :instruction] (:instruction event)))
 
-(defmethod cells* :sheet/cell-execution-completed
+(defmethod nodes* :sheet/node-io-set
   [state event]
-  (let [cell-id (:cell-id event)]
-    (-> state
-        (assoc-in [cell-id :fields] (:outputs event))
-        (assoc-in [cell-id :execution-status] :completed)
-        (assoc-in [cell-id :status] :valid)
-        (assoc-in [cell-id :last-error] nil)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+  (-> state
+      (assoc-in [(:node-id event) :reads] (:reads event))
+      (assoc-in [(:node-id event) :writes] (:writes event))))
 
-(defmethod cells* :sheet/cell-execution-failed
+(defmethod nodes* :sheet/node-decorators-set
   [state event]
-  (let [cell-id (:cell-id event)]
-    (-> state
-        (assoc-in [cell-id :execution-status] :failed)
-        (assoc-in [cell-id :status] :error)
-        (assoc-in [cell-id :last-error] (:error event))
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+  (assoc-in state [(:node-id event) :decorators] (:decorators event)))
 
-(defmethod cells* :sheet/cell-execution-cancelled
+(defmethod nodes* :sheet/node-execution-started
   [state event]
-  (when-let [cell-id (some (fn [[id cell]]
-                             (when (= (:execution-id event) (:last-execution-id cell))
-                               id))
-                           state)]
-    (-> state
-        (assoc-in [cell-id :execution-status] :idle)
-        (assoc-in [cell-id :updated-at] (str (:event/timestamp event))))))
+  (assoc-in state [(:node-id event) :status] :running))
 
-(defmethod cells* :sheet/cell-deleted
+(defmethod nodes* :sheet/node-execution-completed
   [state event]
-  (dissoc state (:cell-id event)))
+  (-> state
+      (assoc-in [(:node-id event) :status] (:status event))
+      (assoc-in [(:node-id event) :last-error] nil)))
 
-(defmethod cells* :default [state _] state)
+(defmethod nodes* :default [state _] state)
 
-(defn cells
-  "Build cells read model from events"
+(defn nodes
+  "Build nodes read model from events"
   [initial-state events]
-  (reduce cells* initial-state events))
+  (reduce nodes* initial-state events))
 
 ;; =============================================================================
-;; Executions Projection
+;; Blackboard Projection
 ;; =============================================================================
 
-(defmulti executions*
-  "Apply event to executions read model"
+(defmulti blackboard*
+  "Apply event to blackboard read model"
   (fn [_state event] (:event/type event)))
 
-(defmethod executions* :sheet/cell-execution-requested
+(defmethod blackboard* :sheet/key-declared
   [state event]
-  (assoc state (:execution-id event)
-         {:id (:execution-id event)
+  (assoc state (:key event)
+         {:key (:key event)
+          :type (:type event)
+          :value nil
+          :version 0}))
+
+(defmethod blackboard* :sheet/key-value-set
+  [state event]
+  (-> state
+      (assoc-in [(:key event) :value] (:value event))
+      (assoc-in [(:key event) :version] (:version event))))
+
+(defmethod blackboard* :sheet/key-deleted
+  [state event]
+  (dissoc state (:key event)))
+
+(defmethod blackboard* :default [state _] state)
+
+(defn blackboard
+  "Build blackboard read model from events"
+  [initial-state events]
+  (reduce blackboard* (or initial-state {}) events))
+
+;; =============================================================================
+;; Ticks Projection (for tracking execution state)
+;; =============================================================================
+
+(defmulti ticks*
+  "Apply event to ticks read model"
+  (fn [_state event] (:event/type event)))
+
+(defmethod ticks* :sheet/tree-tick-started
+  [state event]
+  (assoc state (:tick-id event)
+         {:id (:tick-id event)
           :sheet-id (:sheet-id event)
-          :cell-id (:cell-id event)
-          :inputs (:inputs event)
-          :signature (:signature event)
           :status :running
-          :outputs nil
-          :error nil
-          :duration-ms nil
           :started-at (str (:event/timestamp event))
-          :completed-at nil}))
+          :completed-at nil
+          :root-status nil}))
 
-(defmethod executions* :sheet/cell-execution-completed
+(defmethod ticks* :sheet/tree-tick-completed
   [state event]
-  (let [exec-id (:execution-id event)]
-    (-> state
-        (assoc-in [exec-id :status] :completed)
-        (assoc-in [exec-id :outputs] (:outputs event))
-        (assoc-in [exec-id :duration-ms] (:duration-ms event))
-        (assoc-in [exec-id :completed-at] (str (:event/timestamp event))))))
+  (-> state
+      (assoc-in [(:tick-id event) :status] :completed)
+      (assoc-in [(:tick-id event) :root-status] (:root-status event))
+      (assoc-in [(:tick-id event) :completed-at] (str (:event/timestamp event)))))
 
-(defmethod executions* :sheet/cell-execution-failed
-  [state event]
-  (let [exec-id (:execution-id event)]
-    (-> state
-        (assoc-in [exec-id :status] :failed)
-        (assoc-in [exec-id :error] (:error event))
-        (assoc-in [exec-id :duration-ms] (:duration-ms event))
-        (assoc-in [exec-id :completed-at] (str (:event/timestamp event))))))
+(defmethod ticks* :default [state _] state)
 
-(defmethod executions* :sheet/cell-execution-cancelled
-  [state event]
-  (let [exec-id (:execution-id event)]
-    (-> state
-        (assoc-in [exec-id :status] :cancelled)
-        (assoc-in [exec-id :completed-at] (str (:event/timestamp event))))))
-
-(defmethod executions* :default [state _] state)
-
-(defn executions
-  "Build executions read model from events"
+(defn ticks
+  "Build ticks read model from events"
   [initial-state events]
-  (reduce executions* initial-state events))
-
-;; =============================================================================
-;; Dependency Graph Projection
-;; =============================================================================
-
-(defmulti dependency-graph*
-  "Apply event to dependency graph read model"
-  (fn [_state event] (:event/type event)))
-
-(defmethod dependency-graph* :sheet/cell-created
-  [state event]
-  (assoc-in state [:nodes (:cell-id event)] #{}))
-
-(defmethod dependency-graph* :sheet/input-bound
-  [state event]
-  (update-in state [:edges]
-             (fnil conj #{})
-             {:from (:source-cell-id event)
-              :to (:cell-id event)
-              :input-name (:input-name event)}))
-
-(defmethod dependency-graph* :sheet/input-unbound
-  [state event]
-  (update state :edges
-          (fn [edges]
-            (set (remove #(and (= (:to %) (:cell-id event))
-                               (= (:input-name %) (:input-name event)))
-                         edges)))))
-
-(defmethod dependency-graph* :sheet/cell-deleted
-  [state event]
-  (let [cell-id (:cell-id event)]
-    (-> state
-        (update :nodes dissoc cell-id)
-        (update :edges (fn [edges]
-                         (set (remove #(or (= (:from %) cell-id)
-                                           (= (:to %) cell-id))
-                                      edges)))))))
-
-(defmethod dependency-graph* :default [state _] state)
-
-(defn dependency-graph
-  "Build dependency graph read model from events"
-  [initial-state events]
-  (reduce dependency-graph* (or initial-state {:nodes {} :edges #{}}) events))
+  (reduce ticks* (or initial-state {}) events))
 
 ;; =============================================================================
 ;; Query Helper Functions
@@ -309,81 +304,93 @@
   (let [events (event-store/read event-store {:types sheet-events})]
     (vals (sheets {} events))))
 
-(defn get-cell
-  "Get a single cell by ID"
-  [event-store sheet-id cell-id]
+(defn get-node
+  "Get a single node by ID"
+  [event-store sheet-id node-id]
   (let [events (event-store/read event-store
-                                 {:types cell-events
-                                  :tags #{[:cell cell-id]}})]
-    (get (cells {} events) cell-id)))
+                                 {:types node-events
+                                  :tags #{[:node node-id]}})]
+    (get (nodes {} events) node-id)))
 
-(defn get-cells-for-sheet
-  "Get all cells in a sheet"
+(defn get-nodes-for-sheet
+  "Get all nodes in a sheet"
   [event-store sheet-id]
   (let [events (event-store/read event-store
-                                 {:types cell-events
+                                 {:types node-events
                                   :tags #{[:sheet sheet-id]}})]
-    (vals (cells {} events))))
+    (vals (nodes {} events))))
 
-(defn get-dependency-graph-for-sheet
-  "Get the dependency graph for a sheet"
+(defn get-nodes-by-id
+  "Get all nodes in a sheet as a map keyed by node-id"
   [event-store sheet-id]
   (let [events (event-store/read event-store
-                                 {:types dependency-events
+                                 {:types node-events
                                   :tags #{[:sheet sheet-id]}})]
-    (dependency-graph nil events)))
+    (nodes {} events)))
 
-(defn get-execution
-  "Get a single execution by ID"
-  [event-store execution-id]
-  (let [events (event-store/read event-store
-                                 {:types execution-events
-                                  :tags #{[:execution execution-id]}})]
-    (get (executions {} events) execution-id)))
-
-(defn get-executions-for-cell
-  "Get all executions for a cell"
-  [event-store cell-id]
-  (let [events (event-store/read event-store
-                                 {:types execution-events
-                                  :tags #{[:cell cell-id]}})]
-    (->> (vals (executions {} events))
-         (sort-by :started-at)
-         reverse)))
-
-(defn get-executions-for-sheet
-  "Get all executions in a sheet"
+(defn get-blackboard-for-sheet
+  "Get the blackboard for a sheet"
   [event-store sheet-id]
   (let [events (event-store/read event-store
-                                 {:types execution-events
+                                 {:types blackboard-events
                                   :tags #{[:sheet sheet-id]}})]
-    (->> (vals (executions {} events))
-         (sort-by :started-at)
-         reverse)))
+    (vals (blackboard nil events))))
 
-(defn get-dependent-cells
-  "Get cells that depend on the given cell"
-  [event-store sheet-id cell-id]
-  (let [graph (get-dependency-graph-for-sheet event-store sheet-id)]
-    (->> (:edges graph)
-         (filter #(= (:from %) cell-id))
-         (map :to)
-         set)))
-
-(defn get-sheet-view
-  "Get complete sheet view with all cells and dependency graph"
+(defn get-blackboard-by-key
+  "Get the blackboard for a sheet as a map keyed by key name"
   [event-store sheet-id]
-  (let [sheet-evts (event-store/read event-store
-                                     {:types sheet-events
-                                      :tags #{[:sheet sheet-id]}})
-        cell-evts (event-store/read event-store
-                                    {:types cell-events
-                                     :tags #{[:sheet sheet-id]}})
-        dep-evts (event-store/read event-store
-                                   {:types dependency-events
-                                    :tags #{[:sheet sheet-id]}})
-        sheet (get (sheets {} sheet-evts) sheet-id)]
-    (when sheet
-      {:sheet sheet
-       :cells (vals (cells {} cell-evts))
-       :dependency-graph (dependency-graph nil dep-evts)})))
+  (let [events (event-store/read event-store
+                                 {:types blackboard-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (blackboard nil events)))
+
+(defn get-tick
+  "Get a single tick by ID"
+  [event-store tick-id]
+  (let [events (event-store/read event-store
+                                 {:types tick-events
+                                  :tags #{[:tick tick-id]}})]
+    (get (ticks {} events) tick-id)))
+
+(defn get-root-node
+  "Get the root node for a sheet"
+  [event-store sheet-id]
+  (let [sheet (get-sheet event-store sheet-id)]
+    (when-let [root-id (:root-node-id sheet)]
+      (get-node event-store sheet-id root-id))))
+
+(defn get-children
+  "Get child nodes of a parent node"
+  [event-store sheet-id parent-id]
+  (let [parent (get-node event-store sheet-id parent-id)]
+    (when parent
+      (mapv #(get-node event-store sheet-id %)
+            (:children-ids parent)))))
+
+(defn get-descendants
+  "Get all descendant nodes of a node (recursive)"
+  [event-store sheet-id node-id]
+  (let [nodes-by-id (get-nodes-by-id event-store sheet-id)]
+    (letfn [(descendants [nid]
+              (let [node (get nodes-by-id nid)]
+                (cons node
+                      (mapcat descendants (:children-ids node)))))]
+      (rest (descendants node-id))))) ;; rest to exclude the node itself
+
+(defn is-descendant?
+  "Check if potential-descendant is a descendant of ancestor-id"
+  [nodes-by-id ancestor-id potential-descendant-id]
+  (loop [to-check #{potential-descendant-id}
+         visited #{}]
+    (if (empty? to-check)
+      false
+      (let [current (first to-check)
+            remaining (disj to-check current)]
+        (if (visited current)
+          (recur remaining visited)
+          (let [node (get nodes-by-id current)
+                parent-id (:parent-id node)]
+            (cond
+              (= parent-id ancestor-id) true
+              (nil? parent-id) (recur remaining (conj visited current))
+              :else (recur (conj remaining parent-id) (conj visited current)))))))))

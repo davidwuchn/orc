@@ -1,5 +1,5 @@
 (ns ai.obney.workshop.sheet-service.core.commands
-  "Sheet Service command handlers.
+  "Behavior Tree Sheet command handlers.
 
    All commands follow the Grain pattern:
    - Take context including event-store and command data
@@ -7,38 +7,9 @@
    - Return cognitect anomaly on failure
    - Last write wins (no optimistic concurrency)"
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
-            [ai.obney.workshop.sheet-service.core.dependency-graph :as dg]
             [ai.obney.grain.event-store-v2.interface :refer [->event]]
             [ai.obney.grain.command-processor.interface :refer [defcommand]]
             [cognitect.anomalies :as anom]))
-
-;; =============================================================================
-;; Helper Functions
-;; =============================================================================
-
-(defn valid-signature?
-  "Check if a signature is valid (has instruction and at least one output)."
-  [signature]
-  (and (string? (:instruction signature))
-       (seq (:instruction signature))
-       (seq (:outputs signature))))
-
-(defn input-defined?
-  "Check if an input name is defined in a signature."
-  [signature input-name]
-  (some #(= input-name (:name %)) (:inputs signature)))
-
-(defn resolve-inputs
-  "Resolve input values from bound source cells.
-   Returns a map of input-name -> field-value."
-  [event-store sheet-id cell]
-  (reduce-kv
-   (fn [acc input-name binding]
-     (let [source-cell (rm/get-cell event-store sheet-id (:source-cell-id binding))
-           field-value (get-in source-cell [:fields (:source-field-name binding)])]
-       (assoc acc input-name (or field-value {:type :text :value nil}))))
-   {}
-   (:input-bindings cell)))
 
 ;; =============================================================================
 ;; Sheet Commands
@@ -46,16 +17,15 @@
 
 (defcommand :sheet create-sheet
   "Create a new sheet."
-  [{{:keys [name description]} :command
+  [{{:keys [name]} :command
     :keys [event-store]}]
   (let [sheet-id (random-uuid)]
     {:command-result/events
      [(->event
        {:type :sheet/sheet-created
         :tags #{[:sheet sheet-id]}
-        :body (cond-> {:sheet-id sheet-id
-                       :name name}
-                description (assoc :description description))})]}))
+        :body {:sheet-id sheet-id
+               :name name}})]}))
 
 (defcommand :sheet rename-sheet
   "Rename an existing sheet."
@@ -74,7 +44,7 @@
                  :new-name name}})]})))
 
 (defcommand :sheet delete-sheet
-  "Delete a sheet and all its cells."
+  "Delete a sheet and all its nodes."
   [{{:keys [sheet-id]} :command
     :keys [event-store]}]
   (let [sheet (rm/get-sheet event-store sheet-id)]
@@ -88,261 +58,418 @@
           :body {:sheet-id sheet-id}})]})))
 
 ;; =============================================================================
-;; Cell Commands
+;; Node Commands
 ;; =============================================================================
 
-(defcommand :sheet create-cell
-  "Create a new empty cell in a sheet."
-  [{{:keys [sheet-id address cell-id]} :command
+(defcommand :sheet create-node
+  "Create a new node in a sheet.
+   If parent-id is nil, creates a root node.
+   Index specifies position among siblings (default 0)."
+  [{{:keys [sheet-id node-id type parent-id index]} :command
     :keys [event-store]}]
   (let [sheet (rm/get-sheet event-store sheet-id)
-        existing-cells (rm/get-cells-for-sheet event-store sheet-id)
-        address-taken? (some #(= address (:address %)) existing-cells)]
+        has-root? (some? (:root-node-id sheet))
+        parent (when parent-id (rm/get-node event-store sheet-id parent-id))]
     (cond
       (not sheet)
       {::anom/category ::anom/not-found
        ::anom/message "Sheet not found"}
 
-      address-taken?
+      ;; If no parent, this would be a root node - check if one exists
+      (and (nil? parent-id) has-root?)
       {::anom/category ::anom/conflict
-       ::anom/message (str "Cell address " address " is already taken")}
+       ::anom/message "Sheet already has a root node"}
+
+      ;; If parent specified, it must exist
+      (and parent-id (not parent))
+      {::anom/category ::anom/not-found
+       ::anom/message "Parent node not found"}
 
       :else
-      (let [new-cell-id (or cell-id (random-uuid))]
+      (let [new-node-id (or node-id (random-uuid))]
         {:command-result/events
          [(->event
-           {:type :sheet/cell-created
+           {:type :sheet/node-created
             :tags #{[:sheet sheet-id]
-                    [:cell new-cell-id]}
-            :body {:sheet-id sheet-id
-                   :cell-id new-cell-id
-                   :address address}})]}))))
-
-(defcommand :sheet set-cell-literal
-  "Set literal field values on a cell (clears any signature)."
-  [{{:keys [sheet-id cell-id fields]} :command
-    :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)]
-    (cond
-      (not cell)
-      {::anom/category ::anom/not-found
-       ::anom/message "Cell not found"}
-
-      :else
-      {:command-result/events
-       [(->event
-         {:type :sheet/cell-literal-set
-          :tags #{[:sheet sheet-id]
-                  [:cell cell-id]
-                  [:cell-data cell-id]}
-          :body (cond-> {:sheet-id sheet-id
-                         :cell-id cell-id
-                         :fields fields}
-                  (seq (:fields cell)) (assoc :previous-fields (:fields cell)))})]}))
-
-(defcommand :sheet set-cell-signature
-  "Define a formula signature for a cell (makes it a formula cell)."
-  [{{:keys [sheet-id cell-id signature]} :command
-    :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)]
-    (cond
-      (not cell)
-      {::anom/category ::anom/not-found
-       ::anom/message "Cell not found"}
-
-      (not (valid-signature? signature))
-      {::anom/category ::anom/incorrect
-       ::anom/message "Invalid signature: must have instruction and at least one output"}
-
-      :else
-      {:command-result/events
-       [(->event
-         {:type :sheet/cell-signature-defined
-          :tags #{[:sheet sheet-id]
-                  [:cell cell-id]}
-          :body (cond-> {:sheet-id sheet-id
-                         :cell-id cell-id
-                         :signature signature}
-                  (:signature cell) (assoc :previous-signature (:signature cell)))})]}))))
-
-(defcommand :sheet bind-input
-  "Bind an input in a formula cell to a field from another cell."
-  [{{:keys [sheet-id cell-id input-name source-cell-id source-field-name]} :command
-    :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)
-        source-cell (rm/get-cell event-store sheet-id source-cell-id)
-        dep-graph (rm/get-dependency-graph-for-sheet event-store sheet-id)]
-    (cond
-      (not cell)
-      {::anom/category ::anom/not-found
-       ::anom/message "Target cell not found"}
-
-      (not (:signature cell))
-      {::anom/category ::anom/incorrect
-       ::anom/message "Cannot bind input on a literal cell - cell must have a signature"}
-
-      (not (input-defined? (:signature cell) input-name))
-      {::anom/category ::anom/incorrect
-       ::anom/message (str "Input '" input-name "' not defined in cell signature")}
-
-      (not source-cell)
-      {::anom/category ::anom/not-found
-       ::anom/message "Source cell not found"}
-
-      ;; Cycle detection - check if adding this binding would create a cycle
-      (dg/would-create-cycle? dep-graph source-cell-id cell-id)
-      {::anom/category ::anom/conflict
-       ::anom/message "Binding would create a dependency cycle"}
-
-      :else
-      {:command-result/events
-       [(->event
-         {:type :sheet/input-bound
-          :tags #{[:sheet sheet-id]
-                  [:cell cell-id]
-                  [:cell-dependency cell-id]}
-          :body {:sheet-id sheet-id
-                 :cell-id cell-id
-                 :input-name input-name
-                 :source-cell-id source-cell-id
-                 :source-field-name source-field-name}})]})))
-
-(defcommand :sheet unbind-input
-  "Remove an input binding from a formula cell."
-  [{{:keys [sheet-id cell-id input-name]} :command
-    :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)]
-    (cond
-      (not cell)
-      {::anom/category ::anom/not-found
-       ::anom/message "Cell not found"}
-
-      :else
-      (let [previous-binding (get-in cell [:input-bindings input-name])]
-        {:command-result/events
-         [(->event
-           {:type :sheet/input-unbound
-            :tags #{[:sheet sheet-id]
-                    [:cell cell-id]
-                    [:cell-dependency cell-id]}
+                    [:node new-node-id]}
             :body (cond-> {:sheet-id sheet-id
-                           :cell-id cell-id
-                           :input-name input-name}
-                    previous-binding (assoc :previous-binding previous-binding))})]}))))
+                           :node-id new-node-id
+                           :type type}
+                    parent-id (assoc :parent-id parent-id)
+                    index (assoc :index index))})]}))))
 
-(defcommand :sheet delete-cell
-  "Delete a cell from a sheet."
-  [{{:keys [sheet-id cell-id]} :command
+(defcommand :sheet move-node
+  "Move a node to a new parent at specified index."
+  [{{:keys [sheet-id node-id new-parent-id index]} :command
     :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)
-        dependents (rm/get-dependent-cells event-store sheet-id cell-id)]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        new-parent (rm/get-node event-store sheet-id new-parent-id)
+        nodes-by-id (rm/get-nodes-by-id event-store sheet-id)]
     (cond
-      (not cell)
+      (not node)
       {::anom/category ::anom/not-found
-       ::anom/message "Cell not found"}
+       ::anom/message "Node not found"}
 
-      (seq dependents)
+      (not new-parent)
+      {::anom/category ::anom/not-found
+       ::anom/message "New parent node not found"}
+
+      ;; Check for cycles - can't move node under its own descendant
+      (rm/is-descendant? nodes-by-id node-id new-parent-id)
       {::anom/category ::anom/conflict
-       ::anom/message (str "Cannot delete: cell has " (count dependents) " dependent cells. Remove their bindings first.")}
+       ::anom/message "Cannot move node under its own descendant"}
 
       :else
       {:command-result/events
        [(->event
-         {:type :sheet/cell-deleted
+         {:type :sheet/node-moved
           :tags #{[:sheet sheet-id]
-                  [:cell cell-id]}
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :new-parent-id new-parent-id
+                         :index index}
+                  (:parent-id node) (assoc :old-parent-id (:parent-id node)))})]})))
+
+(defcommand :sheet reorder-node
+  "Reorder a node among its siblings."
+  [{{:keys [sheet-id node-id index]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        parent-id (:parent-id node)
+        parent (when parent-id (rm/get-node event-store sheet-id parent-id))
+        current-children (when parent (:children-ids parent))
+        current-index (when current-children
+                        (.indexOf (vec current-children) node-id))]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (nil? parent-id)
+      {::anom/category ::anom/incorrect
+       ::anom/message "Cannot reorder root node"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-reordered
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
           :body {:sheet-id sheet-id
-                 :cell-id cell-id}})]})))
+                 :node-id node-id
+                 :old-index (or current-index 0)
+                 :new-index index}})]})))
+
+(defcommand :sheet delete-node
+  "Delete a node from a sheet.
+   Node must have no children (delete children first)."
+  [{{:keys [sheet-id node-id]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (seq (:children-ids node))
+      {::anom/category ::anom/conflict
+       ::anom/message "Cannot delete node with children. Delete children first."}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-deleted
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body {:sheet-id sheet-id
+                 :node-id node-id}})]})))
+
+(defcommand :sheet set-node-name
+  "Set the name of a node."
+  [{{:keys [sheet-id node-id name]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-name-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :name name}
+                  (:name node) (assoc :previous-name (:name node)))})]})))
+
+(defcommand :sheet set-node-instruction
+  "Set the instruction for a leaf node."
+  [{{:keys [sheet-id node-id instruction]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have instructions"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-instruction-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :instruction instruction}
+                  (:instruction node) (assoc :previous-instruction (:instruction node)))})]})))
+
+(defcommand :sheet set-node-io
+  "Set the reads/writes (blackboard keys) for a leaf node."
+  [{{:keys [sheet-id node-id reads writes]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        all-keys (set (keys blackboard))
+        unknown-reads (remove all-keys reads)
+        unknown-writes (remove all-keys writes)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have reads/writes"}
+
+      (seq unknown-reads)
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Unknown blackboard keys in reads: " (vec unknown-reads))}
+
+      (seq unknown-writes)
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Unknown blackboard keys in writes: " (vec unknown-writes))}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-io-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :reads (vec reads)
+                         :writes (vec writes)}
+                  (seq (:reads node)) (assoc :previous-reads (:reads node))
+                  (seq (:writes node)) (assoc :previous-writes (:writes node)))})]})))
+
+(defcommand :sheet set-node-decorators
+  "Set decorators for a node."
+  [{{:keys [sheet-id node-id decorators]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-decorators-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :decorators (vec decorators)}
+                  (seq (:decorators node)) (assoc :previous-decorators (:decorators node)))})]})))
+
+;; =============================================================================
+;; Blackboard Commands
+;; =============================================================================
+
+(defcommand :sheet declare-key
+  "Declare a new key in the blackboard."
+  [{{:keys [sheet-id key type]} :command
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (contains? blackboard key)
+      {::anom/category ::anom/conflict
+       ::anom/message (str "Key '" key "' already declared")}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/key-declared
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :key key
+                 :type type}})]})))
+
+(defcommand :sheet set-key-value
+  "Set a value for a blackboard key."
+  [{{:keys [sheet-id key value]} :command
+    :keys [event-store]}]
+  (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        entry (get blackboard key)]
+    (cond
+      (not entry)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Key '" key "' not declared")}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/key-value-set
+          :tags #{[:sheet sheet-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :key key
+                         :value value
+                         :version (inc (:version entry))}
+                  (some? (:value entry)) (assoc :previous-value (:value entry)))})]})))
+
+(defcommand :sheet delete-key
+  "Delete a key from the blackboard."
+  [{{:keys [sheet-id key]} :command
+    :keys [event-store]}]
+  (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        entry (get blackboard key)
+        ;; Check if any nodes reference this key
+        nodes (rm/get-nodes-for-sheet event-store sheet-id)
+        nodes-using-key (filter (fn [node]
+                                  (or (some #{key} (:reads node))
+                                      (some #{key} (:writes node))))
+                                nodes)]
+    (cond
+      (not entry)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Key '" key "' not declared")}
+
+      (seq nodes-using-key)
+      {::anom/category ::anom/conflict
+       ::anom/message (str "Cannot delete key '" key "': still in use by " (count nodes-using-key) " node(s)")}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/key-deleted
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :key key}})]})))
 
 ;; =============================================================================
 ;; Execution Commands
 ;; =============================================================================
 
-(defcommand :sheet request-cell-execution
-  "Request execution of a formula cell."
-  [{{:keys [sheet-id cell-id execution-id]} :command
+(defcommand :sheet tick-tree
+  "Start a tree tick (execute from root)."
+  [{{:keys [sheet-id tick-id]} :command
     :keys [event-store]}]
-  (let [cell (rm/get-cell event-store sheet-id cell-id)]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        root-node-id (:root-node-id sheet)]
     (cond
-      (not cell)
+      (not sheet)
       {::anom/category ::anom/not-found
-       ::anom/message "Cell not found"}
+       ::anom/message "Sheet not found"}
 
-      (not (:signature cell))
+      (not root-node-id)
       {::anom/category ::anom/incorrect
-       ::anom/message "Cannot execute a literal cell - cell must have a signature"}
-
-      (not (dg/all-inputs-bound? cell))
-      {::anom/category ::anom/incorrect
-       ::anom/message "Not all inputs are bound"}
+       ::anom/message "Sheet has no root node"}
 
       :else
-      (let [exec-id (or execution-id (random-uuid))
-            inputs (resolve-inputs event-store sheet-id cell)]
+      (let [new-tick-id (or tick-id (random-uuid))]
         {:command-result/events
          [(->event
-           {:type :sheet/cell-execution-requested
+           {:type :sheet/tree-tick-started
             :tags #{[:sheet sheet-id]
-                    [:cell cell-id]
-                    [:execution exec-id]}
+                    [:tick new-tick-id]}
             :body {:sheet-id sheet-id
-                   :cell-id cell-id
-                   :execution-id exec-id
-                   :inputs inputs
-                   :signature (:signature cell)}})]}))))
+                   :tick-id new-tick-id}})]}))))
 
-(defcommand :sheet complete-cell-execution
-  "Mark a cell execution as completed with outputs (internal command)."
-  [{{:keys [sheet-id cell-id execution-id outputs duration-ms]} :command
+(defcommand :sheet tick-node
+  "Start a single node tick (for testing or manual execution)."
+  [{{:keys [sheet-id node-id tick-id overrides]} :command
     :keys [event-store]}]
-  {:command-result/events
-   [(->event
-     {:type :sheet/cell-execution-completed
-      :tags #{[:sheet sheet-id]
-              [:cell cell-id]
-              [:execution execution-id]
-              [:cell-data cell-id]}
-      :body {:sheet-id sheet-id
-             :cell-id cell-id
-             :execution-id execution-id
-             :outputs outputs
-             :duration-ms duration-ms}})]})
-
-(defcommand :sheet fail-cell-execution
-  "Mark a cell execution as failed (internal command)."
-  [{{:keys [sheet-id cell-id execution-id error duration-ms]} :command
-    :keys [event-store]}]
-  {:command-result/events
-   [(->event
-     {:type :sheet/cell-execution-failed
-      :tags #{[:sheet sheet-id]
-              [:cell cell-id]
-              [:execution execution-id]}
-      :body {:sheet-id sheet-id
-             :cell-id cell-id
-             :execution-id execution-id
-             :error error
-             :duration-ms duration-ms}})]})
-
-(defcommand :sheet cancel-cell-execution
-  "Cancel a running cell execution."
-  [{{:keys [sheet-id execution-id]} :command
-    :keys [event-store]}]
-  (let [execution (rm/get-execution event-store execution-id)]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        ;; Get input values from blackboard (for reads)
+        inputs (reduce (fn [acc k]
+                         (if-let [entry (get blackboard k)]
+                           (assoc acc k (:value entry))
+                           acc))
+                       {}
+                       (:reads node))
+        ;; Apply overrides
+        inputs-with-overrides (merge inputs (or overrides {}))]
     (cond
-      (not execution)
+      (not node)
       {::anom/category ::anom/not-found
-       ::anom/message "Execution not found"}
+       ::anom/message "Node not found"}
 
-      (not= :running (:status execution))
-      {::anom/category ::anom/conflict
-       ::anom/message "Execution is not running"}
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can be ticked directly"}
+
+      (not (:instruction node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Node has no instruction"}
 
       :else
-      {:command-result/events
-       [(->event
-         {:type :sheet/cell-execution-cancelled
-          :tags #{[:sheet sheet-id]
-                  [:execution execution-id]}
-          :body {:sheet-id sheet-id
-                 :execution-id execution-id}})]})))
+      (let [new-tick-id (or tick-id (random-uuid))]
+        {:command-result/events
+         [(->event
+           {:type :sheet/node-execution-started
+            :tags #{[:sheet sheet-id]
+                    [:node node-id]
+                    [:tick new-tick-id]}
+            :body {:sheet-id sheet-id
+                   :tick-id new-tick-id
+                   :node-id node-id
+                   :inputs inputs-with-overrides}})]}))))
+
+(defcommand :sheet complete-node-execution
+  "Complete a node execution (internal command from todo processor)."
+  [{{:keys [sheet-id tick-id node-id status writes duration-ms]} :command
+    :keys [event-store]}]
+  {:command-result/events
+   [(->event
+     {:type :sheet/node-execution-completed
+      :tags #{[:sheet sheet-id]
+              [:node node-id]
+              [:tick tick-id]}
+      :body (cond-> {:sheet-id sheet-id
+                     :tick-id tick-id
+                     :node-id node-id
+                     :status status}
+              (seq writes) (assoc :writes writes)
+              duration-ms (assoc :duration-ms duration-ms))})]})
+
+(defcommand :sheet fail-node-execution
+  "Mark a node execution as failed (internal command from todo processor)."
+  [{{:keys [sheet-id tick-id node-id error duration-ms]} :command
+    :keys [event-store]}]
+  {:command-result/events
+   [(->event
+     {:type :sheet/node-execution-completed
+      :tags #{[:sheet sheet-id]
+              [:node node-id]
+              [:tick tick-id]}
+      :body (cond-> {:sheet-id sheet-id
+                     :tick-id tick-id
+                     :node-id node-id
+                     :status :failure}
+              error (assoc :error error)
+              duration-ms (assoc :duration-ms duration-ms))})]})

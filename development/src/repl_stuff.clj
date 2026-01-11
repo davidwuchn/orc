@@ -12,6 +12,7 @@
     (def context (::service/context service))
     (def event-store (:event-store context)))
 
+
   ;;
   ;; Stop Service ;;
   ;;

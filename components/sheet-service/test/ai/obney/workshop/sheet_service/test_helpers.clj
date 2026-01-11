@@ -1,9 +1,8 @@
 (ns ai.obney.workshop.sheet-service.test-helpers
-  "Test utilities for sheet service tests."
+  "Test utilities for behavior tree sheet service tests."
   (:require [ai.obney.workshop.sheet-service.core.commands]
             [ai.obney.workshop.sheet-service.core.queries]
             [ai.obney.workshop.sheet-service.interface.schemas]
-            [ai.obney.workshop.sheet-service.core.agent-runtime :as agent]
             [ai.obney.grain.event-store-v2.interface :as es]
             [ai.obney.grain.command-processor.interface :as cp]
             [ai.obney.grain.query-processor.interface :as qp]
@@ -18,10 +17,8 @@
   []
   (let [event-store (es/start {:conn {:type :in-memory}
                                :event-pubsub nil
-                               :logger nil})
-        agent-runtime (agent/create-mock-runtime :delay-ms 10)]
+                               :logger nil})]
     {:event-store event-store
-     :agent-runtime agent-runtime
      :command-registry (cp/global-command-registry)
      :query-registry (qp/global-query-registry)}))
 
@@ -77,104 +74,158 @@
       (throw (ex-info "Unknown query" {:query query-name})))))
 
 ;; =============================================================================
-;; Factory Functions
+;; Factory Functions - Sheet Commands
 ;; =============================================================================
 
 (defn make-create-sheet-command
   "Create a create-sheet command with defaults."
-  [& {:keys [name description]
-      :or {name "Test Sheet"
-           description "A test sheet for unit tests"}}]
+  [& {:keys [name]
+      :or {name "Test Sheet"}}]
   {:command/name :sheet/create-sheet
    :command/id (random-uuid)
    :command/timestamp (time/now)
-   :name name
-   :description description})
+   :name name})
 
-(defn make-create-cell-command
-  "Create a create-cell command."
-  [sheet-id address & {:keys [cell-id]}]
-  (cond-> {:command/name :sheet/create-cell
+(defn make-rename-sheet-command
+  "Create a rename-sheet command."
+  [sheet-id name]
+  {:command/name :sheet/rename-sheet
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :name name})
+
+(defn make-delete-sheet-command
+  "Create a delete-sheet command."
+  [sheet-id]
+  {:command/name :sheet/delete-sheet
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id})
+
+;; =============================================================================
+;; Factory Functions - Node Commands
+;; =============================================================================
+
+(defn make-create-node-command
+  "Create a create-node command."
+  [sheet-id node-type & {:keys [node-id parent-id index]}]
+  (cond-> {:command/name :sheet/create-node
            :command/id (random-uuid)
            :command/timestamp (time/now)
            :sheet-id sheet-id
-           :address address}
-    cell-id (assoc :cell-id cell-id)))
+           :type node-type}
+    node-id (assoc :node-id node-id)
+    parent-id (assoc :parent-id parent-id)
+    index (assoc :index index)))
 
-(defn make-set-literal-command
-  "Create a set-cell-literal command."
-  [sheet-id cell-id fields]
-  {:command/name :sheet/set-cell-literal
+(defn make-move-node-command
+  "Create a move-node command."
+  [sheet-id node-id new-parent-id index]
+  {:command/name :sheet/move-node
    :command/id (random-uuid)
    :command/timestamp (time/now)
    :sheet-id sheet-id
-   :cell-id cell-id
-   :fields fields})
+   :node-id node-id
+   :new-parent-id new-parent-id
+   :index index})
 
-(defn make-set-signature-command
-  "Create a set-cell-signature command."
-  [sheet-id cell-id signature]
-  {:command/name :sheet/set-cell-signature
+(defn make-delete-node-command
+  "Create a delete-node command."
+  [sheet-id node-id]
+  {:command/name :sheet/delete-node
    :command/id (random-uuid)
    :command/timestamp (time/now)
    :sheet-id sheet-id
-   :cell-id cell-id
-   :signature signature})
+   :node-id node-id})
 
-(defn make-bind-input-command
-  "Create a bind-input command."
-  [sheet-id cell-id input-name source-cell-id source-field-name]
-  {:command/name :sheet/bind-input
+(defn make-set-node-name-command
+  "Create a set-node-name command."
+  [sheet-id node-id name]
+  {:command/name :sheet/set-node-name
    :command/id (random-uuid)
    :command/timestamp (time/now)
    :sheet-id sheet-id
-   :cell-id cell-id
-   :input-name input-name
-   :source-cell-id source-cell-id
-   :source-field-name source-field-name})
+   :node-id node-id
+   :name name})
 
-(defn make-request-execution-command
-  "Create a request-cell-execution command."
-  [sheet-id cell-id]
-  {:command/name :sheet/request-cell-execution
+(defn make-set-node-instruction-command
+  "Create a set-node-instruction command."
+  [sheet-id node-id instruction]
+  {:command/name :sheet/set-node-instruction
    :command/id (random-uuid)
    :command/timestamp (time/now)
    :sheet-id sheet-id
-   :cell-id cell-id})
+   :node-id node-id
+   :instruction instruction})
+
+(defn make-set-node-io-command
+  "Create a set-node-io command."
+  [sheet-id node-id reads writes]
+  {:command/name :sheet/set-node-io
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :node-id node-id
+   :reads reads
+   :writes writes})
 
 ;; =============================================================================
-;; Test Data Builders
+;; Factory Functions - Blackboard Commands
 ;; =============================================================================
 
-(defn text-field
-  "Create a text field value."
-  [value]
-  {:type :text :value value})
+(defn make-declare-key-command
+  "Create a declare-key command."
+  [sheet-id key type]
+  {:command/name :sheet/declare-key
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :key key
+   :type type})
 
-(defn number-field
-  "Create a number field value."
-  [value]
-  {:type :number :value value})
+(defn make-set-key-value-command
+  "Create a set-key-value command."
+  [sheet-id key value]
+  {:command/name :sheet/set-key-value
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :key key
+   :value value})
 
-(defn yes-no-field
-  "Create a yes-no field value."
-  [value]
-  {:type :yes-no :value value})
+(defn make-delete-key-command
+  "Create a delete-key command."
+  [sheet-id key]
+  {:command/name :sheet/delete-key
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :key key})
 
-(defn simple-signature
-  "Create a simple signature with one text input and one text output."
-  [instruction]
-  {:instruction instruction
-   :inputs [{:name "input" :type :text}]
-   :outputs [{:name "output" :type :text}]})
+;; =============================================================================
+;; Factory Functions - Execution Commands
+;; =============================================================================
 
-(defn gate-signature
-  "Create a gate signature with a yes-no output for cycle control."
-  [instruction]
-  {:instruction instruction
-   :inputs [{:name "input" :type :text}]
-   :outputs [{:name "result" :type :text}
-             {:name "continue" :type :yes-no}]})
+(defn make-tick-tree-command
+  "Create a tick-tree command."
+  [sheet-id & {:keys [tick-id]}]
+  (cond-> {:command/name :sheet/tick-tree
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id}
+    tick-id (assoc :tick-id tick-id)))
+
+(defn make-tick-node-command
+  "Create a tick-node command."
+  [sheet-id node-id & {:keys [tick-id overrides]}]
+  (cond-> {:command/name :sheet/tick-node
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id}
+    tick-id (assoc :tick-id tick-id)
+    overrides (assoc :overrides overrides)))
 
 ;; =============================================================================
 ;; Assertion Helpers

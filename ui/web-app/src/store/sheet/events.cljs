@@ -1,5 +1,5 @@
 (ns store.sheet.events
-  "Sheet store events - handles state changes for sheet operations.
+  "Behavior Tree Sheet events - handles state changes.
 
    Pattern: Commands don't return data. On success, re-fetch the screen query."
   (:require [re-frame.core :as rf]
@@ -52,12 +52,14 @@
 (rf/reg-event-db
   ::load-sheet-view-screen-success
   (fn [db [_ result]]
-    (let [cells-by-id (into {} (map (juxt :id identity) (:cells result)))]
+    (let [nodes-by-id (into {} (map (juxt :id identity) (:nodes result)))
+          blackboard-by-key (into {} (map (juxt :key identity) (:blackboard result)))]
       (-> db
           (assoc-in [:sheet :loading?] false)
           (assoc-in [:sheet :data] (:sheet result))
-          (assoc-in [:sheet :cells] cells-by-id)
-          (assoc-in [:sheet :dependency-graph] (:dependency-graph result))))))
+          (assoc-in [:sheet :nodes] nodes-by-id)
+          (assoc-in [:sheet :blackboard] blackboard-by-key)
+          (assoc-in [:sheet :layout] (:layout result))))))
 
 (rf/reg-event-db
   ::load-sheet-view-screen-failure
@@ -72,11 +74,10 @@
 
 (rf/reg-event-fx
   ::create-sheet
-  (fn [{:keys [db]} [_ api-client name description on-success]]
+  (fn [{:keys [db]} [_ api-client name on-success]]
     {:db (assoc-in db [:sheets :creating?] true)
      ::sheet-fx/create-sheet {:api-client api-client
                               :name name
-                              :description description
                               :on-success [::create-sheet-success api-client on-success]
                               :on-failure [::create-sheet-failure]}}))
 
@@ -120,136 +121,203 @@
         (assoc-in [:sheets :error] error))))
 
 ;; =============================================================================
-;; Cell Selection Events
+;; Node Selection Events
 ;; =============================================================================
 
 (rf/reg-event-db
-  ::select-cell
-  (fn [db [_ cell-id]]
-    (assoc-in db [:sheet :selected-cell-id] cell-id)))
+  ::select-node
+  (fn [db [_ node-id]]
+    (assoc-in db [:sheet :selected-node-id] node-id)))
 
 (rf/reg-event-db
   ::clear-selection
   (fn [db _]
-    (update db :sheet dissoc :selected-cell-id)))
+    (update db :sheet dissoc :selected-node-id)))
+
+(rf/reg-event-db
+  ::set-editing-node
+  (fn [db [_ node-id]]
+    (assoc-in db [:sheet :editing-node-id] node-id)))
+
+(rf/reg-event-db
+  ::clear-editing
+  (fn [db _]
+    (update db :sheet dissoc :editing-node-id)))
 
 ;; =============================================================================
-;; Cell CRUD Events
+;; Node CRUD Events
 ;; =============================================================================
 
+;; Generic success handler - just refetch the screen
 (rf/reg-event-fx
-  ::create-cell
-  (fn [_ [_ api-client sheet-id address]]
-    {::sheet-fx/create-cell {:api-client api-client
-                             :sheet-id sheet-id
-                             :address address
-                             :on-success [::cell-command-success api-client sheet-id]
-                             :on-failure [::cell-operation-failure]}}))
-
-(rf/reg-event-fx
-  ::set-cell-literal
-  (fn [_ [_ api-client sheet-id cell-id fields]]
-    {::sheet-fx/set-cell-literal {:api-client api-client
-                                  :sheet-id sheet-id
-                                  :cell-id cell-id
-                                  :fields fields
-                                  :on-success [::cell-command-success api-client sheet-id]
-                                  :on-failure [::cell-operation-failure]}}))
-
-(rf/reg-event-fx
-  ::set-cell-signature
-  (fn [_ [_ api-client sheet-id cell-id signature]]
-    {::sheet-fx/set-cell-signature {:api-client api-client
-                                    :sheet-id sheet-id
-                                    :cell-id cell-id
-                                    :signature signature
-                                    :on-success [::cell-command-success api-client sheet-id]
-                                    :on-failure [::cell-operation-failure]}}))
-
-(rf/reg-event-fx
-  ::bind-input
-  (fn [_ [_ api-client sheet-id cell-id input-name source-cell-id source-field-name]]
-    {::sheet-fx/bind-input {:api-client api-client
-                            :sheet-id sheet-id
-                            :cell-id cell-id
-                            :input-name input-name
-                            :source-cell-id source-cell-id
-                            :source-field-name source-field-name
-                            :on-success [::cell-command-success api-client sheet-id]
-                            :on-failure [::cell-operation-failure]}}))
-
-(rf/reg-event-fx
-  ::unbind-input
-  (fn [_ [_ api-client sheet-id cell-id input-name]]
-    {::sheet-fx/unbind-input {:api-client api-client
-                              :sheet-id sheet-id
-                              :cell-id cell-id
-                              :input-name input-name
-                              :on-success [::cell-command-success api-client sheet-id]
-                              :on-failure [::cell-operation-failure]}}))
-
-(rf/reg-event-fx
-  ::delete-cell
-  (fn [{:keys [db]} [_ api-client sheet-id cell-id]]
-    {:db (update db :sheet dissoc :selected-cell-id)
-     ::sheet-fx/delete-cell {:api-client api-client
-                             :sheet-id sheet-id
-                             :cell-id cell-id
-                             :on-success [::cell-command-success api-client sheet-id]
-                             :on-failure [::cell-operation-failure]}}))
-
-;; Generic success handler for cell commands - just refetch the screen
-(rf/reg-event-fx
-  ::cell-command-success
+  ::node-command-success
   (fn [_ [_ api-client sheet-id _response]]
     {:dispatch [::load-sheet-view-screen api-client sheet-id]}))
 
 (rf/reg-event-db
-  ::cell-operation-failure
+  ::node-operation-failure
   (fn [db [_ error]]
     (assoc-in db [:sheet :error] error)))
+
+(rf/reg-event-fx
+  ::create-node
+  (fn [_ [_ api-client sheet-id node-type parent-id index]]
+    {::sheet-fx/create-node {:api-client api-client
+                             :sheet-id sheet-id
+                             :node-type node-type
+                             :parent-id parent-id
+                             :index index
+                             :on-success [::node-command-success api-client sheet-id]
+                             :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::move-node
+  (fn [_ [_ api-client sheet-id node-id new-parent-id index]]
+    {::sheet-fx/move-node {:api-client api-client
+                           :sheet-id sheet-id
+                           :node-id node-id
+                           :new-parent-id new-parent-id
+                           :index index
+                           :on-success [::node-command-success api-client sheet-id]
+                           :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::reorder-node
+  (fn [_ [_ api-client sheet-id node-id index]]
+    {::sheet-fx/reorder-node {:api-client api-client
+                              :sheet-id sheet-id
+                              :node-id node-id
+                              :index index
+                              :on-success [::node-command-success api-client sheet-id]
+                              :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::delete-node
+  (fn [{:keys [db]} [_ api-client sheet-id node-id]]
+    {:db (update db :sheet dissoc :selected-node-id)
+     ::sheet-fx/delete-node {:api-client api-client
+                             :sheet-id sheet-id
+                             :node-id node-id
+                             :on-success [::node-command-success api-client sheet-id]
+                             :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-node-name
+  (fn [_ [_ api-client sheet-id node-id name]]
+    {::sheet-fx/set-node-name {:api-client api-client
+                               :sheet-id sheet-id
+                               :node-id node-id
+                               :name name
+                               :on-success [::node-command-success api-client sheet-id]
+                               :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-node-instruction
+  (fn [_ [_ api-client sheet-id node-id instruction]]
+    {::sheet-fx/set-node-instruction {:api-client api-client
+                                      :sheet-id sheet-id
+                                      :node-id node-id
+                                      :instruction instruction
+                                      :on-success [::node-command-success api-client sheet-id]
+                                      :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-node-io
+  (fn [_ [_ api-client sheet-id node-id reads writes]]
+    {::sheet-fx/set-node-io {:api-client api-client
+                             :sheet-id sheet-id
+                             :node-id node-id
+                             :reads reads
+                             :writes writes
+                             :on-success [::node-command-success api-client sheet-id]
+                             :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-node-decorators
+  (fn [_ [_ api-client sheet-id node-id decorators]]
+    {::sheet-fx/set-node-decorators {:api-client api-client
+                                     :sheet-id sheet-id
+                                     :node-id node-id
+                                     :decorators decorators
+                                     :on-success [::node-command-success api-client sheet-id]
+                                     :on-failure [::node-operation-failure]}}))
+
+;; =============================================================================
+;; Blackboard Events
+;; =============================================================================
+
+(rf/reg-event-fx
+  ::declare-key
+  (fn [_ [_ api-client sheet-id key type]]
+    {::sheet-fx/declare-key {:api-client api-client
+                             :sheet-id sheet-id
+                             :key key
+                             :type type
+                             :on-success [::node-command-success api-client sheet-id]
+                             :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-key-value
+  (fn [_ [_ api-client sheet-id key value]]
+    {::sheet-fx/set-key-value {:api-client api-client
+                               :sheet-id sheet-id
+                               :key key
+                               :value value
+                               :on-success [::node-command-success api-client sheet-id]
+                               :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::delete-key
+  (fn [_ [_ api-client sheet-id key]]
+    {::sheet-fx/delete-key {:api-client api-client
+                            :sheet-id sheet-id
+                            :key key
+                            :on-success [::node-command-success api-client sheet-id]
+                            :on-failure [::node-operation-failure]}}))
 
 ;; =============================================================================
 ;; Execution Events
 ;; =============================================================================
 
 (rf/reg-event-fx
-  ::request-execution
-  (fn [{:keys [db]} [_ api-client sheet-id cell-id]]
-    {:db (assoc-in db [:sheet :cells cell-id :execution-status] :pending)
-     ::sheet-fx/request-execution {:api-client api-client
-                                   :sheet-id sheet-id
-                                   :cell-id cell-id
-                                   :on-success [::cell-command-success api-client sheet-id]
-                                   :on-failure [::request-execution-failure cell-id]}}))
+  ::tick-tree
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    {:db (assoc-in db [:sheet :ticking?] true)
+     ::sheet-fx/tick-tree {:api-client api-client
+                           :sheet-id sheet-id
+                           :on-success [::tick-tree-success api-client sheet-id]
+                           :on-failure [::tick-tree-failure]}}))
+
+(rf/reg-event-fx
+  ::tick-tree-success
+  (fn [{:keys [db]} [_ api-client sheet-id _response]]
+    {:db (assoc-in db [:sheet :ticking?] false)
+     :dispatch [::load-sheet-view-screen api-client sheet-id]}))
 
 (rf/reg-event-db
-  ::request-execution-failure
-  (fn [db [_ cell-id error]]
+  ::tick-tree-failure
+  (fn [db [_ error]]
     (-> db
-        (assoc-in [:sheet :cells cell-id :execution-status] :failed)
-        (assoc-in [:sheet :cells cell-id :last-error] (:cognitect.anomalies/message error)))))
+        (assoc-in [:sheet :ticking?] false)
+        (assoc-in [:sheet :error] error))))
 
-;; =============================================================================
-;; Real-time Update Events (for WebSocket/SSE updates)
-;; =============================================================================
-
-(rf/reg-event-db
-  ::cell-execution-completed
-  (fn [db [_ cell-id outputs]]
-    (-> db
-        (assoc-in [:sheet :cells cell-id :fields] outputs)
-        (assoc-in [:sheet :cells cell-id :execution-status] :completed)
-        (assoc-in [:sheet :cells cell-id :status] :valid)
-        (assoc-in [:sheet :cells cell-id :last-error] nil))))
+(rf/reg-event-fx
+  ::tick-node
+  (fn [{:keys [db]} [_ api-client sheet-id node-id overrides]]
+    {:db (assoc-in db [:sheet :nodes node-id :status] :running)
+     ::sheet-fx/tick-node {:api-client api-client
+                           :sheet-id sheet-id
+                           :node-id node-id
+                           :overrides overrides
+                           :on-success [::node-command-success api-client sheet-id]
+                           :on-failure [::tick-node-failure node-id]}}))
 
 (rf/reg-event-db
-  ::cell-execution-failed
-  (fn [db [_ cell-id error]]
+  ::tick-node-failure
+  (fn [db [_ node-id error]]
     (-> db
-        (assoc-in [:sheet :cells cell-id :execution-status] :failed)
-        (assoc-in [:sheet :cells cell-id :status] :error)
-        (assoc-in [:sheet :cells cell-id :last-error] error))))
+        (assoc-in [:sheet :nodes node-id :status] :failure)
+        (assoc-in [:sheet :nodes node-id :last-error] (:cognitect.anomalies/message error)))))
 
 ;; =============================================================================
 ;; Clear Sheet State
