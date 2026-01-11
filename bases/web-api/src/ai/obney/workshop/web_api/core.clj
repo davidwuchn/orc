@@ -80,7 +80,11 @@
                                 {:kms-key-id (:kms-key-id env)
                                  :localstack/enabled (:localstack/enabled env)
                                  :localstack/endpoint (:localstack/endpoint env)
-                                 :aws/region (:aws/region env)})}
+                                 :aws/region (:aws/region env)})
+              ;; DSCloj provider for behavior tree leaf execution
+              ;; Set :dscloj-provider env var to enable (e.g., "openrouter", "anthropic")
+              :dscloj-provider (when-let [p (:dscloj-provider env)]
+                                 (keyword p))}
 
    ::routes {:context (ig/ref ::context)}
 
@@ -90,7 +94,9 @@
                 ::http/allowed-origins {:allowed-origins (constantly true)
                                         :creds true}}
 
-   ::dspy {}})
+   ::dspy {}
+
+   ::dscloj {}})
 
 ;; -------------- ;;
 ;; Integrant Keys ;;
@@ -135,6 +141,11 @@
                     :max_tokens 8000)]
 
     (dspy/configure :lm lm)))
+
+;; DSCloj setup - registers providers from environment variables
+(defmethod ig/init-key ::dscloj [_ _]
+  (require '[dscloj.core :as dscloj])
+  ((resolve 'dscloj/quick-setup!)))
 
 (defmethod ig/init-key ::event-store [_ config]
   (es/start config))

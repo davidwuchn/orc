@@ -6,6 +6,7 @@
    - Handle sequence/fallback composite node logic
    - Update blackboard with node outputs"
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
+            [ai.obney.workshop.sheet-service.core.executor :as executor]
             [ai.obney.grain.event-store-v2.interface :refer [->event]]))
 
 ;; =============================================================================
@@ -47,23 +48,26 @@
 ;; Node Execution Processor
 ;; =============================================================================
 
+;; Default provider - set to nil to use mock, or :openrouter etc for real execution
+(def ^:dynamic *default-dscloj-provider* :openrouter)
+
 (defn execute-leaf-node
   "Execute a leaf node when node-execution-started is emitted.
-   For now, this is a mock execution that returns success.
-   In a real implementation, this would invoke an AI agent."
-  [{:keys [event event-store]}]
+   Uses DSCloj to invoke an AI agent if a provider is configured,
+   otherwise falls back to mock execution."
+  [{:keys [event event-store dscloj-provider]}]
   (let [sheet-id (:sheet-id event)
         tick-id (:tick-id event)
         node-id (:node-id event)
         node (rm/get-node event-store sheet-id node-id)]
     (when (= :leaf (:type node))
-      ;; Mock execution - in real implementation, invoke AI agent here
-      (let [start-time (System/currentTimeMillis)
-            ;; Simulate some outputs based on writes
-            mock-outputs (into {}
-                               (map (fn [k] [k (str "mock-value-for-" k)])
-                                    (:writes node)))
-            duration-ms (- (System/currentTimeMillis) start-time)]
+      (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
+            ;; Use provider from context, fall back to default, or use mock if nil
+            provider (or dscloj-provider *default-dscloj-provider*)
+            result (if provider
+                     (executor/execute-leaf node blackboard provider)
+                     (executor/execute-leaf-mock node blackboard))
+            {:keys [status outputs error duration-ms]} result]
         {:result/events
          [(->event
            {:type :sheet/node-execution-completed
@@ -73,9 +77,10 @@
             :body (cond-> {:sheet-id sheet-id
                            :tick-id tick-id
                            :node-id node-id
-                           :status :success}
-                    (seq mock-outputs) (assoc :writes mock-outputs)
-                    true (assoc :duration-ms duration-ms))})]}))))
+                           :status status}
+                    (seq outputs) (assoc :writes outputs)
+                    error (assoc :error error)
+                    duration-ms (assoc :duration-ms duration-ms))})]}))))
 
 ;; =============================================================================
 ;; Composite Node Execution Processor

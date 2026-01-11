@@ -18,6 +18,16 @@
             [store.sheet.subs :as sheet-subs]))
 
 ;; =============================================================================
+;; Error Helpers
+;; =============================================================================
+
+(defn error-message
+  "Extract user-friendly message from an anomaly/error."
+  [error]
+  (or (:cognitect.anomalies/message error)
+      (str error)))
+
+;; =============================================================================
 ;; Status Helpers
 ;; =============================================================================
 
@@ -193,28 +203,35 @@
          ($ :div {:class "space-y-2 mb-4"}
             (for [entry blackboard-list]
               (let [k (:key entry)
-                    is-used? (and keys-used-by-selected (keys-used-by-selected k))]
+                    is-used? (and keys-used-by-selected (keys-used-by-selected k))
+                    value-str (str (or (:value entry) "(nil)"))
+                    is-long? (> (count value-str) 50)]
                 ($ :div {:key k
-                         :class (str "flex items-center gap-2 p-2 rounded text-sm "
+                         :class (str "p-2 rounded text-sm "
                                      (if is-used? "bg-blue-50 border border-blue-200" "bg-gray-50"))}
-                   ($ :span {:class "font-mono font-medium"} k)
-                   ($ badge/Badge {:variant "outline" :class "text-xs"}
-                      (name (:type entry)))
+                   ;; Header row: key name, type badge, edit button
+                   ($ :div {:class "flex items-center gap-2 mb-1"}
+                      ($ :span {:class "font-mono font-medium"} k)
+                      ($ badge/Badge {:variant "outline" :class "text-xs"}
+                         (name (:type entry)))
+                      ($ :div {:class "flex-1"})
+                      ($ button/Button {:size "sm" :variant "ghost" :class "h-6 px-2"
+                                        :on-click #(do (set-editing-key! k)
+                                                       (set-edit-value! (str (or (:value entry) ""))))}
+                         "Edit"))
+                   ;; Value row (or edit input)
                    (if (= editing-key k)
-                     ($ :div {:class "flex-1 flex gap-1"}
-                        ($ input/Input {:value edit-value
-                                        :on-change #(set-edit-value! (.. % -target -value))
-                                        :class "h-7 text-xs flex-1"})
+                     ($ :div {:class "flex gap-1"}
+                        ($ textarea/Textarea {:value edit-value
+                                              :on-change #(set-edit-value! (.. % -target -value))
+                                              :class "text-xs flex-1 min-h-[60px]"
+                                              :rows 3})
                         ($ button/Button {:size "sm" :variant "ghost" :class "h-7 px-2"
                                           :on-click #(handle-save-value k)}
                            "Save"))
-                     ($ :div {:class "flex-1 flex items-center gap-2"}
-                        ($ :span {:class "text-gray-600 truncate"}
-                           (str (or (:value entry) "(nil)")))
-                        ($ button/Button {:size "sm" :variant "ghost" :class "h-7 px-2"
-                                          :on-click #(do (set-editing-key! k)
-                                                         (set-edit-value! (str (or (:value entry) ""))))}
-                           "Edit"))))))))
+                     ($ :p {:class (str "text-gray-600 whitespace-pre-wrap break-words "
+                                        (when-not is-long? "text-sm"))}
+                        value-str)))))))
 
        ;; Add new key
        ($ :div {:class "flex gap-2"}
@@ -455,7 +472,7 @@
       ($ :div {:class "flex items-center justify-center h-full"}
          ($ card/Card {:class "p-6"}
             ($ :h2 {:class "text-lg font-semibold text-red-600"} "Error loading sheet")
-            ($ :p {:class "text-sm text-gray-600"} (str error))))
+            ($ :p {:class "text-sm text-gray-600"} (error-message error))))
 
       sheet
       ($ :div {:class "flex flex-col h-full"}
@@ -511,6 +528,7 @@
 (defui sheets-list-page []
   (let [sheets (use-subscribe [::sheet-subs/sheets])
         loading? (use-subscribe [::sheet-subs/sheets-loading?])
+        error (use-subscribe [::sheet-subs/sheets-error])
         ctx (context/use-context)
         api-client (:api/client ctx)
         navigate! (:router/navigate! ctx)
@@ -523,6 +541,10 @@
       [api-client])
 
     ($ :div {:class "container mx-auto py-8 px-4"}
+       ;; Show error banner if there's an error
+       (when error
+         ($ :div {:class "mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700"}
+            (error-message error)))
        ($ :div {:class "flex items-center justify-between mb-8"}
           ($ :h1 {:class "text-2xl font-bold"} "Behavior Trees")
           ($ button/Button {:on-click #(set-dialog-open! true)}
