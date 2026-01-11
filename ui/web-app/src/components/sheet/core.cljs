@@ -62,39 +62,70 @@
 (defui node-cell [{:keys [node layout selected? on-select]}]
   (let [node-type (:type node)
         status (:status node)
-        col-start (int (* (:start-col layout) 12))
-        col-span (max 1 (int (* (- (:end-col layout) (:start-col layout)) 12)))]
-    ($ :div {:class (str "p-2 border-2 rounded-lg cursor-pointer transition-all "
-                         (node-type-color node-type) " "
-                         (if selected?
-                           "ring-2 ring-blue-500 ring-offset-2"
-                           "hover:shadow-md"))
-             :style {:grid-column (str (inc col-start) " / span " col-span)}
-             :on-click #(on-select (:id node))}
-       ;; Header row: type icon + name
-       ($ :div {:class "flex items-center gap-2 mb-1"}
-          ($ :div {:class "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold border bg-white"}
-             (node-type-icon node-type))
-          ($ :span {:class "font-medium text-sm truncate flex-1"}
-             (:name node))
-          ($ :div {:class (str "w-3 h-3 rounded-full " (status-color status))}))
+        ;; Use percentage-based width for true equal distribution
+        width-pct (* (- (:end-col layout) (:start-col layout)) 100)
+        ;; Progressive disclosure based on available width
+        minimal? (< width-pct 6)      ;; Just colored block with status
+        compact? (< width-pct 12)     ;; Icon + status only
+        narrow? (< width-pct 20)]     ;; Icon + truncated name + status
+    ($ :div {:class "px-0.5 min-w-0"
+             :style {:flex (str "0 1 " width-pct "%")}}
+       ($ :div {:class (str (cond minimal? "p-0.5" compact? "p-1" :else "p-2")
+                            " border rounded cursor-pointer transition-all h-full overflow-hidden "
+                            (node-type-color node-type) " "
+                            (if selected?
+                              "ring-2 ring-blue-500 ring-offset-1"
+                              "hover:shadow-md"))
+                :on-click #(on-select (:id node))}
 
-       ;; Instruction preview for leaf nodes
-       (when (and (= :leaf node-type) (:instruction node))
-         ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
-            (:instruction node)))
+          (cond
+            ;; Minimal: just a colored block with status dot
+            minimal?
+            ($ :div {:class "flex items-center justify-center h-4"}
+               ($ :div {:class (str "w-2 h-2 rounded-full " (status-color status))}))
 
-       ;; Check preview for condition nodes
-       (when (= :condition node-type)
-         (if-let [check (:check node)]
-           ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
-              (str (:key check) " " (name (:op check)) " " (:value check)))
-           ($ :p {:class "text-xs text-gray-400 italic mt-1"} "No check set")))
+            ;; Compact: icon + status
+            compact?
+            ($ :div {:class "flex items-center justify-between gap-0.5"}
+               ($ :div {:class "w-4 h-4 text-[9px] rounded-full flex items-center justify-center font-bold border bg-white"}
+                  (node-type-icon node-type))
+               ($ :div {:class (str "w-2 h-2 rounded-full flex-shrink-0 " (status-color status))}))
 
-       ;; Children count for composite nodes
-       (when (#{:sequence :fallback} node-type)
-         ($ :p {:class "text-xs text-gray-400 mt-1"}
-            (str (count (:children-ids node)) " children"))))))
+            ;; Narrow: icon + name + status
+            narrow?
+            ($ :div {:class "flex items-center gap-1 min-w-0"}
+               ($ :div {:class "w-5 h-5 text-[10px] rounded-full flex items-center justify-center font-bold border bg-white flex-shrink-0"}
+                  (node-type-icon node-type))
+               ($ :span {:class "text-xs font-medium truncate flex-1 min-w-0"}
+                  (:name node))
+               ($ :div {:class (str "w-2 h-2 rounded-full flex-shrink-0 " (status-color status))}))
+
+            ;; Full: everything
+            :else
+            ($ :<>
+               ($ :div {:class "flex items-center gap-1 min-w-0"}
+                  ($ :div {:class "w-6 h-6 text-xs rounded-full flex items-center justify-center font-bold border bg-white flex-shrink-0"}
+                     (node-type-icon node-type))
+                  ($ :span {:class "text-sm font-medium truncate flex-1 min-w-0"}
+                     (:name node))
+                  ($ :div {:class (str "w-3 h-3 rounded-full flex-shrink-0 " (status-color status))}))
+
+               ;; Instruction preview for leaf nodes
+               (when (and (= :leaf node-type) (:instruction node))
+                 ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
+                    (:instruction node)))
+
+               ;; Check preview for condition nodes
+               (when (= :condition node-type)
+                 (if-let [check (:check node)]
+                   ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
+                      (str (:key check) " " (name (:op check)) " " (:value check)))
+                   ($ :p {:class "text-xs text-gray-400 italic mt-1"} "No check")))
+
+               ;; Children count for composite nodes
+               (when (#{:sequence :fallback} node-type)
+                 ($ :p {:class "text-xs text-gray-400 mt-1"}
+                    (str (count (:children-ids node)) " children")))))))))
 
 ;; =============================================================================
 ;; Empty Row Cell (for adding nodes)
@@ -152,19 +183,46 @@
     ($ :div {:class "p-4"}
        (if root-node
          ;; Tree exists - render grid
-         ($ :div {:class "space-y-2"}
+         ($ :div {:class "space-y-1"}
             (for [row-idx (range num-rows)]
-              (let [row-items (get rows-data row-idx [])]
+              (let [row-items (get rows-data row-idx [])
+                    ;; Sort items by start-col to ensure correct order
+                    sorted-items (sort-by :start-col row-items)
+                    ;; Build items with spacers for gaps
+                    items-with-spacers
+                    (loop [items sorted-items
+                           current-pos 0.0
+                           result []]
+                      (if (empty? items)
+                        ;; No trailing spacer needed
+                        result
+                        (let [item (first items)
+                              gap (- (:start-col item) current-pos)
+                              with-spacer (if (> gap 0.001)
+                                            (conj result {:type :spacer
+                                                          :key (str "spacer-" row-idx "-" current-pos)
+                                                          :width gap})
+                                            result)]
+                          (recur (rest items)
+                                 (:end-col item)
+                                 (conj with-spacer {:type :node
+                                                    :item item})))))]
                 ($ :div {:key row-idx
-                         :class "grid gap-2"
-                         :style {:grid-template-columns "repeat(12, 1fr)"}}
-                   (for [item row-items]
-                     (let [node (get nodes (:node-id item))]
-                       ($ node-cell {:key (:node-id item)
-                                     :node node
-                                     :layout item
-                                     :selected? (= (:id node) selected-id)
-                                     :on-select handle-select})))))))
+                         :class "flex"}
+                   (for [entry items-with-spacers]
+                     (if (= :spacer (:type entry))
+                       ;; Render spacer
+                       ($ :div {:key (:key entry)
+                                :class "min-w-0"
+                                :style {:flex (str "0 1 " (* (:width entry) 100) "%")}})
+                       ;; Render node
+                       (let [item (:item entry)
+                             node (get nodes (:node-id item))]
+                         ($ node-cell {:key (:node-id item)
+                                       :node node
+                                       :layout item
+                                       :selected? (= (:id node) selected-id)
+                                       :on-select handle-select}))))))))
 
          ;; No tree yet - show create root button
          ($ :div {:class "flex flex-col items-center justify-center py-12"}
@@ -582,7 +640,7 @@
          ($ :div {:class "flex flex-1 overflow-hidden"}
             ;; Main area: tree + blackboard
             ($ :div {:class "flex-1 flex flex-col overflow-hidden"}
-               ($ :div {:class "flex-1 overflow-auto bg-gray-50"}
+               ($ :div {:class "flex-1 overflow-y-auto overflow-x-hidden bg-gray-50"}
                   ($ tree-grid {:sheet-id sheet-id}))
                ($ blackboard-panel {:sheet-id sheet-id}))
             ;; Editor panel
