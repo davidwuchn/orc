@@ -30,6 +30,7 @@
                                poly/url-presigner-aws                           {:local/root "components/url-presigner-aws"}
                                poly/file-store                                  {:local/root "components/file-store"}
                                poly/file-store-s3                               {:local/root "components/file-store-s3"}
+                               poly/langfuse                                    {:local/root "components/langfuse"}
 
                                ;; Services
                                poly/user-service                                {:local/root "components/user-service"}

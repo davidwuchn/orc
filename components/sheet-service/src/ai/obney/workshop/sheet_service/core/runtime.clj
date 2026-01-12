@@ -5,12 +5,14 @@
    1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
    2. Runs the tree to completion
    3. Returns output values
+   4. Optionally traces execution to Langfuse
 
    This is designed for calling behavior trees from command handlers,
    todo processors, or other code contexts where you need synchronous
    execution with inputs and outputs."
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
             [ai.obney.workshop.sheet-service.core.executor :as executor]
+            [ai.obney.workshop.sheet-service.core.tracing :as tracing]
             [clojure.core.async :as async :refer [<!! >!! chan go timeout alts!!]]))
 
 ;; =============================================================================
@@ -29,19 +31,26 @@
 
 (defn- execute-leaf-sync
   "Execute a leaf node synchronously.
-   Returns {:status :success/:failure :outputs {...} :error ...}"
+   Returns {:status :success/:failure :outputs {...} :error ... :duration-ms ...}"
   [node blackboard context]
   (let [executor-type (or (:executor node) :ai)
-        provider (:dscloj-provider context)]
-    (case executor-type
-      :ai (if provider
-            (executor/execute-leaf node blackboard provider
-                                   :context context)
-            (executor/execute-leaf-mock node blackboard))
-      :code (executor/execute-leaf node blackboard nil :context context)
-      :tool {:status :failure :error "Tool executor not yet implemented"}
-      ;; Default
-      (executor/execute-leaf-mock node blackboard))))
+        provider (:dscloj-provider context)
+        start-time (System/currentTimeMillis)
+        result (case executor-type
+                 :ai (if provider
+                       (executor/execute-leaf node blackboard provider
+                                              :context context)
+                       (executor/execute-leaf-mock node blackboard))
+                 :code (executor/execute-leaf node blackboard nil :context context)
+                 :tool {:status :failure :error "Tool executor not yet implemented"}
+                 ;; Default
+                 (executor/execute-leaf-mock node blackboard))
+        end-time (System/currentTimeMillis)]
+    (assoc result
+           :start-time start-time
+           :end-time end-time
+           :executor executor-type
+           :model (:model node))))
 
 (defn- execute-condition-sync
   "Execute a condition node synchronously."
@@ -251,51 +260,84 @@
 
 (defn- execute-node-sync
   "Execute a single node synchronously.
-   Returns {:status :success/:failure/:running :blackboard updated-bb :error ...}"
+   Returns {:status :success/:failure/:running :blackboard updated-bb :error ... :trace-data ...}"
   [node-id nodes-by-id blackboard context]
-  (let [node (get nodes-by-id node-id)]
+  (let [node (get nodes-by-id node-id)
+        trace-ctx (:trace-ctx context)
+        start-time (System/currentTimeMillis)]
     (if-not node
       {:status :failure :error (str "Node not found: " node-id) :blackboard blackboard}
-      (case (:type node)
-        :leaf
-        (let [inputs (gather-inputs node blackboard)
-              ;; Add inputs to blackboard temporarily for code executor
-              bb-with-inputs (reduce (fn [bb [k v]]
-                                       (assoc-in bb [k :value] v))
-                                     blackboard
-                                     inputs)
-              result (execute-leaf-sync node bb-with-inputs context)]
-          (if (= :success (:status result))
-            ;; Write outputs to blackboard
-            (let [new-bb (reduce (fn [bb [k v]]
-                                   (if (get bb k)
-                                     (-> bb
-                                         (assoc-in [k :value] v)
-                                         (update-in [k :version] (fnil inc 0)))
-                                     bb))
-                                 blackboard
-                                 (:outputs result))]
-              {:status :success :blackboard new-bb})
-            {:status :failure :error (:error result) :blackboard blackboard}))
+      (let [result
+            (case (:type node)
+              :leaf
+              (let [inputs (gather-inputs node blackboard)
+                    ;; Add inputs to blackboard temporarily for code executor
+                    bb-with-inputs (reduce (fn [bb [k v]]
+                                             (assoc-in bb [k :value] v))
+                                           blackboard
+                                           inputs)
+                    leaf-result (execute-leaf-sync node bb-with-inputs context)]
+                ;; Trace the leaf execution
+                (when trace-ctx
+                  (tracing/trace-node! trace-ctx
+                                       {:node-id node-id
+                                        :node-name (:name node)
+                                        :node-type :leaf
+                                        :executor (:executor leaf-result)
+                                        :model (:model leaf-result)
+                                        :start-time (:start-time leaf-result)
+                                        :end-time (:end-time leaf-result)
+                                        :inputs inputs
+                                        :outputs (:outputs leaf-result)
+                                        :status (:status leaf-result)
+                                        :error (:error leaf-result)}))
+                (if (= :success (:status leaf-result))
+                  ;; Write outputs to blackboard
+                  (let [new-bb (reduce (fn [bb [k v]]
+                                         (if (get bb k)
+                                           (-> bb
+                                               (assoc-in [k :value] v)
+                                               (update-in [k :version] (fnil inc 0)))
+                                           bb))
+                                       blackboard
+                                       (:outputs leaf-result))]
+                    {:status :success :blackboard new-bb})
+                  {:status :failure :error (:error leaf-result) :blackboard blackboard}))
 
-        :condition
-        (let [result (execute-condition-sync node blackboard)]
-          (assoc result :blackboard blackboard))
+              :condition
+              (let [cond-result (execute-condition-sync node blackboard)]
+                (assoc cond-result :blackboard blackboard))
 
-        :sequence
-        (execute-sequence-sync node nodes-by-id blackboard context)
+              :sequence
+              (execute-sequence-sync node nodes-by-id blackboard context)
 
-        :fallback
-        (execute-fallback-sync node nodes-by-id blackboard context)
+              :fallback
+              (execute-fallback-sync node nodes-by-id blackboard context)
 
-        :parallel
-        (execute-parallel-sync node nodes-by-id blackboard context)
+              :parallel
+              (execute-parallel-sync node nodes-by-id blackboard context)
 
-        :map-each
-        (execute-map-each-sync node nodes-by-id blackboard context)
+              :map-each
+              (execute-map-each-sync node nodes-by-id blackboard context)
 
-        ;; Unknown type
-        {:status :failure :error (str "Unknown node type: " (:type node)) :blackboard blackboard}))))
+              ;; Unknown type
+              {:status :failure :error (str "Unknown node type: " (:type node)) :blackboard blackboard})
+            end-time (System/currentTimeMillis)]
+        ;; Trace composite nodes (non-leaf)
+        (when (and trace-ctx (not= :leaf (:type node)))
+          (tracing/trace-node! trace-ctx
+                               {:node-id node-id
+                                :node-name (:name node)
+                                :node-type (:type node)
+                                :executor nil
+                                :model nil
+                                :start-time start-time
+                                :end-time end-time
+                                :inputs nil
+                                :outputs nil
+                                :status (:status result)
+                                :error (:error result)}))
+        result))))
 
 ;; =============================================================================
 ;; Public API
@@ -308,6 +350,7 @@
    1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
    2. Runs the tree to completion
    3. Returns output values
+   4. Optionally traces execution to Langfuse
 
    Args:
      context - Map with :event-store and optional :dscloj-provider
@@ -316,15 +359,25 @@
 
    Options:
      :timeout-ms - Max execution time in ms (default 300000 = 5 minutes)
+     :trace? - Enable local trace collection (default false)
+     :langfuse-client - Langfuse client for sending traces (enables tracing)
 
    Returns:
      {:status :success | :failure | :timeout
       :outputs {\"key\" value ...}
       :duration-ms 1234
-      :error string?}        ;; Present if status is :failure"
-  [context sheet-id inputs & {:keys [timeout-ms] :or {timeout-ms 300000}}]
+      :error string?          ;; Present if status is :failure
+      :trace {...}}           ;; Present if tracing enabled"
+  [context sheet-id inputs & {:keys [timeout-ms trace? langfuse-client]
+                              :or {timeout-ms 300000 trace? false}}]
   (let [start-time (System/currentTimeMillis)
         event-store (:event-store context)
+
+        ;; Create trace context if tracing enabled
+        trace-ctx (when (or trace? langfuse-client)
+                    (if langfuse-client
+                      (tracing/create-trace-context langfuse-client)
+                      (tracing/create-local-trace)))
 
         ;; Load sheet structure
         sheet (rm/get-sheet event-store sheet-id)
@@ -351,11 +404,19 @@
                           blackboard-entries
                           inputs)
 
+        ;; Add trace context to execution context
+        exec-context (cond-> context
+                       trace-ctx (assoc :trace-ctx trace-ctx))
+
+        ;; Start trace
+        _ (when trace-ctx
+            (tracing/start-trace! trace-ctx (:name sheet) inputs))
+
         ;; Execute with timeout
         result-chan (chan 1)
         _ (future
             (try
-              (let [result (execute-node-sync root-id nodes-by-id blackboard context)]
+              (let [result (execute-node-sync root-id nodes-by-id blackboard exec-context)]
                 (>!! result-chan result))
               (catch Exception e
                 (>!! result-chan {:status :failure :error (.getMessage e) :blackboard blackboard}))))
@@ -371,11 +432,20 @@
                               (assoc acc k (:value entry)))
                             {}
                             final-bb)]
+        ;; End trace
+        (when trace-ctx
+          (tracing/end-trace! trace-ctx (:status result) outputs duration-ms (:error result)))
+
         (cond-> {:status (:status result)
                  :outputs outputs
                  :duration-ms duration-ms}
-          (:error result) (assoc :error (:error result))))
+          (:error result) (assoc :error (:error result))
+          trace-ctx (assoc :trace {:trace-id (:trace-id trace-ctx)
+                                   :events @(:events trace-ctx)})))
       ;; Timeout
-      {:status :timeout
-       :error "Execution timed out"
-       :duration-ms duration-ms})))
+      (do
+        (when trace-ctx
+          (tracing/end-trace! trace-ctx :timeout {} duration-ms "Execution timed out"))
+        {:status :timeout
+         :error "Execution timed out"
+         :duration-ms duration-ms}))))

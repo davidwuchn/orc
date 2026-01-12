@@ -14,7 +14,9 @@
             ;; Tree layout utilities
             [ai.obney.workshop.sheet-service.core.tree-layout :as layout]
             ;; Runtime for synchronous execution
-            [ai.obney.workshop.sheet-service.core.runtime :as runtime]))
+            [ai.obney.workshop.sheet-service.core.runtime :as runtime]
+            ;; DSL for workflow building
+            [ai.obney.workshop.sheet-service.core.dsl :as dsl]))
 
 ;; =============================================================================
 ;; Todo Processors
@@ -81,3 +83,29 @@
    Example:
      (sheet/execute ctx sheet-id {\"student-id\" student-id} :timeout-ms 60000)"
   runtime/execute)
+
+;; =============================================================================
+;; Workflow DSL
+;; =============================================================================
+
+;; Node builders
+(def ai-node dsl/ai-node)
+(def code-node dsl/code-node)
+(def condition dsl/condition)
+(def sequence dsl/sequence)
+(def fallback dsl/fallback)
+(def parallel dsl/parallel)
+(def map-each dsl/map-each)
+
+;; Schema builder
+(def blackboard dsl/blackboard)
+
+;; Workflow definition
+(def workflow dsl/workflow)
+
+;; Build functions
+(def build-workflow! dsl/build-workflow!)
+
+;; Utilities
+(def print-tree dsl/print-tree)
+(def describe-workflow dsl/describe-workflow)
