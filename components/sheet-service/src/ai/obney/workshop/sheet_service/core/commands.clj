@@ -9,7 +9,9 @@
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
             [ai.obney.grain.event-store-v2.interface :refer [->event]]
             [ai.obney.grain.command-processor.interface :refer [defcommand]]
-            [cognitect.anomalies :as anom]))
+            [cognitect.anomalies :as anom]
+            [malli.core :as m]
+            [malli.error :as me]))
 
 ;; =============================================================================
 ;; Sheet Commands
@@ -326,9 +328,32 @@
 ;; Blackboard Commands
 ;; =============================================================================
 
+(defn- valid-malli-schema?
+  "Check if a value is a valid Malli schema."
+  [schema]
+  (try
+    (m/schema schema)
+    true
+    (catch Exception _
+      false)))
+
+(defn- validate-against-schema
+  "Validate a value against a Malli schema.
+   Returns nil if valid, or an error map if invalid."
+  [schema value]
+  (try
+    (let [malli-schema (m/schema schema)]
+      (if (m/validate malli-schema value)
+        nil
+        {:error :validation-failed
+         :message (me/humanize (m/explain malli-schema value))}))
+    (catch Exception e
+      {:error :invalid-schema
+       :message (.getMessage e)})))
+
 (defcommand :sheet declare-key
-  "Declare a new key in the blackboard."
-  [{{:keys [sheet-id key type]} :command
+  "Declare a new key in the blackboard with a Malli schema."
+  [{{:keys [sheet-id key schema]} :command
     :keys [event-store]}]
   (let [sheet (rm/get-sheet event-store sheet-id)
         blackboard (rm/get-blackboard-by-key event-store sheet-id)]
@@ -341,6 +366,10 @@
       {::anom/category ::anom/conflict
        ::anom/message (str "Key '" key "' already declared")}
 
+      (not (valid-malli-schema? schema))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Invalid Malli schema"}
+
       :else
       {:command-result/events
        [(->event
@@ -348,11 +377,11 @@
           :tags #{[:sheet sheet-id]}
           :body {:sheet-id sheet-id
                  :key key
-                 :type type}})]})))
+                 :schema schema}})]})))
 
-(defcommand :sheet set-key-value
-  "Set a value for a blackboard key."
-  [{{:keys [sheet-id key value]} :command
+(defcommand :sheet update-key-schema
+  "Update the schema for an existing blackboard key."
+  [{{:keys [sheet-id key schema]} :command
     :keys [event-store]}]
   (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
         entry (get blackboard key)]
@@ -360,6 +389,37 @@
       (not entry)
       {::anom/category ::anom/not-found
        ::anom/message (str "Key '" key "' not declared")}
+
+      (not (valid-malli-schema? schema))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Invalid Malli schema"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/key-schema-updated
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :key key
+                 :schema schema
+                 :previous-schema (:schema entry)}})]})))
+
+(defcommand :sheet set-key-value
+  "Set a value for a blackboard key. Value is validated against the key's Malli schema."
+  [{{:keys [sheet-id key value]} :command
+    :keys [event-store]}]
+  (let [blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        entry (get blackboard key)
+        schema (:schema entry)
+        validation-error (when schema (validate-against-schema schema value))]
+    (cond
+      (not entry)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Key '" key "' not declared")}
+
+      validation-error
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Value doesn't match schema: " (:message validation-error))}
 
       :else
       {:command-result/events
@@ -473,7 +533,7 @@
 
 (defcommand :sheet complete-node-execution
   "Complete a node execution (internal command from todo processor)."
-  [{{:keys [sheet-id tick-id node-id status writes duration-ms]} :command
+  [{{:keys [sheet-id tick-id node-id status writes duration-ms error]} :command
     :keys [event-store]}]
   {:command-result/events
    [(->event
@@ -486,7 +546,8 @@
                      :node-id node-id
                      :status status}
               (seq writes) (assoc :writes writes)
-              duration-ms (assoc :duration-ms duration-ms))})]})
+              duration-ms (assoc :duration-ms duration-ms)
+              error (assoc :error error))})]})
 
 (defcommand :sheet fail-node-execution
   "Mark a node execution as failed (internal command from todo processor)."

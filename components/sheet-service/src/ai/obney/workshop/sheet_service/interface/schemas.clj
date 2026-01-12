@@ -20,9 +20,21 @@
   "Node execution status"
   [:enum :idle :running :success :failure])
 
+;; Legacy field-type enum - kept for migration from old format
 (def field-type
-  "Supported field types for blackboard values"
+  "Supported field types for blackboard values (legacy)"
   [:enum :text :number :yesno :list :document :image :table])
+
+;; Migration helper: convert legacy type to Malli schema
+(def legacy-type->malli
+  "Maps legacy field types to Malli schemas"
+  {:text :string
+   :number :double
+   :yesno :boolean
+   :list [:vector :string]
+   :document :string
+   :image :string
+   :table [:vector [:map-of :string :any]]})
 
 (def decorator-type
   "Decorator types that modify node behavior"
@@ -47,9 +59,10 @@
    [:config :map]])
 
 (def field-value
-  "A typed field value for blackboard entries"
+  "A typed field value for blackboard entries.
+   Schema can be any valid Malli schema (keyword like :string, or vector like [:map ...])"
   [:map
-   [:type field-type]
+   [:schema :any]  ;; Malli schema EDN
    [:value :any]])
 
 (def condition-check
@@ -94,7 +107,7 @@
    ::blackboard-entry
    [:map
     [:key :string]
-    [:type field-type]
+    [:schema :any]  ;; Malli schema EDN (e.g., :string, [:map [:name :string]])
     [:value {:optional true} :any]
     [:version :int]]
 
@@ -196,7 +209,13 @@
    [:map
     [:sheet-id :uuid]
     [:key :string]
-    [:type field-type]]
+    [:schema :any]]  ;; Malli schema EDN
+
+   :sheet/update-key-schema
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:schema :any]]  ;; New Malli schema EDN
 
    :sheet/set-key-value
    [:map
@@ -349,7 +368,14 @@
    [:map
     [:sheet-id :uuid]
     [:key :string]
-    [:type field-type]]
+    [:schema :any]]  ;; Malli schema EDN
+
+   :sheet/key-schema-updated
+   [:map
+    [:sheet-id :uuid]
+    [:key :string]
+    [:schema :any]
+    [:previous-schema {:optional true} :any]]
 
    :sheet/key-value-set
    [:map

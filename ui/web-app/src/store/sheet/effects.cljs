@@ -211,14 +211,28 @@
 
 (rf/reg-fx
   ::declare-key
-  (fn [{:keys [api-client sheet-id key type on-success on-failure]}]
+  (fn [{:keys [api-client sheet-id key schema on-success on-failure]}]
     (when api-client
       (go
         (let [response (<! (api/command api-client
                                         {:command/name :sheet/declare-key
                                          :sheet-id sheet-id
                                          :key key
-                                         :type type}))]
+                                         :schema schema}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::update-key-schema
+  (fn [{:keys [api-client sheet-id key schema on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/update-key-schema
+                                         :sheet-id sheet-id
+                                         :key key
+                                         :schema schema}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))

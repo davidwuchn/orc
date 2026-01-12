@@ -36,6 +36,7 @@
 (def blackboard-events
   "Events that affect blackboard read model"
   #{:sheet/key-declared
+    :sheet/key-schema-updated
     :sheet/key-value-set
     :sheet/key-deleted})
 
@@ -220,7 +221,7 @@
   [state event]
   (-> state
       (assoc-in [(:node-id event) :status] (:status event))
-      (assoc-in [(:node-id event) :last-error] nil)))
+      (assoc-in [(:node-id event) :last-error] (:error event))))
 
 (defmethod nodes* :default [state _] state)
 
@@ -241,9 +242,13 @@
   [state event]
   (assoc state (:key event)
          {:key (:key event)
-          :type (:type event)
+          :schema (:schema event)
           :value nil
           :version 0}))
+
+(defmethod blackboard* :sheet/key-schema-updated
+  [state event]
+  (assoc-in state [(:key event) :schema] (:schema event)))
 
 (defmethod blackboard* :sheet/key-value-set
   [state event]

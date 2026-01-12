@@ -1,8 +1,10 @@
 (ns components.sheet.core
   "Behavior Tree Sheet UI components."
-  (:require [uix.core :as uix :refer [defui $ use-state use-effect]]
+  (:require [uix.core :as uix :refer [defui $ use-state use-effect use-callback]]
             [re-frame.core :as rf]
             [re-frame.uix :refer [use-subscribe]]
+            [cljs.reader :as reader]
+            [malli.core :as m]
             ["/gen/shadcn/components/ui/button" :as button]
             ["/gen/shadcn/components/ui/input" :as input]
             ["/gen/shadcn/components/ui/card" :as card]
@@ -13,6 +15,7 @@
             ["/gen/shadcn/components/ui/dialog" :as dialog]
             ["/gen/shadcn/components/ui/separator" :as separator]
             ["/gen/shadcn/components/ui/spinner" :as spinner]
+            ["/gen/shadcn/components/ui/checkbox" :as checkbox]
             [components.context.interface :as context]
             [store.sheet.events :as sheet-events]
             [store.sheet.subs :as sheet-subs]))
@@ -235,94 +238,390 @@
                   "Create Fallback Root")))))))
 
 ;; =============================================================================
+;; Schema Helpers
+;; =============================================================================
+
+(defn valid-malli-schema?
+  "Check if a value is a valid Malli schema."
+  [schema]
+  (try
+    (m/schema schema)
+    true
+    (catch :default _
+      false)))
+
+(defn schema-summary
+  "Generate a short summary of a Malli schema for display."
+  [schema]
+  (cond
+    (keyword? schema) (name schema)
+    (vector? schema)
+    (let [[schema-type & _] schema]
+      (case schema-type
+        :map "object"
+        :vector "list"
+        :enum "enum"
+        :maybe "optional"
+        (name schema-type)))
+    :else "unknown"))
+
+(defn parse-map-fields
+  "Parse fields from a Malli :map schema.
+   Returns seq of {:key, :optional?, :schema}."
+  [fields]
+  (for [field fields
+        :when (vector? field)]
+    (let [[field-key & rest] field
+          ;; Check if second element is options map
+          opts (when (map? (first rest)) (first rest))
+          field-schema (if opts (second rest) (first rest))]
+      {:key field-key
+       :optional? (:optional opts false)
+       :schema field-schema})))
+
+;; =============================================================================
+;; Schema Editor Component (EDN text input)
+;; =============================================================================
+
+(defui schema-editor [{:keys [schema on-save on-cancel]}]
+  (let [[text set-text!] (use-state (pr-str schema))
+        [error set-error!] (use-state nil)
+
+        handle-save (fn []
+                      (try
+                        (let [parsed (reader/read-string text)]
+                          (if (valid-malli-schema? parsed)
+                            (do
+                              (set-error! nil)
+                              (on-save parsed))
+                            (set-error! "Invalid Malli schema")))
+                        (catch :default e
+                          (set-error! (str "Invalid EDN: " (.-message e))))))]
+    ($ :div {:class "space-y-2"}
+       ($ textarea/Textarea
+          {:value text
+           :on-change #(set-text! (.. % -target -value))
+           :class (str "font-mono text-sm min-h-[80px] "
+                       (when error "border-red-500"))
+           :placeholder ":string, [:vector :int], [:map [:name :string]]"})
+       (when error
+         ($ :p {:class "text-red-500 text-xs"} error))
+       ($ :div {:class "flex gap-2"}
+          ($ button/Button {:size "sm" :on-click handle-save}
+             "Save Schema")
+          (when on-cancel
+            ($ button/Button {:size "sm" :variant "ghost" :on-click on-cancel}
+               "Cancel"))))))
+
+;; =============================================================================
+;; Malli Value Editor Component (recursive tree editor)
+;; =============================================================================
+
+(declare malli-value-editor)
+
+(defui malli-value-editor [{:keys [schema value on-change path inline?]}]
+  (let [path (or path [])]
+    (cond
+      ;; String type
+      (= :string schema)
+      ($ :input
+         {:value (or value "")
+          :on-change #(on-change (.. % -target -value))
+          :class (str "w-full rounded border border-gray-200 px-2 py-1.5 text-sm font-mono "
+                      "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent "
+                      "placeholder:text-gray-400")
+          :placeholder "Enter text..."})
+
+      ;; Integer type
+      (or (= :int schema) (= :integer schema))
+      ($ :input
+         {:type "number"
+          :value (or value 0)
+          :on-change #(on-change (js/parseInt (.. % -target -value) 10))
+          :class (str "w-20 rounded border border-gray-200 px-2 py-1.5 text-sm font-mono text-right "
+                      "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent")})
+
+      ;; Double/number type
+      (or (= :double schema) (= :number schema))
+      ($ :input
+         {:type "number"
+          :step "any"
+          :value (or value 0)
+          :on-change #(on-change (js/parseFloat (.. % -target -value)))
+          :class (str "w-24 rounded border border-gray-200 px-2 py-1.5 text-sm font-mono text-right "
+                      "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent")})
+
+      ;; Boolean type
+      (= :boolean schema)
+      ($ :button
+         {:class (str "px-3 py-1.5 rounded text-sm font-medium transition-colors "
+                      (if value
+                        "bg-green-100 text-green-700 hover:bg-green-200"
+                        "bg-gray-100 text-gray-600 hover:bg-gray-200"))
+          :on-click #(on-change (not value))}
+         (if value "Yes" "No"))
+
+      ;; Map type - render fields recursively
+      (and (vector? schema) (= :map (first schema)))
+      (let [fields (parse-map-fields (rest schema))]
+        ($ :div {:class "space-y-2 pl-3 border-l-2 border-gray-200"}
+           (for [{:keys [key optional? schema]} fields]
+             ($ :div {:key (name key) :class "space-y-1"}
+                ($ :label {:class "text-xs font-medium text-gray-600"}
+                   (str (name key)
+                        (when optional? " (optional)")))
+                ($ malli-value-editor
+                   {:schema schema
+                    :value (get value key)
+                    :on-change #(on-change (assoc (or value {}) key %))
+                    :path (conj path key)})))))
+
+      ;; Vector type - render items with add/remove
+      (and (vector? schema) (= :vector (first schema)))
+      (let [item-schema (second schema)
+            items (or value [])]
+        ($ :div {:class "space-y-1.5"}
+           (for [[idx item] (map-indexed vector items)]
+             ($ :div {:key idx :class "flex gap-2 items-center group"}
+                ($ :span {:class "text-xs text-gray-400 w-4 text-right"} idx)
+                ($ :div {:class "flex-1"}
+                   ($ malli-value-editor
+                      {:schema item-schema
+                       :value item
+                       :on-change #(on-change (assoc items idx %))
+                       :path (conj path idx)}))
+                ($ :button
+                   {:class "opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity px-1"
+                    :on-click #(on-change (vec (concat (take idx items)
+                                                       (drop (inc idx) items))))}
+                   "x")))
+           ($ :button
+              {:class "w-full py-1.5 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded transition-colors"
+               :on-click #(on-change (conj items nil))}
+              "+ add item")))
+
+      ;; Enum type
+      (and (vector? schema) (= :enum (first schema)))
+      (let [options (rest schema)]
+        ($ :div {:class "flex flex-wrap gap-1"}
+           (for [opt options]
+             ($ :button
+                {:key (pr-str opt)
+                 :class (str "px-2.5 py-1 rounded text-sm transition-colors "
+                             (if (= value opt)
+                               "bg-blue-100 text-blue-700 font-medium"
+                               "bg-gray-100 text-gray-600 hover:bg-gray-200"))
+                 :on-click #(on-change opt)}
+                (pr-str opt)))))
+
+      ;; Maybe type (optional)
+      (and (vector? schema) (= :maybe (first schema)))
+      ($ malli-value-editor
+         {:schema (second schema)
+          :value value
+          :on-change on-change
+          :path path})
+
+      ;; Fallback - use textarea for raw EDN
+      :else
+      ($ :textarea
+         {:value (pr-str value)
+          :on-change #(try
+                        (on-change (reader/read-string (.. % -target -value)))
+                        (catch :default _ nil))
+          :class (str "w-full rounded border border-gray-200 px-2 py-1.5 text-sm font-mono "
+                      "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent "
+                      "placeholder:text-gray-400 min-h-[60px] resize-y")
+          :placeholder "EDN value..."}))))
+
+;; =============================================================================
+;; Blackboard Entry Editor Component
+;; =============================================================================
+
+(defui blackboard-entry-editor [{:keys [entry sheet-id on-delete is-used?]}]
+  (let [ctx (context/use-context)
+        api-client (:api/client ctx)
+        [editing-schema? set-editing-schema!] (use-state false)
+        [local-value set-local-value!] (use-state (:value entry))
+        [dirty? set-dirty!] (use-state false)
+        [saving? set-saving!] (use-state false)
+
+        k (:key entry)
+        schema (:schema entry)
+
+        handle-value-change (fn [new-value]
+                              (set-local-value! new-value)
+                              (set-dirty! true))
+
+        handle-save-value (fn []
+                            (set-saving! true)
+                            (rf/dispatch [::sheet-events/set-key-value
+                                          api-client sheet-id k local-value])
+                            (set-dirty! false)
+                            (js/setTimeout #(set-saving! false) 300))
+
+        handle-save-schema (fn [new-schema]
+                             (rf/dispatch [::sheet-events/update-key-schema
+                                           api-client sheet-id k new-schema])
+                             (set-editing-schema! false))]
+
+    ;; Sync local value when entry changes from server
+    (use-effect
+      (fn []
+        (set-local-value! (:value entry))
+        (set-dirty! false))
+      [entry])
+
+    ($ :div {:class (str "group rounded-lg border bg-white transition-all "
+                         (if is-used?
+                           "border-blue-300 bg-blue-50/30"
+                           "border-gray-200 hover:border-gray-300"))}
+
+       ;; Header row - key name, schema, actions
+       ($ :div {:class "flex items-center gap-2 px-3 py-2"}
+          ;; Key name
+          ($ :span {:class "font-mono text-sm font-medium text-gray-700"} k)
+
+          ;; Schema badge (clickable to edit)
+          ($ :button {:class "text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-colors"
+                      :on-click #(set-editing-schema! true)}
+             (schema-summary schema))
+
+          ($ :div {:class "flex-1"})
+
+          ;; Status indicator
+          (when dirty?
+            ($ :span {:class "text-xs text-amber-500 mr-1"} "unsaved"))
+
+          ;; Delete button (visible on hover)
+          ($ :button
+             {:class "opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity"
+              :on-click on-delete}
+             "x"))
+
+       ;; Value editor - full width
+       (when-not editing-schema?
+         ($ :div {:class "px-3 pb-2"}
+            ($ :div {:class "flex items-start gap-2"}
+               ($ :div {:class "flex-1"}
+                  ($ malli-value-editor
+                     {:schema schema
+                      :value local-value
+                      :on-change handle-value-change
+                      :path []}))
+               (when dirty?
+                 ($ :button
+                    {:class "px-2 py-1 text-xs font-medium text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors"
+                     :on-click handle-save-value}
+                    (if saving? "..." "Save"))))))
+
+       ;; Schema editor
+       (when editing-schema?
+         ($ :div {:class "px-3 pb-3"}
+            ($ schema-editor
+               {:schema schema
+                :on-save handle-save-schema
+                :on-cancel #(set-editing-schema! false)}))))))
+
+;; =============================================================================
+;; Inline Quick-Add Component
+;; =============================================================================
+
+(def quick-types
+  "Quick type buttons for inline add."
+  [{:key "T" :schema :string :tip "Text"}
+   {:key "N" :schema :int :tip "Number"}
+   {:key "?" :schema :boolean :tip "Yes/No"}
+   {:key "[]" :schema [:vector :string] :tip "List"}
+   {:key "{}" :schema [:map] :tip "Object"}])
+
+(defui inline-add-variable [{:keys [sheet-id]}]
+  (let [ctx (context/use-context)
+        api-client (:api/client ctx)
+        [name-value set-name-value!] (use-state "")
+        [focused? set-focused!] (use-state false)
+        input-ref (uix/use-ref nil)
+
+        handle-quick-add (fn [schema]
+                           (when (seq name-value)
+                             (rf/dispatch [::sheet-events/declare-key
+                                           api-client sheet-id name-value schema])
+                             (set-name-value! "")
+                             ;; Keep focus for rapid entry
+                             (when-let [input @input-ref]
+                               (.focus input))))
+
+        handle-key-down (fn [e]
+                          (when (and (= (.-key e) "Enter") (seq name-value))
+                            ;; Enter = add as text
+                            (handle-quick-add :string)))]
+
+    ($ :div {:class (str "rounded-lg border-2 border-dashed transition-colors "
+                         (if (or focused? (seq name-value))
+                           "border-blue-300 bg-blue-50/30"
+                           "border-gray-200 hover:border-gray-300"))}
+       ($ :div {:class "flex items-center gap-2 p-2"}
+          ($ :input
+             {:ref input-ref
+              :value name-value
+              :on-change #(set-name-value! (.. % -target -value))
+              :on-focus #(set-focused! true)
+              :on-blur #(js/setTimeout (fn [] (set-focused! false)) 150)
+              :on-key-down handle-key-down
+              :placeholder "Add variable..."
+              :class "flex-1 bg-transparent outline-none text-sm font-mono placeholder:text-gray-400"})
+
+          ;; Quick type buttons
+          ($ :div {:class (str "flex gap-1 transition-opacity "
+                               (if (seq name-value) "opacity-100" "opacity-40"))}
+             (for [{:keys [key schema tip]} quick-types]
+               ($ :button
+                  {:key key
+                   :class (str "h-7 px-2 rounded text-xs font-mono transition-colors "
+                               (if (seq name-value)
+                                 "text-gray-600 hover:bg-gray-200 hover:text-gray-900"
+                                 "text-gray-400 cursor-default"))
+                   :title tip
+                   :disabled (empty? name-value)
+                   :on-click #(handle-quick-add schema)}
+                  key)))))))
+
+;; =============================================================================
 ;; Blackboard Panel Component
 ;; =============================================================================
 
 (defui blackboard-panel [{:keys [sheet-id]}]
   (let [blackboard-list (use-subscribe [::sheet-subs/blackboard-list])
-        field-types (use-subscribe [::sheet-subs/field-types])
         selected-node (use-subscribe [::sheet-subs/selected-node])
         ctx (context/use-context)
         api-client (:api/client ctx)
 
-        [new-key set-new-key!] (use-state "")
-        [new-type set-new-type!] (use-state :text)
-        [editing-key set-editing-key!] (use-state nil)
-        [edit-value set-edit-value!] (use-state "")
-
         keys-used-by-selected (when selected-node
                                 (set (concat (:reads selected-node) (:writes selected-node))))
-
-        handle-declare (fn []
-                         (when (seq new-key)
-                           (rf/dispatch [::sheet-events/declare-key api-client sheet-id new-key new-type])
-                           (set-new-key! "")))
-
-        handle-save-value (fn [key]
-                            (rf/dispatch [::sheet-events/set-key-value api-client sheet-id key edit-value])
-                            (set-editing-key! nil))
 
         handle-delete (fn [key]
                         (rf/dispatch [::sheet-events/delete-key api-client sheet-id key]))]
 
-    ($ :div {:class "p-4 border-t"}
-       ($ :h3 {:class "font-semibold mb-3"} "Blackboard")
+    ($ :div {:class "border-t bg-gray-50/50"}
+       ;; Header
+       ($ :div {:class "px-4 pt-3 pb-1"}
+          ($ :h3 {:class "text-xs font-medium text-gray-500 uppercase tracking-wide"} "Variables"))
 
-       ;; Existing keys
-       (if (empty? blackboard-list)
-         ($ :p {:class "text-gray-400 text-sm mb-3"} "No keys declared")
-         ($ :div {:class "space-y-2 mb-4"}
-            (for [entry blackboard-list]
-              (let [k (:key entry)
-                    is-used? (and keys-used-by-selected (keys-used-by-selected k))
-                    value-str (str (or (:value entry) "(nil)"))
-                    is-long? (> (count value-str) 50)]
-                ($ :div {:key k
-                         :class (str "p-2 rounded text-sm "
-                                     (if is-used? "bg-blue-50 border border-blue-200" "bg-gray-50"))}
-                   ;; Header row: key name, type badge, edit/delete buttons
-                   ($ :div {:class "flex items-center gap-2 mb-1"}
-                      ($ :span {:class "font-mono font-medium"} k)
-                      ($ badge/Badge {:variant "outline" :class "text-xs"}
-                         (name (:type entry)))
-                      ($ :div {:class "flex-1"})
-                      ($ button/Button {:size "sm" :variant "ghost" :class "h-6 px-2"
-                                        :on-click #(do (set-editing-key! k)
-                                                       (set-edit-value! (str (or (:value entry) ""))))}
-                         "Edit")
-                      ($ button/Button {:size "sm" :variant "ghost" :class "h-6 px-2 text-red-600 hover:text-red-700"
-                                        :on-click #(handle-delete k)}
-                         "x"))
-                   ;; Value row (or edit input)
-                   (if (= editing-key k)
-                     ($ :div {:class "flex gap-1"}
-                        ($ textarea/Textarea {:value edit-value
-                                              :on-change #(set-edit-value! (.. % -target -value))
-                                              :class "text-xs flex-1 min-h-[60px]"
-                                              :rows 3})
-                        ($ button/Button {:size "sm" :variant "ghost" :class "h-7 px-2"
-                                          :on-click #(handle-save-value k)}
-                           "Save"))
-                     ($ :p {:class (str "text-gray-600 whitespace-pre-wrap break-words "
-                                        (when-not is-long? "text-sm"))}
-                        value-str)))))))
+       ;; Variables list
+       ($ :div {:class "px-4 space-y-1.5"}
+          (for [entry blackboard-list]
+            (let [k (:key entry)
+                  is-used? (and keys-used-by-selected (keys-used-by-selected k))]
+              ($ blackboard-entry-editor
+                 {:key k
+                  :entry entry
+                  :sheet-id sheet-id
+                  :is-used? is-used?
+                  :on-delete #(handle-delete k)}))))
 
-       ;; Add new key
-       ($ :div {:class "flex gap-2"}
-          ($ input/Input {:placeholder "Key name"
-                          :value new-key
-                          :on-change #(set-new-key! (.. % -target -value))
-                          :class "flex-1"})
-          ($ select/Select {:value (name new-type)
-                            :onValueChange #(set-new-type! (keyword %))}
-             ($ select/SelectTrigger {:class "w-24"}
-                ($ select/SelectValue))
-             ($ select/SelectContent
-                (for [ft field-types]
-                  ($ select/SelectItem {:key (name (:value ft)) :value (name (:value ft))}
-                     (:label ft)))))
-          ($ button/Button {:size "sm" :on-click handle-declare}
-             "+")))))
+       ;; Inline add
+       ($ :div {:class "px-4 pb-3 pt-1"}
+          ($ inline-add-variable {:sheet-id sheet-id})))))
 
 ;; =============================================================================
 ;; Node Editor Panel Component

@@ -13,20 +13,65 @@
   (:require [dscloj.core :as dscloj]))
 
 ;; =============================================================================
-;; Type Mapping
+;; Schema Description Generation
 ;; =============================================================================
 
-(def field-type->malli-spec
-  "Maps blackboard field types to Malli specs for DSCloj.
-   Using :any for numbers due to Malli validation quirks with composite specs.
-   Note: yesno uses :string because DSCloj's boolean parsing is unreliable."
-  {:text     :string
-   :number   :any  ;; Could be int, double, or string representation
-   :yesno    :string  ;; Use string "yes"/"no" - DSCloj boolean parsing broken
-   :list     [:vector :any]
-   :document :string
-   :image    :string
-   :table    [:vector [:map-of :string :any]]})
+(defn malli-schema->description
+  "Generate a human-readable description from a Malli schema for AI context.
+   This helps the AI understand what structure to produce."
+  [schema]
+  (cond
+    ;; Simple keyword types
+    (keyword? schema)
+    (case schema
+      :string "string"
+      :int "integer"
+      :double "number"
+      :number "number"
+      :boolean "boolean (true/false)"
+      :any "any value"
+      :uuid "UUID string"
+      (name schema))
+
+    ;; Vector schemas like [:map ...], [:vector ...], [:enum ...]
+    (vector? schema)
+    (let [[schema-type & args] schema]
+      (case schema-type
+        :map
+        (let [fields (filter vector? args)  ;; Skip property maps
+              field-descs (for [field fields]
+                            (let [[field-key & rest] field
+                                  ;; Handle optional {:optional true} map
+                                  opts (when (map? (first rest)) (first rest))
+                                  field-schema (if opts (second rest) (first rest))
+                                  optional? (:optional opts)]
+                              (str (name field-key)
+                                   (when optional? "?")
+                                   ": " (malli-schema->description field-schema))))]
+          (str "object with {" (clojure.string/join ", " field-descs) "}"))
+
+        :vector
+        (str "list of " (malli-schema->description (first args)))
+
+        :enum
+        (str "one of: " (clojure.string/join ", " (map pr-str args)))
+
+        :maybe
+        (str (malli-schema->description (first args)) " (optional)")
+
+        :or
+        (str "either " (clojure.string/join " or " (map malli-schema->description args)))
+
+        :map-of
+        (let [[key-schema val-schema] args]
+          (str "map of " (malli-schema->description key-schema)
+               " -> " (malli-schema->description val-schema)))
+
+        ;; Default for unknown vector schemas
+        (str schema-type " " (clojure.string/join " " (map malli-schema->description args)))))
+
+    ;; Fallback
+    :else (pr-str schema)))
 
 (defn- sanitize-field-name
   "Sanitize field name for DSCloj - remove ? and other problematic chars"
@@ -37,16 +82,17 @@
       (clojure.string/replace #"[^a-zA-Z0-9_-]" "_")))
 
 (defn- build-field
-  "Build a DSCloj field definition from a blackboard key and its entry"
+  "Build a DSCloj field definition from a blackboard key and its entry.
+   Now uses Malli schemas directly instead of legacy field types."
   [key-name blackboard-entry]
-  (let [field-type (:type blackboard-entry)
-        safe-name (sanitize-field-name key-name)]
+  (let [schema (:schema blackboard-entry)
+        safe-name (sanitize-field-name key-name)
+        schema-desc (when schema (malli-schema->description schema))]
     {:name (keyword safe-name)
      :original-key key-name  ;; Keep original for mapping back
-     :spec (get field-type->malli-spec field-type :string)
-     :description (if (= :yesno field-type)
-                    (str "Blackboard key: " key-name " - output 'yes' or 'no'")
-                    (str "Blackboard key: " key-name " (type: " (name field-type) ")"))}))
+     :spec (or schema :any)  ;; Use the Malli schema directly
+     :description (str "Blackboard key: " key-name
+                       (when schema-desc (str " - " schema-desc)))}))
 
 ;; =============================================================================
 ;; Module Builder
@@ -189,8 +235,8 @@
      :writes ["answer"]})
 
   (def example-blackboard
-    {"question" {:key "question" :type :text :value "What is 2+2?" :version 1}
-     "answer" {:key "answer" :type :text :value nil :version 0}})
+    {"question" {:key "question" :schema :string :value "What is 2+2?" :version 1}
+     "answer" {:key "answer" :schema :string :value nil :version 0}})
 
   ;; 3. Execute
   (execute-leaf example-node example-blackboard :openrouter)

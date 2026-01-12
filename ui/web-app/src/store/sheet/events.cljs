@@ -264,13 +264,23 @@
 
 (rf/reg-event-fx
   ::declare-key
-  (fn [_ [_ api-client sheet-id key type]]
+  (fn [_ [_ api-client sheet-id key schema]]
     {::sheet-fx/declare-key {:api-client api-client
                              :sheet-id sheet-id
                              :key key
-                             :type type
+                             :schema schema
                              :on-success [::node-command-success api-client sheet-id]
                              :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::update-key-schema
+  (fn [_ [_ api-client sheet-id key schema]]
+    {::sheet-fx/update-key-schema {:api-client api-client
+                                   :sheet-id sheet-id
+                                   :key key
+                                   :schema schema
+                                   :on-success [::node-command-success api-client sheet-id]
+                                   :on-failure [::node-operation-failure]}}))
 
 (rf/reg-event-fx
   ::set-key-value

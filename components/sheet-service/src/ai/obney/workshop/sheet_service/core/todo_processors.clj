@@ -87,7 +87,8 @@
                                 :node-id node-id
                                 :status status
                                 :writes (or outputs {})}
-                         duration-ms (assoc :duration-ms duration-ms)))))
+                         duration-ms (assoc :duration-ms duration-ms)
+                         error (assoc :error error)))))
             (catch Exception e
               ;; Use process-command to emit failure event
               (cp/process-command
