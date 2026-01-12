@@ -324,6 +324,140 @@
                          :check check}
                   (:check node) (assoc :previous-check (:check node)))})]})))
 
+(defcommand :sheet set-node-executor
+  "Set the executor configuration for a leaf node.
+   - :ai executor uses DSCloj with optional model selection
+   - :code executor runs a Clojure function
+   - :tool executor directly invokes a tool"
+  [{{:keys [sheet-id node-id executor model fn tools]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have executors"}
+
+      (and (= executor :code) (not fn))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Code executor requires :fn (fully-qualified function symbol)"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-executor-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :executor executor}
+                  model (assoc :model model)
+                  fn (assoc :fn fn)
+                  tools (assoc :tools (vec tools))
+                  (:executor node) (assoc :previous-executor (:executor node))
+                  (:model node) (assoc :previous-model (:model node))
+                  (:fn node) (assoc :previous-fn (:fn node))
+                  (:tools node) (assoc :previous-tools (:tools node)))})]})))
+
+(defcommand :sheet set-node-retry
+  "Set retry configuration for a leaf node."
+  [{{:keys [sheet-id node-id retry]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have retry configuration"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-retry-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :retry retry}
+                  (:retry node) (assoc :previous-retry (:retry node)))})]})))
+
+(defcommand :sheet set-parallel-config
+  "Set configuration for a parallel node."
+  [{{:keys [sheet-id node-id success-policy failure-policy]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :parallel (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only parallel nodes can have parallel configuration"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/parallel-config-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id}
+                  success-policy (assoc :success-policy success-policy)
+                  failure-policy (assoc :failure-policy failure-policy)
+                  (:success-policy node) (assoc :previous-success-policy (:success-policy node))
+                  (:failure-policy node) (assoc :previous-failure-policy (:failure-policy node)))})]})))
+
+(defcommand :sheet set-map-each-config
+  "Set configuration for a map-each node."
+  [{{:keys [sheet-id node-id source-key item-key output-key max-concurrency]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :map-each (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only map-each nodes can have map-each configuration"}
+
+      (not (contains? blackboard source-key))
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Source key '" source-key "' not declared in blackboard")}
+
+      (not (contains? blackboard item-key))
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Item key '" item-key "' not declared in blackboard")}
+
+      (not (contains? blackboard output-key))
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Output key '" output-key "' not declared in blackboard")}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/map-each-config-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :source-key source-key
+                         :item-key item-key
+                         :output-key output-key}
+                  max-concurrency (assoc :max-concurrency max-concurrency)
+                  (:source-key node) (assoc :previous-source-key (:source-key node))
+                  (:item-key node) (assoc :previous-item-key (:item-key node))
+                  (:output-key node) (assoc :previous-output-key (:output-key node))
+                  (:max-concurrency node) (assoc :previous-max-concurrency (:max-concurrency node)))})]})))
+
 ;; =============================================================================
 ;; Blackboard Commands
 ;; =============================================================================

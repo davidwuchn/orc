@@ -170,19 +170,69 @@
    :reads reads
    :writes writes})
 
+(defn make-set-node-executor-command
+  "Create a set-node-executor command.
+   executor-type: :ai, :code, or :tool
+   opts: {:model \"...\", :fn \"...\", :tools [...]}"
+  [sheet-id node-id executor-type & {:keys [model fn tools]}]
+  (cond-> {:command/name :sheet/set-node-executor
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id
+           :executor executor-type}
+    model (assoc :model model)
+    fn (assoc :fn fn)
+    tools (assoc :tools tools)))
+
+(defn make-set-node-retry-command
+  "Create a set-node-retry command."
+  [sheet-id node-id max-attempts backoff-ms]
+  {:command/name :sheet/set-node-retry
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :node-id node-id
+   :retry {:max-attempts max-attempts
+           :backoff-ms backoff-ms}})
+
+(defn make-set-parallel-config-command
+  "Create a set-parallel-config command."
+  [sheet-id node-id & {:keys [success-policy failure-policy]}]
+  (cond-> {:command/name :sheet/set-parallel-config
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id}
+    success-policy (assoc :success-policy success-policy)
+    failure-policy (assoc :failure-policy failure-policy)))
+
+(defn make-set-map-each-config-command
+  "Create a set-map-each-config command."
+  [sheet-id node-id source-key item-key output-key & {:keys [max-concurrency]}]
+  (cond-> {:command/name :sheet/set-map-each-config
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id
+           :source-key source-key
+           :item-key item-key
+           :output-key output-key}
+    max-concurrency (assoc :max-concurrency max-concurrency)))
+
 ;; =============================================================================
 ;; Factory Functions - Blackboard Commands
 ;; =============================================================================
 
 (defn make-declare-key-command
-  "Create a declare-key command."
-  [sheet-id key type]
+  "Create a declare-key command with a Malli schema."
+  [sheet-id key schema]
   {:command/name :sheet/declare-key
    :command/id (random-uuid)
    :command/timestamp (time/now)
    :sheet-id sheet-id
    :key key
-   :type type})
+   :schema schema})
 
 (defn make-set-key-value-command
   "Create a set-key-value command."

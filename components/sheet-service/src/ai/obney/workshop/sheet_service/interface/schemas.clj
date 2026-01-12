@@ -14,7 +14,11 @@
 
 (def node-type
   "Behavior tree node types"
-  [:enum :leaf :sequence :fallback :condition])
+  [:enum :leaf :sequence :fallback :condition :parallel :map-each])
+
+(def executor-type
+  "Executor types for leaf nodes"
+  [:enum :ai :code :tool])
 
 (def node-status
   "Node execution status"
@@ -99,8 +103,24 @@
     [:reads [:vector :string]]
     [:writes [:vector :string]]
     [:decorators [:vector decorator]]
+    ;; Executor fields (for leaf nodes)
+    [:executor {:optional true} executor-type]     ;; :ai, :code, :tool
+    [:model {:optional true} :string]              ;; OpenRouter model ID (e.g., "google/gemini-2.5-flash")
+    [:fn {:optional true} :string]                 ;; Fully-qualified fn symbol for :code executor
+    [:tools {:optional true} [:vector :keyword]]   ;; Tools available to AI for :ai executor
+    [:retry {:optional true} [:map
+                              [:max-attempts :int]
+                              [:backoff-ms [:vector :int]]]]
     ;; Condition-only fields
     [:check {:optional true} condition-check]
+    ;; Parallel-only fields
+    [:success-policy {:optional true} [:enum :all :any :majority]]
+    [:failure-policy {:optional true} [:enum :all :any]]
+    ;; Map-each-only fields
+    [:source-key {:optional true} :string]         ;; Blackboard key with list to iterate
+    [:item-key {:optional true} :string]           ;; Blackboard key for current item
+    [:output-key {:optional true} :string]         ;; Blackboard key for collected results
+    [:max-concurrency {:optional true} :int]       ;; Max parallel iterations (nil = sequential)
     ;; Execution tracking
     [:last-error {:optional true} :string]]
 
@@ -200,6 +220,39 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:check condition-check]]
+
+   :sheet/set-node-executor
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:executor executor-type]
+    [:model {:optional true} :string]
+    [:fn {:optional true} :string]
+    [:tools {:optional true} [:vector :keyword]]]
+
+   :sheet/set-node-retry
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:retry [:map
+             [:max-attempts :int]
+             [:backoff-ms [:vector :int]]]]]
+
+   :sheet/set-parallel-config
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:success-policy {:optional true} [:enum :all :any :majority]]
+    [:failure-policy {:optional true} [:enum :all :any]]]
+
+   :sheet/set-map-each-config
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:source-key :string]
+    [:item-key :string]
+    [:output-key :string]
+    [:max-concurrency {:optional true} :int]]
 
    ;; -------------------------------------------------------------------------
    ;; Blackboard Commands
@@ -359,6 +412,52 @@
     [:node-id :uuid]
     [:check condition-check]
     [:previous-check {:optional true} condition-check]]
+
+   :sheet/node-executor-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:executor executor-type]
+    [:model {:optional true} :string]
+    [:fn {:optional true} :string]
+    [:tools {:optional true} [:vector :keyword]]
+    [:previous-executor {:optional true} executor-type]
+    [:previous-model {:optional true} :string]
+    [:previous-fn {:optional true} :string]
+    [:previous-tools {:optional true} [:vector :keyword]]]
+
+   :sheet/node-retry-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:retry [:map
+             [:max-attempts :int]
+             [:backoff-ms [:vector :int]]]]
+    [:previous-retry {:optional true} [:map
+                                       [:max-attempts :int]
+                                       [:backoff-ms [:vector :int]]]]]
+
+   :sheet/parallel-config-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:success-policy {:optional true} [:enum :all :any :majority]]
+    [:failure-policy {:optional true} [:enum :all :any]]
+    [:previous-success-policy {:optional true} [:enum :all :any :majority]]
+    [:previous-failure-policy {:optional true} [:enum :all :any]]]
+
+   :sheet/map-each-config-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:source-key :string]
+    [:item-key :string]
+    [:output-key :string]
+    [:max-concurrency {:optional true} :int]
+    [:previous-source-key {:optional true} :string]
+    [:previous-item-key {:optional true} :string]
+    [:previous-output-key {:optional true} :string]
+    [:previous-max-concurrency {:optional true} :int]]
 
    ;; -------------------------------------------------------------------------
    ;; Blackboard Events

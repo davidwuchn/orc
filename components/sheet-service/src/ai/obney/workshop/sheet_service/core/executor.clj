@@ -4,13 +4,19 @@
    This module bridges the gap between the behavior tree's leaf nodes
    and DSCloj's AI execution capabilities.
 
+   Supports multiple executor types:
+   - :ai - DSCloj AI execution with optional model selection
+   - :code - Clojure function execution
+   - :tool - Direct tool invocation (future)
+
    Mapping:
    - Node instruction → DSCloj module instructions
    - Node reads + blackboard types → DSCloj module inputs
    - Node writes + blackboard types → DSCloj module outputs
    - Blackboard values → DSCloj input values
    - DSCloj output values → Blackboard writes"
-  (:require [dscloj.core :as dscloj]))
+  (:require [dscloj.core :as dscloj]
+            [clojure.string :as str]))
 
 ;; =============================================================================
 ;; Schema Description Generation
@@ -148,17 +154,91 @@
           (:reads node)))
 
 ;; =============================================================================
-;; Execution
+;; Code Executor
 ;; =============================================================================
 
-(defn execute-leaf
-  "Execute a leaf node using DSCloj.
+(defn resolve-fn
+  "Resolve a fully-qualified function symbol string to a function.
+   Returns {:fn f} on success or {:error msg} on failure."
+  [fn-symbol-str]
+  (try
+    (let [[ns-str fn-str] (str/split fn-symbol-str #"/")
+          ns-sym (symbol ns-str)
+          fn-sym (symbol fn-str)]
+      ;; Try to find namespace first (may already be loaded)
+      (when-not (find-ns ns-sym)
+        ;; Only require if namespace not already loaded
+        (require ns-sym))
+      (if-let [f (ns-resolve (find-ns ns-sym) fn-sym)]
+        {:fn (if (var? f) @f f)}
+        {:error (str "Function not found: " fn-symbol-str)}))
+    (catch Exception e
+      {:error (str "Failed to resolve function: " fn-symbol-str " - " (.getMessage e))})))
+
+(defn execute-code
+  "Execute a Clojure function as a leaf node.
+
+   The function receives a context map with:
+   - :event-store - The event store (if provided)
+   - :inputs - Map of blackboard key -> value for node's reads
+
+   The function should return a map of blackboard key -> value for writes.
+
+   Args:
+     node - The leaf node map with :fn (fully-qualified symbol string)
+     blackboard - Map of key -> {:key, :type, :value, :version}
+     context - Additional context (event-store, etc.)
+
+   Returns:
+     {:status :success/:failure
+      :outputs {string-key value}
+      :error string?
+      :duration-ms int}"
+  [node blackboard context]
+  (let [start-time (System/currentTimeMillis)
+        fn-symbol (:fn node)
+        resolved (resolve-fn fn-symbol)]
+    (if (:error resolved)
+      {:status :failure
+       :error (:error resolved)
+       :duration-ms (- (System/currentTimeMillis) start-time)}
+      (try
+        (let [f (:fn resolved)
+              ;; Gather inputs from blackboard
+              inputs (reduce (fn [acc key-name]
+                               (if-let [entry (get blackboard key-name)]
+                                 (assoc acc key-name (:value entry))
+                                 acc))
+                             {}
+                             (:reads node))
+              ;; Call the function with context
+              result (f (assoc context :inputs inputs))
+              duration-ms (- (System/currentTimeMillis) start-time)]
+          ;; Result should be a map of key -> value
+          (if (map? result)
+            {:status :success
+             :outputs result
+             :duration-ms duration-ms}
+            {:status :failure
+             :error (str "Code executor function must return a map, got: " (type result))
+             :duration-ms duration-ms}))
+        (catch Exception e
+          {:status :failure
+           :error (.getMessage e)
+           :duration-ms (- (System/currentTimeMillis) start-time)})))))
+
+;; =============================================================================
+;; AI Execution
+;; =============================================================================
+
+(defn execute-ai
+  "Execute a leaf node using DSCloj AI.
 
    Args:
      node - The leaf node map
      blackboard - Map of key -> {:key, :type, :value, :version}
      provider - DSCloj provider keyword (e.g., :openrouter, :anthropic)
-     options - Optional DSCloj options map
+     options - Optional DSCloj options map (can include :model)
 
    Returns:
      {:status :success/:failure
@@ -171,9 +251,13 @@
         inputs (gather-inputs node blackboard)
         output-key-mapping (:output-key-mapping module)
         ;; Remove the mapping from module before passing to DSCloj
-        dscloj-module (dissoc module :output-key-mapping)]
+        dscloj-module (dissoc module :output-key-mapping)
+        ;; Add model to options if specified on node
+        options-with-model (if-let [model (:model node)]
+                             (assoc options :model model)
+                             options)]
     (try
-      (let [result (dscloj/predict provider dscloj-module inputs options)
+      (let [result (dscloj/predict provider dscloj-module inputs options-with-model)
             ;; Convert sanitized keys back to original blackboard keys
             outputs (reduce-kv (fn [acc k v]
                                  (let [sanitized-name (name k)
@@ -189,6 +273,75 @@
         {:status :failure
          :error (.getMessage e)
          :duration-ms (- (System/currentTimeMillis) start-time)}))))
+
+;; =============================================================================
+;; Retry Logic
+;; =============================================================================
+
+(defn get-backoff
+  "Get backoff duration for a given attempt (0-indexed)."
+  [retry-config attempt]
+  (let [backoff-ms (:backoff-ms retry-config)]
+    (get backoff-ms (min attempt (dec (count backoff-ms))))))
+
+(defn execute-with-retry
+  "Execute a function with retry logic.
+
+   Args:
+     execute-fn - Zero-arg function that returns {:status :success/:failure ...}
+     retry-config - {:max-attempts n :backoff-ms [100 500 2000]}
+
+   Returns the result of execute-fn, retrying on failure up to max-attempts."
+  [execute-fn retry-config]
+  (let [max-attempts (or (:max-attempts retry-config) 1)]
+    (loop [attempt 0]
+      (let [result (execute-fn)]
+        (if (or (= :success (:status result))
+                (>= (inc attempt) max-attempts))
+          result
+          (do
+            (when-let [backoff (get-backoff retry-config attempt)]
+              (Thread/sleep backoff))
+            (recur (inc attempt))))))))
+
+;; =============================================================================
+;; Main Execution Entry Point
+;; =============================================================================
+
+(defn execute-leaf
+  "Execute a leaf node based on its executor type.
+
+   Executor types:
+   - :ai (default) - DSCloj AI execution
+   - :code - Clojure function execution
+   - :tool - Direct tool invocation (not yet implemented)
+
+   Args:
+     node - The leaf node map
+     blackboard - Map of key -> {:key, :type, :value, :version}
+     provider - DSCloj provider keyword (for :ai executor)
+     context - Additional context map (event-store, etc.)
+
+   Returns:
+     {:status :success/:failure
+      :outputs {string-key value}
+      :error string?
+      :duration-ms int}"
+  [node blackboard provider & {:keys [context options] :or {context {} options {}}}]
+  (let [executor-type (or (:executor node) :ai)
+        retry-config (:retry node)
+        execute-fn (fn []
+                     (case executor-type
+                       :ai (execute-ai node blackboard provider :options options)
+                       :code (execute-code node blackboard context)
+                       :tool {:status :failure
+                              :error "Tool executor not yet implemented"
+                              :duration-ms 0}
+                       ;; Default to AI
+                       (execute-ai node blackboard provider :options options)))]
+    (if retry-config
+      (execute-with-retry execute-fn retry-config)
+      (execute-fn))))
 
 ;; =============================================================================
 ;; Mock Executor (for testing without AI)

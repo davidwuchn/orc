@@ -30,6 +30,10 @@
     :sheet/node-io-set
     :sheet/node-decorators-set
     :sheet/node-check-set
+    :sheet/node-executor-set
+    :sheet/node-retry-set
+    :sheet/parallel-config-set
+    :sheet/map-each-config-set
     :sheet/node-execution-started
     :sheet/node-execution-completed})
 
@@ -123,15 +127,33 @@
                         :leaf "New Leaf"
                         :sequence "Sequence"
                         :fallback "Fallback"
-                        :condition "Condition")
+                        :condition "Condition"
+                        :parallel "Parallel"
+                        :map-each "Map Each")
                 :parent-id parent-id
                 :children-ids []
                 :status :idle
+                ;; Leaf fields
                 :instruction nil
                 :reads []
                 :writes []
                 :decorators []
+                :executor nil
+                :model nil
+                :fn nil
+                :tools nil
+                :retry nil
+                ;; Condition fields
                 :check nil
+                ;; Parallel fields
+                :success-policy nil
+                :failure-policy nil
+                ;; Map-each fields
+                :source-key nil
+                :item-key nil
+                :output-key nil
+                :max-concurrency nil
+                ;; Execution tracking
                 :last-error nil})
         ;; Add to parent's children if parent exists
         (cond-> parent-id
@@ -212,6 +234,32 @@
 (defmethod nodes* :sheet/node-check-set
   [state event]
   (assoc-in state [(:node-id event) :check] (:check event)))
+
+(defmethod nodes* :sheet/node-executor-set
+  [state event]
+  (-> state
+      (assoc-in [(:node-id event) :executor] (:executor event))
+      (assoc-in [(:node-id event) :model] (:model event))
+      (assoc-in [(:node-id event) :fn] (:fn event))
+      (assoc-in [(:node-id event) :tools] (:tools event))))
+
+(defmethod nodes* :sheet/node-retry-set
+  [state event]
+  (assoc-in state [(:node-id event) :retry] (:retry event)))
+
+(defmethod nodes* :sheet/parallel-config-set
+  [state event]
+  (-> state
+      (assoc-in [(:node-id event) :success-policy] (:success-policy event))
+      (assoc-in [(:node-id event) :failure-policy] (:failure-policy event))))
+
+(defmethod nodes* :sheet/map-each-config-set
+  [state event]
+  (-> state
+      (assoc-in [(:node-id event) :source-key] (:source-key event))
+      (assoc-in [(:node-id event) :item-key] (:item-key event))
+      (assoc-in [(:node-id event) :output-key] (:output-key event))
+      (assoc-in [(:node-id event) :max-concurrency] (:max-concurrency event))))
 
 (defmethod nodes* :sheet/node-execution-started
   [state event]

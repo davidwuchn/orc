@@ -12,7 +12,9 @@
             [ai.obney.workshop.sheet-service.interface.todo-processors :as tp]
             [ai.obney.workshop.sheet-service.interface.read-models :as rm]
             ;; Tree layout utilities
-            [ai.obney.workshop.sheet-service.core.tree-layout :as layout]))
+            [ai.obney.workshop.sheet-service.core.tree-layout :as layout]
+            ;; Runtime for synchronous execution
+            [ai.obney.workshop.sheet-service.core.runtime :as runtime]))
 
 ;; =============================================================================
 ;; Todo Processors
@@ -49,3 +51,33 @@
 
 (def compute-layout layout/compute-layout)
 (def compute-tree-depth layout/compute-tree-depth)
+
+;; =============================================================================
+;; Synchronous Execution
+;; =============================================================================
+
+(def execute
+  "Execute a sheet (behavior tree) with inputs and return outputs.
+
+   This is a synchronous, blocking call that:
+   1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
+   2. Runs the tree to completion
+   3. Returns output values
+
+   Args:
+     context - Map with :event-store and optional :dscloj-provider
+     sheet-id - UUID of the sheet to execute
+     inputs - Map of blackboard key -> value for initial inputs
+
+   Options:
+     :timeout-ms - Max execution time in ms (default 300000 = 5 minutes)
+
+   Returns:
+     {:status :success | :failure | :timeout
+      :outputs {\"key\" value ...}
+      :duration-ms 1234
+      :error string?}
+
+   Example:
+     (sheet/execute ctx sheet-id {\"student-id\" student-id} :timeout-ms 60000)"
+  runtime/execute)

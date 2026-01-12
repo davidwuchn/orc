@@ -39,7 +39,7 @@
                                ;; Bases
                                poly/web-api                                     {:local/root "bases/web-api"}}}
 
-            :test {:extra-paths []}
+            :test {:extra-paths ["components/sheet-service/test"]}
 
             :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
                    :extra-deps {polylith/clj-poly {:mvn/version "0.2.22"}}}}}
