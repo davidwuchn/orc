@@ -381,6 +381,13 @@
   (let [events (event-store/read event-store {:types sheet-events})]
     (vals (sheets {} events))))
 
+(defn get-sheet-by-name
+  "Find a sheet by name. Returns nil if not found."
+  [event-store name]
+  (->> (get-sheets-all event-store)
+       (filter #(= (:name %) name))
+       first))
+
 (defn get-node
   "Get a single node by ID"
   [event-store sheet-id node-id]

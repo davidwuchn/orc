@@ -16,6 +16,11 @@
   [event-store]
   (core/get-sheets-all event-store))
 
+(defn get-sheet-by-name
+  "Find a sheet by name. Returns nil if not found."
+  [event-store name]
+  (core/get-sheet-by-name event-store name))
+
 ;; =============================================================================
 ;; Node Read Model Functions
 ;; =============================================================================

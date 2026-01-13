@@ -42,7 +42,8 @@
             [ai.obney.workshop.sheet-service.core.read-models :as rm]
             [ai.obney.grain.time.interface :as time]
             [clojure.java.io :as io]
-            [clojure.pprint :as pprint]))
+            [clojure.pprint :as pprint]
+            [clojure.string]))
 
 ;; =============================================================================
 ;; Node Builders (Data Structures)
@@ -279,6 +280,20 @@
     (build-node! ctx sheet-id root-node nil 0)
 
     sheet-id))
+
+(defn build-workflow!!
+  "Idempotent workflow builder. Creates or replaces a workflow by name.
+
+   If a sheet with the same name exists, it is deleted first.
+   Returns the (possibly new) sheet-id.
+
+   Use double-bang (!!) to indicate destructive idempotent operation."
+  [ctx workflow-def]
+  (let [workflow-name (:workflow-name workflow-def)
+        existing (rm/get-sheet-by-name (:event-store ctx) workflow-name)]
+    (when existing
+      (h/run-and-apply! ctx (h/make-delete-sheet-command (:id existing))))
+    (build-workflow! ctx workflow-def)))
 
 ;; =============================================================================
 ;; Convenience Functions

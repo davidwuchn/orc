@@ -31,6 +31,7 @@
 ;; Sheet functions
 (def get-sheet rm/get-sheet)
 (def get-sheets-all rm/get-sheets-all)
+(def get-sheet-by-name rm/get-sheet-by-name)
 
 ;; Node functions
 (def get-node rm/get-node)
@@ -105,6 +106,7 @@
 
 ;; Build functions
 (def build-workflow! dsl/build-workflow!)
+(def build-workflow!! dsl/build-workflow!!)
 
 ;; Utilities
 (def print-tree dsl/print-tree)
