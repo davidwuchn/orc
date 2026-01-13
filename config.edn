@@ -2,6 +2,7 @@
  :app-base "http://localhost:8080"
  :webserver/http-port 8081
  :env "dev"
+ :dscloj-provider "openrouter"
 
  ;; LocalStack Configuration
  :localstack/enabled true
