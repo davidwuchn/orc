@@ -4,6 +4,7 @@
             [re-frame.core :as rf]
             [re-frame.uix :refer [use-subscribe]]
             [cljs.reader :as reader]
+            [clojure.string :as str]
             [malli.core :as m]
             ["/gen/shadcn/components/ui/button" :as button]
             ["/gen/shadcn/components/ui/input" :as input]
@@ -48,6 +49,8 @@
     :sequence "S"
     :fallback "F"
     :condition "?"
+    :parallel "P"
+    :map-each "M"
     "?"))
 
 (defn node-type-color [node-type]
@@ -56,6 +59,8 @@
     :sequence "bg-purple-100 border-purple-300"
     :fallback "bg-orange-100 border-orange-300"
     :condition "bg-yellow-100 border-yellow-300"
+    :parallel "bg-green-100 border-green-300"
+    :map-each "bg-teal-100 border-teal-300"
     "bg-gray-100"))
 
 ;; =============================================================================
@@ -125,10 +130,21 @@
                       (str (:key check) " " (name (:op check)) " " (:value check)))
                    ($ :p {:class "text-xs text-gray-400 italic mt-1"} "No check")))
 
-               ;; Children count for composite nodes
+               ;; Children count for sequence/fallback nodes
                (when (#{:sequence :fallback} node-type)
                  ($ :p {:class "text-xs text-gray-400 mt-1"}
-                    (str (count (:children-ids node)) " children")))))))))
+                    (str (count (:children-ids node)) " children")))
+
+               ;; Parallel node preview
+               (when (= :parallel node-type)
+                 ($ :p {:class "text-xs text-gray-400 mt-1"}
+                    (str (count (:children-ids node)) " children")))
+
+               ;; Map-each node preview
+               (when (= :map-each node-type)
+                 ($ :p {:class "text-xs text-gray-500 truncate mt-1"}
+                    (when (:source-key node)
+                      (str (:source-key node) " -> " (:output-key node)))))))))))
 
 ;; =============================================================================
 ;; Empty Row Cell (for adding nodes)
@@ -155,7 +171,15 @@
             ($ button/Button {:size "sm" :variant "outline"
                               :on-click #(do (set-menu-open! false)
                                              (on-create-node :fallback parent-id index))}
-               "Fall"))
+               "Fall")
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :parallel parent-id index))}
+               "Para")
+            ($ button/Button {:size "sm" :variant "outline"
+                              :on-click #(do (set-menu-open! false)
+                                             (on-create-node :map-each parent-id index))}
+               "Map"))
          ($ :span {:class "text-gray-400 text-2xl"} "+")))))
 
 ;; =============================================================================
@@ -656,6 +680,26 @@
         [check-value set-check-value!] (use-state "")
         [check-on-fail set-check-on-fail!] (use-state :failure)
 
+        ;; Executor state (for leaf nodes)
+        [executor-type set-executor-type!] (use-state :ai)
+        [model-value set-model-value!] (use-state "")
+        [fn-value set-fn-value!] (use-state "")
+
+        ;; Retry state
+        [retry-enabled? set-retry-enabled!] (use-state false)
+        [max-attempts set-max-attempts!] (use-state 3)
+        [backoff-ms set-backoff-ms!] (use-state "100,500,2000")
+
+        ;; Parallel config state
+        [success-policy set-success-policy!] (use-state :all)
+        [failure-policy set-failure-policy!] (use-state :any)
+
+        ;; Map-each config state
+        [source-key set-source-key!] (use-state "")
+        [item-key set-item-key!] (use-state "")
+        [output-key set-output-key!] (use-state "")
+        [max-concurrency set-max-concurrency!] (use-state "")
+
         ;; Initialize values when node changes
         _ (use-effect
             (fn []
@@ -669,7 +713,24 @@
                   (set-check-key! (or (:key check) ""))
                   (set-check-op! (or (:op check) :equals))
                   (set-check-value! (str (or (:value check) "")))
-                  (set-check-on-fail! (or (:on-fail check) :failure)))))
+                  (set-check-on-fail! (or (:on-fail check) :failure)))
+                ;; Initialize executor state
+                (set-executor-type! (or (:executor node) :ai))
+                (set-model-value! (or (:model node) ""))
+                (set-fn-value! (or (:fn node) ""))
+                ;; Initialize retry state
+                (set-retry-enabled! (some? (:retry node)))
+                (when-let [retry (:retry node)]
+                  (set-max-attempts! (or (:max-attempts retry) 3))
+                  (set-backoff-ms! (str/join "," (or (:backoff-ms retry) [100 500 2000]))))
+                ;; Initialize parallel config state
+                (set-success-policy! (or (:success-policy node) :all))
+                (set-failure-policy! (or (:failure-policy node) :any))
+                ;; Initialize map-each config state
+                (set-source-key! (or (:source-key node) ""))
+                (set-item-key! (or (:item-key node) ""))
+                (set-output-key! (or (:output-key node) ""))
+                (set-max-concurrency! (str (or (:max-concurrency node) "")))))
             [node])
 
         handle-save-name (fn []
@@ -695,7 +756,33 @@
                              (rf/dispatch [::sheet-events/create-node api-client sheet-id child-type (:id node) num-children])))
 
         handle-delete (fn []
-                        (rf/dispatch [::sheet-events/delete-node api-client sheet-id (:id node)]))]
+                        (rf/dispatch [::sheet-events/delete-node api-client sheet-id (:id node)]))
+
+        handle-save-executor (fn []
+                               (rf/dispatch [::sheet-events/set-node-executor
+                                             api-client sheet-id (:id node)
+                                             executor-type model-value fn-value])
+                               (when (= :ai executor-type)
+                                 (rf/dispatch [::sheet-events/set-node-instruction
+                                               api-client sheet-id (:id node) instruction-value])))
+
+        handle-save-retry (fn []
+                            (rf/dispatch [::sheet-events/set-node-retry
+                                          api-client sheet-id (:id node)
+                                          max-attempts
+                                          (mapv js/parseInt (str/split backoff-ms #","))]))
+
+        handle-save-parallel-config (fn []
+                                      (rf/dispatch [::sheet-events/set-parallel-config
+                                                    api-client sheet-id (:id node)
+                                                    success-policy failure-policy]))
+
+        handle-save-map-each-config (fn []
+                                      (rf/dispatch [::sheet-events/set-map-each-config
+                                                    api-client sheet-id (:id node)
+                                                    source-key item-key output-key
+                                                    (when (seq max-concurrency)
+                                                      (js/parseInt max-concurrency))]))]
 
     (if node
       ($ :div {:class "w-80 border-l bg-white h-full overflow-auto"}
@@ -736,16 +823,47 @@
               ($ :div {:class "text-sm text-red-600 bg-red-50 p-2 rounded"}
                  (:last-error node)))
 
-            ;; Leaf-specific: Instruction
+            ;; Leaf-specific: Executor configuration
             (when (= :leaf (:type node))
-              ($ :div {:class "space-y-2"}
-                 ($ label/Label "Instruction")
-                 ($ textarea/Textarea {:value instruction-value
-                                       :on-change #(set-instruction-value! (.. % -target -value))
-                                       :rows 4
-                                       :placeholder "What should this node do?"})
-                 ($ button/Button {:size "sm" :on-click handle-save-instruction}
-                    "Save Instruction")))
+              ($ :div {:class "space-y-4"}
+                 ;; Executor type selector
+                 ($ :div {:class "space-y-2"}
+                    ($ label/Label "Executor")
+                    ($ select/Select {:value (name executor-type)
+                                      :onValueChange #(set-executor-type! (keyword %))}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue))
+                       ($ select/SelectContent
+                          ($ select/SelectItem {:value "ai"} "AI (LLM)")
+                          ($ select/SelectItem {:value "code"} "Code (Clojure fn)"))))
+
+                 ;; AI-specific: Model selector
+                 (when (= :ai executor-type)
+                   ($ :div {:class "space-y-2"}
+                      ($ label/Label "Model (OpenRouter)")
+                      ($ input/Input {:value model-value
+                                      :on-change #(set-model-value! (.. % -target -value))
+                                      :placeholder "e.g., google/gemini-2.5-flash"})))
+
+                 ;; Code-specific: Function symbol
+                 (when (= :code executor-type)
+                   ($ :div {:class "space-y-2"}
+                      ($ label/Label "Function (fully qualified)")
+                      ($ input/Input {:value fn-value
+                                      :on-change #(set-fn-value! (.. % -target -value))
+                                      :placeholder "e.g., myapp.fns/process"})))
+
+                 ;; Instruction (for AI executor)
+                 (when (= :ai executor-type)
+                   ($ :div {:class "space-y-2"}
+                      ($ label/Label "Instruction")
+                      ($ textarea/Textarea {:value instruction-value
+                                            :on-change #(set-instruction-value! (.. % -target -value))
+                                            :rows 4
+                                            :placeholder "What should this node do?"})))
+
+                 ($ button/Button {:size "sm" :on-click handle-save-executor}
+                    "Save Executor")))
 
             ;; Leaf-specific: Reads/Writes
             (when (= :leaf (:type node))
@@ -788,6 +906,31 @@
 
                  ($ button/Button {:size "sm" :variant "outline" :on-click handle-save-io}
                     "Save I/O")))
+
+            ;; Leaf-specific: Retry configuration
+            (when (= :leaf (:type node))
+              ($ :div {:class "space-y-2"}
+                 ($ :div {:class "flex items-center gap-2"}
+                    ($ checkbox/Checkbox {:id "retry-enabled"
+                                          :checked retry-enabled?
+                                          :onCheckedChange set-retry-enabled!})
+                    ($ label/Label {:htmlFor "retry-enabled"} "Enable Retry"))
+
+                 (when retry-enabled?
+                   ($ :div {:class "space-y-2 pl-6"}
+                      ($ :div {:class "space-y-1"}
+                         ($ :span {:class "text-xs text-gray-500"} "Max Attempts")
+                         ($ input/Input {:type "number"
+                                         :value max-attempts
+                                         :on-change #(set-max-attempts! (js/parseInt (.. % -target -value)))
+                                         :class "w-20"}))
+                      ($ :div {:class "space-y-1"}
+                         ($ :span {:class "text-xs text-gray-500"} "Backoff (ms, comma-sep)")
+                         ($ input/Input {:value backoff-ms
+                                         :on-change #(set-backoff-ms! (.. % -target -value))
+                                         :placeholder "100,500,2000"}))
+                      ($ button/Button {:size "sm" :variant "outline" :on-click handle-save-retry}
+                         "Save Retry")))))
 
             ;; Condition-specific: Check configuration
             (when (= :condition (:type node))
@@ -834,8 +977,80 @@
                                    :disabled (empty? check-key)}
                     "Save Check")))
 
+            ;; Parallel-specific: Policy configuration
+            (when (= :parallel (:type node))
+              ($ :div {:class "space-y-3"}
+                 ($ label/Label "Parallel Policies")
+
+                 ;; Success policy
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Success Policy")
+                    ($ select/Select {:value (name success-policy)
+                                      :onValueChange #(set-success-policy! (keyword %))}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue))
+                       ($ select/SelectContent
+                          ($ select/SelectItem {:value "all"} "All (all must succeed)")
+                          ($ select/SelectItem {:value "any"} "Any (one succeeds)")
+                          ($ select/SelectItem {:value "majority"} "Majority (>50% succeed)"))))
+
+                 ;; Failure policy
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Failure Policy")
+                    ($ select/Select {:value (name failure-policy)
+                                      :onValueChange #(set-failure-policy! (keyword %))}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue))
+                       ($ select/SelectContent
+                          ($ select/SelectItem {:value "any"} "Any (one fails)")
+                          ($ select/SelectItem {:value "all"} "All (all must fail)"))))
+
+                 ($ button/Button {:size "sm" :on-click handle-save-parallel-config}
+                    "Save Policies")))
+
+            ;; Map-each-specific: Configuration
+            (when (= :map-each (:type node))
+              ($ :div {:class "space-y-3"}
+                 ($ label/Label "Map-Each Configuration")
+
+                 ;; Source key
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Source Key (list to iterate)")
+                    ($ select/Select {:value source-key
+                                      :onValueChange set-source-key!}
+                       ($ select/SelectTrigger {:class "w-full"}
+                          ($ select/SelectValue {:placeholder "Select key..."}))
+                       ($ select/SelectContent
+                          (for [k blackboard-keys]
+                            ($ select/SelectItem {:key k :value k} k)))))
+
+                 ;; Item key
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Item Key (current item var)")
+                    ($ input/Input {:value item-key
+                                    :on-change #(set-item-key! (.. % -target -value))
+                                    :placeholder "e.g., current-item"}))
+
+                 ;; Output key
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Output Key (results list)")
+                    ($ input/Input {:value output-key
+                                    :on-change #(set-output-key! (.. % -target -value))
+                                    :placeholder "e.g., processed-items"}))
+
+                 ;; Max concurrency
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Max Concurrency (blank = sequential)")
+                    ($ input/Input {:type "number"
+                                    :value max-concurrency
+                                    :on-change #(set-max-concurrency! (.. % -target -value))
+                                    :placeholder "e.g., 10"}))
+
+                 ($ button/Button {:size "sm" :on-click handle-save-map-each-config}
+                    "Save Config")))
+
             ;; Add child (for composite nodes)
-            (when (#{:sequence :fallback} (:type node))
+            (when (#{:sequence :fallback :parallel :map-each} (:type node))
               ($ :div {:class "space-y-2"}
                  ($ label/Label "Add Child")
                  ($ :div {:class "flex gap-2 flex-wrap"}
@@ -850,7 +1065,13 @@
                        "+ Seq")
                     ($ button/Button {:size "sm" :variant "outline"
                                       :on-click #(handle-add-child :fallback)}
-                       "+ Fall"))))
+                       "+ Fall")
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :parallel)}
+                       "+ Para")
+                    ($ button/Button {:size "sm" :variant "outline"
+                                      :on-click #(handle-add-child :map-each)}
+                       "+ Map"))))
 
             ($ separator/Separator)
 
@@ -881,7 +1102,9 @@
         handle-tick (fn []
                       (rf/dispatch [::sheet-events/tick-tree api-client sheet-id]))
         handle-stop (fn []
-                      (rf/dispatch [::sheet-events/stop-ticking api-client sheet-id]))]
+                      (rf/dispatch [::sheet-events/stop-ticking api-client sheet-id]))
+        handle-export (fn []
+                        (rf/dispatch [::sheet-events/export-sheet api-client sheet-id]))]
 
     ($ :div {:class "flex items-center justify-between p-4 border-b bg-white"}
        ($ :div {:class "flex items-center gap-4"}
@@ -894,6 +1117,8 @@
             ($ :div {:class "flex items-center gap-2 text-sm text-gray-600"}
                ($ spinner/Spinner {:class "w-4 h-4"})
                ($ :span (str "Iteration " (:iteration tick-progress) "/" (:budget tick-progress)))))
+          ($ button/Button {:variant "outline" :on-click handle-export}
+             "Download")
           (if ticking?
             ($ button/Button {:variant "outline" :on-click handle-stop}
                "Stop")

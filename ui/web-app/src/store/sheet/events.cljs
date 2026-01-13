@@ -258,6 +258,53 @@
                                 :on-success [::node-command-success api-client sheet-id]
                                 :on-failure [::node-operation-failure]}}))
 
+(rf/reg-event-fx
+  ::set-node-executor
+  (fn [_ [_ api-client sheet-id node-id executor model fn-symbol]]
+    {::sheet-fx/set-node-executor {:api-client api-client
+                                   :sheet-id sheet-id
+                                   :node-id node-id
+                                   :executor executor
+                                   :model model
+                                   :fn-symbol fn-symbol
+                                   :on-success [::node-command-success api-client sheet-id]
+                                   :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-node-retry
+  (fn [_ [_ api-client sheet-id node-id max-attempts backoff-ms]]
+    {::sheet-fx/set-node-retry {:api-client api-client
+                                :sheet-id sheet-id
+                                :node-id node-id
+                                :max-attempts max-attempts
+                                :backoff-ms backoff-ms
+                                :on-success [::node-command-success api-client sheet-id]
+                                :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-parallel-config
+  (fn [_ [_ api-client sheet-id node-id success-policy failure-policy]]
+    {::sheet-fx/set-parallel-config {:api-client api-client
+                                     :sheet-id sheet-id
+                                     :node-id node-id
+                                     :success-policy success-policy
+                                     :failure-policy failure-policy
+                                     :on-success [::node-command-success api-client sheet-id]
+                                     :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-map-each-config
+  (fn [_ [_ api-client sheet-id node-id source-key item-key output-key max-concurrency]]
+    {::sheet-fx/set-map-each-config {:api-client api-client
+                                     :sheet-id sheet-id
+                                     :node-id node-id
+                                     :source-key source-key
+                                     :item-key item-key
+                                     :output-key output-key
+                                     :max-concurrency max-concurrency
+                                     :on-success [::node-command-success api-client sheet-id]
+                                     :on-failure [::node-operation-failure]}}))
+
 ;; =============================================================================
 ;; Blackboard Events
 ;; =============================================================================
@@ -432,3 +479,37 @@
   ::clear-sheet
   (fn [db _]
     (dissoc db :sheet)))
+
+;; =============================================================================
+;; Export Sheet Events
+;; =============================================================================
+
+(rf/reg-event-fx
+  ::export-sheet
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    {::sheet-fx/export-sheet {:api-client api-client
+                              :sheet-id sheet-id
+                              :on-success [::export-sheet-success]
+                              :on-failure [::export-sheet-failure]}}))
+
+(rf/reg-event-fx
+  ::export-sheet-success
+  (fn [_ [_ result]]
+    ;; Trigger browser download
+    (let [sheet-name (get-in result [:sheet :name] "sheet")
+          filename (str sheet-name ".edn")
+          content (pr-str result)
+          blob (js/Blob. #js [content] #js {:type "application/edn"})
+          url (js/URL.createObjectURL blob)
+          link (js/document.createElement "a")]
+      (set! (.-href link) url)
+      (set! (.-download link) filename)
+      (.click link)
+      (js/URL.revokeObjectURL url))
+    {}))
+
+(rf/reg-event-db
+  ::export-sheet-failure
+  (fn [db [_ error]]
+    (js/console.error "Export failed:" error)
+    (assoc-in db [:sheet :error] error)))

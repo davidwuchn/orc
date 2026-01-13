@@ -205,6 +205,69 @@
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
 
+(rf/reg-fx
+  ::set-node-executor
+  (fn [{:keys [api-client sheet-id node-id executor model fn-symbol on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        (cond-> {:command/name :sheet/set-node-executor
+                                                 :sheet-id sheet-id
+                                                 :node-id node-id
+                                                 :executor executor}
+                                          model (assoc :model model)
+                                          fn-symbol (assoc :fn fn-symbol))))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-node-retry
+  (fn [{:keys [api-client sheet-id node-id max-attempts backoff-ms on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-node-retry
+                                         :sheet-id sheet-id
+                                         :node-id node-id
+                                         :max-attempts max-attempts
+                                         :backoff-ms backoff-ms}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-parallel-config
+  (fn [{:keys [api-client sheet-id node-id success-policy failure-policy on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-parallel-config
+                                         :sheet-id sheet-id
+                                         :node-id node-id
+                                         :success-policy success-policy
+                                         :failure-policy failure-policy}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-map-each-config
+  (fn [{:keys [api-client sheet-id node-id source-key item-key output-key max-concurrency on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        (cond-> {:command/name :sheet/set-map-each-config
+                                                 :sheet-id sheet-id
+                                                 :node-id node-id
+                                                 :source-key source-key
+                                                 :item-key item-key
+                                                 :output-key output-key}
+                                          max-concurrency (assoc :max-concurrency max-concurrency))))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
 ;; =============================================================================
 ;; Blackboard Effects
 ;; =============================================================================
@@ -304,6 +367,22 @@
                                                  :sheet-id sheet-id
                                                  :node-id node-id}
                                           overrides (assoc :overrides overrides))))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+;; =============================================================================
+;; Export Effects
+;; =============================================================================
+
+(rf/reg-fx
+  ::export-sheet
+  (fn [{:keys [api-client sheet-id on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/query api-client
+                                      {:query/name :sheet/export-sheet
+                                       :sheet-id sheet-id}))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))

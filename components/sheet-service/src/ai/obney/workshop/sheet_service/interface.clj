@@ -109,3 +109,11 @@
 ;; Utilities
 (def print-tree dsl/print-tree)
 (def describe-workflow dsl/describe-workflow)
+
+;; Export/Import
+(def export-sheet dsl/export-sheet)
+(def import-sheet dsl/import-sheet)
+(def save-sheet! dsl/save-sheet!)
+(def load-sheet! dsl/load-sheet!)
+(def save-all-sheets! dsl/save-all-sheets!)
+(def load-all-sheets! dsl/load-all-sheets!)

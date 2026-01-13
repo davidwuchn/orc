@@ -39,7 +39,10 @@
    (sheet/execute ctx sheet-id {\"student-profile\" {...}})
    ```"
   (:require [ai.obney.workshop.sheet-service.test-helpers :as h]
-            ))
+            [ai.obney.workshop.sheet-service.core.read-models :as rm]
+            [ai.obney.grain.time.interface :as time]
+            [clojure.java.io :as io]
+            [clojure.pprint :as pprint]))
 
 ;; =============================================================================
 ;; Node Builders (Data Structures)
@@ -304,3 +307,222 @@
     (println "  " (name k) "->" v))
   (println "\nTree Structure:")
   (print-tree workflow-def))
+
+;; =============================================================================
+;; Export/Import Functions
+;; =============================================================================
+
+(defn- build-node-tree
+  "Convert flat nodes map to nested tree structure for export."
+  [nodes-by-id root-id]
+  (when root-id
+    (let [node (get nodes-by-id root-id)]
+      (when node
+        (cond-> {:type (:type node)
+                 :name (:name node)}
+          ;; Leaf-specific fields
+          (= :leaf (:type node))
+          (merge (cond-> {}
+                   (:executor node) (assoc :executor (:executor node))
+                   (:model node) (assoc :model (:model node))
+                   (:fn node) (assoc :fn (:fn node))
+                   (:instruction node) (assoc :instruction (:instruction node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (seq (:writes node)) (assoc :writes (:writes node))
+                   (:retry node) (assoc :retry (:retry node))))
+          ;; Condition-specific
+          (= :condition (:type node))
+          (merge (cond-> {}
+                   (:check node) (assoc :check (:check node))
+                   (:on-fail node) (assoc :on-fail (:on-fail node))))
+          ;; Parallel-specific
+          (= :parallel (:type node))
+          (merge {:success-policy (or (:success-policy node) :all)
+                  :failure-policy (or (:failure-policy node) :any)})
+          ;; Map-each-specific
+          (= :map-each (:type node))
+          (merge (cond-> {}
+                   (:source-key node) (assoc :source-key (:source-key node))
+                   (:item-key node) (assoc :item-key (:item-key node))
+                   (:output-key node) (assoc :output-key (:output-key node))
+                   (:max-concurrency node) (assoc :max-concurrency (:max-concurrency node))))
+          ;; Children for composite nodes
+          (seq (:children-ids node))
+          (assoc :children
+                 (vec (keep #(build-node-tree nodes-by-id %) (:children-ids node)))))))))
+
+(defn export-sheet
+  "Export a sheet from the event store as an EDN structure.
+
+   Returns a map that can be saved to file and later imported.
+
+   Example:
+     (export-sheet ctx sheet-id)
+     ;; => {:version 1 :sheet {...} :blackboard-schema {...} :nodes {...}}"
+  [ctx sheet-id]
+  (let [es (:event-store ctx)
+        sheet (rm/get-sheet es sheet-id)
+        nodes (rm/get-nodes-by-id es sheet-id)
+        blackboard (rm/get-blackboard-for-sheet es sheet-id)]
+    {:version 1
+     :exported-at (time/now)
+     :sheet {:name (:name sheet)
+             :id sheet-id}
+     :blackboard-schema (into {}
+                              (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
+                                   blackboard))
+     :nodes (build-node-tree nodes (:root-node-id sheet))}))
+
+(defn- import-node!
+  "Recursively import a node and its children from exported structure."
+  [ctx sheet-id node parent-id index]
+  (let [node-type (:type node)
+        ;; Create the node
+        create-result (h/run-and-apply! ctx
+                        (h/make-create-node-command sheet-id node-type
+                          :parent-id parent-id
+                          :index index))
+        node-id (-> create-result :command-result/events first :node-id)]
+
+    ;; Set name if provided
+    (when (:name node)
+      (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node-id (:name node))))
+
+    ;; Configure based on node type
+    (case node-type
+      :leaf
+      (do
+        ;; Set executor
+        (when (:executor node)
+          (h/run-and-apply! ctx
+            (h/make-set-node-executor-command sheet-id node-id (:executor node)
+              :model (:model node)
+              :fn (:fn node))))
+        ;; Set instruction if AI node
+        (when (:instruction node)
+          (h/run-and-apply! ctx
+            (h/make-set-node-instruction-command sheet-id node-id (:instruction node))))
+        ;; Set IO
+        (when (or (seq (:reads node)) (seq (:writes node)))
+          (h/run-and-apply! ctx
+            (h/make-set-node-io-command sheet-id node-id
+              (vec (:reads node)) (vec (:writes node)))))
+        ;; Set retry if configured
+        (when-let [retry (:retry node)]
+          (h/run-and-apply! ctx
+            (h/make-set-node-retry-command sheet-id node-id
+              (:max-attempts retry) (:backoff-ms retry)))))
+
+      :condition
+      nil ;; TODO: add set-check command when implemented
+
+      :parallel
+      (do
+        (h/run-and-apply! ctx
+          (h/make-set-parallel-config-command sheet-id node-id
+            :success-policy (:success-policy node)
+            :failure-policy (:failure-policy node)))
+        ;; Build children
+        (doseq [[idx child] (map-indexed vector (:children node))]
+          (import-node! ctx sheet-id child node-id idx)))
+
+      :map-each
+      (do
+        (h/run-and-apply! ctx
+          (h/make-set-map-each-config-command sheet-id node-id
+            (:source-key node) (:item-key node) (:output-key node)
+            :max-concurrency (:max-concurrency node)))
+        ;; Build children
+        (doseq [[idx child] (map-indexed vector (:children node))]
+          (import-node! ctx sheet-id child node-id idx)))
+
+      ;; sequence, fallback - just build children
+      (doseq [[idx child] (map-indexed vector (:children node))]
+        (import-node! ctx sheet-id child node-id idx)))
+
+    node-id))
+
+(defn import-sheet
+  "Import a sheet from an exported EDN structure.
+
+   Creates a new sheet with the same structure. Returns the new sheet-id.
+
+   Example:
+     (import-sheet ctx exported-data)"
+  [ctx exported]
+  (let [sheet-name (get-in exported [:sheet :name])
+        blackboard-schema (:blackboard-schema exported)
+        root-node (:nodes exported)
+
+        ;; Create new sheet
+        sheet-result (h/run-and-apply! ctx
+                       (h/make-create-sheet-command :name sheet-name))
+        sheet-id (-> sheet-result :command-result/events first :sheet-id)]
+
+    ;; Declare blackboard keys
+    (doseq [[key-name schema] blackboard-schema]
+      (h/run-and-apply! ctx
+        (h/make-declare-key-command sheet-id (name key-name) schema)))
+
+    ;; Build the node tree
+    (when root-node
+      (import-node! ctx sheet-id root-node nil 0))
+
+    sheet-id))
+
+;; =============================================================================
+;; File I/O Helpers
+;; =============================================================================
+
+(defn save-sheet!
+  "Export a sheet and save to file.
+
+   Example:
+     (save-sheet! ctx sheet-id \"development/sheets/my-workflow.edn\")"
+  [ctx sheet-id filepath]
+  (let [exported (export-sheet ctx sheet-id)]
+    (io/make-parents filepath)
+    (spit filepath (with-out-str (pprint/pprint exported)))
+    (println "Saved sheet to:" filepath)
+    filepath))
+
+(defn load-sheet!
+  "Load a sheet from file and import it. Returns the new sheet-id.
+
+   Example:
+     (load-sheet! ctx \"development/sheets/my-workflow.edn\")"
+  [ctx filepath]
+  (let [exported (read-string (slurp filepath))
+        sheet-id (import-sheet ctx exported)]
+    (println "Loaded sheet from:" filepath "-> sheet-id:" sheet-id)
+    sheet-id))
+
+(defn save-all-sheets!
+  "Export all sheets to a directory.
+
+   Example:
+     (save-all-sheets! ctx \"development/sheets\")"
+  [ctx dir-path]
+  (let [sheets (rm/get-sheets-all (:event-store ctx))]
+    (doseq [sheet sheets]
+      (let [safe-name (-> (:name sheet)
+                          (clojure.string/replace #"[^a-zA-Z0-9-_]" "_"))
+            filename (str safe-name ".edn")
+            filepath (str dir-path "/" filename)]
+        (save-sheet! ctx (:id sheet) filepath)))
+    (println "Saved" (count sheets) "sheets to:" dir-path)))
+
+(defn load-all-sheets!
+  "Load all sheets from a directory.
+
+   Example:
+     (load-all-sheets! ctx \"development/sheets\")"
+  [ctx dir-path]
+  (let [dir (io/file dir-path)
+        files (when (.exists dir)
+                (->> (.listFiles dir)
+                     (filter #(.endsWith (.getName %) ".edn"))
+                     (sort-by #(.getName %))))]
+    (doseq [file files]
+      (load-sheet! ctx (.getPath file)))
+    (println "Loaded" (count files) "sheets from:" dir-path)))

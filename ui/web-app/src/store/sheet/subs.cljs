@@ -250,7 +250,10 @@
   (fn [_ _]
     [{:value :leaf :label "Leaf" :description "Executes an instruction"}
      {:value :sequence :label "Sequence" :description "Runs children until one fails"}
-     {:value :fallback :label "Fallback" :description "Runs children until one succeeds"}]))
+     {:value :fallback :label "Fallback" :description "Runs children until one succeeds"}
+     {:value :condition :label "Condition" :description "Checks a blackboard value"}
+     {:value :parallel :label "Parallel" :description "Runs all children concurrently"}
+     {:value :map-each :label "Map Each" :description "Iterates over a list"}]))
 
 ;; =============================================================================
 ;; Status Color Mapping

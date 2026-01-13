@@ -557,4 +557,22 @@
     [:sheet ::sheet]
     [:nodes [:vector ::node]]
     [:blackboard [:vector ::blackboard-entry]]
-    [:layout [:vector ::node-layout]]]})
+    [:layout [:vector ::node-layout]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Export Sheet (for download/backup)
+   ;; -------------------------------------------------------------------------
+
+   :sheet/export-sheet
+   [:map
+    [:sheet-id :uuid]]
+
+   :sheet/export-sheet-result
+   [:map
+    [:version :int]
+    [:exported-at :any]
+    [:sheet [:map
+             [:name :string]
+             [:id :uuid]]]
+    [:blackboard-schema [:map-of :keyword :any]]
+    [:nodes {:optional true} :any]]})
