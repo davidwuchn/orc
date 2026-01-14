@@ -451,9 +451,12 @@
       ;; Fallback - use textarea for raw EDN
       :else
       ($ :textarea
-         {:value (pr-str value)
+         {:value (if (nil? value) "" (pr-str value))
           :on-change #(try
-                        (on-change (reader/read-string (.. % -target -value)))
+                        (let [text (.. % -target -value)]
+                          (on-change (if (str/blank? text)
+                                       nil
+                                       (reader/read-string text))))
                         (catch :default _ nil))
           :class (str "w-full rounded border border-gray-200 px-2 py-1.5 text-sm font-mono "
                       "focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent "
