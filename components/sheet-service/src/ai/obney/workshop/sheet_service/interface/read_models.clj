@@ -77,3 +77,27 @@
   "Get a single tick by ID"
   [event-store tick-id]
   (core/get-tick event-store tick-id))
+
+;; =============================================================================
+;; Version Read Model Functions
+;; =============================================================================
+
+(defn get-versions-for-sheet
+  "Get all published versions for a sheet, sorted by version number"
+  [event-store sheet-id]
+  (core/get-versions-for-sheet event-store sheet-id))
+
+(defn get-version
+  "Get a specific published version by version number"
+  [event-store sheet-id version-number]
+  (core/get-version event-store sheet-id version-number))
+
+(defn get-latest-version
+  "Get the latest published version for a sheet"
+  [event-store sheet-id]
+  (core/get-latest-version event-store sheet-id))
+
+(defn get-stash
+  "Get the stash for a sheet, if any"
+  [event-store sheet-id]
+  (core/get-stash event-store sheet-id))

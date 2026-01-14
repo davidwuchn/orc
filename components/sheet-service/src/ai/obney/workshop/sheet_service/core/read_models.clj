@@ -11,13 +11,19 @@
 ;; Event Type Sets
 ;; =============================================================================
 
-(def sheet-events
-  "Events that affect sheet read model"
+(def sheet-core-events
+  "Core events that directly affect sheet read model"
   #{:sheet/sheet-created
     :sheet/sheet-renamed
     :sheet/sheet-deleted
     :sheet/node-created    ;; first root node sets root-node-id
-    :sheet/node-deleted})  ;; deleting root clears root-node-id
+    :sheet/node-deleted    ;; deleting root clears root-node-id
+    ;; Versioning events
+    :sheet/version-published
+    :sheet/draft-stashed
+    :sheet/draft-reverted
+    :sheet/stash-restored
+    :sheet/execution-mode-set})
 
 (def node-events
   "Events that affect node read model"
@@ -53,9 +59,41 @@
     :sheet/tree-tick-completed
     :sheet/tick-cancelled})
 
+(def version-events
+  "Events that affect version/stash read model"
+  #{:sheet/version-published
+    :sheet/draft-stashed
+    :sheet/draft-reverted
+    :sheet/stash-restored
+    :sheet/execution-mode-set})
+
+(def draft-dirty-events
+  "Events that mark draft as dirty (differs from published)"
+  #{:sheet/node-created
+    :sheet/node-moved
+    :sheet/node-reordered
+    :sheet/node-deleted
+    :sheet/node-name-set
+    :sheet/node-instruction-set
+    :sheet/node-io-set
+    :sheet/node-decorators-set
+    :sheet/node-check-set
+    :sheet/node-executor-set
+    :sheet/node-retry-set
+    :sheet/parallel-config-set
+    :sheet/map-each-config-set
+    :sheet/llm-condition-config-set
+    :sheet/key-declared
+    :sheet/key-schema-updated
+    :sheet/key-deleted})
+
+(def sheet-events
+  "Events that affect sheet read model (includes draft-dirty tracking)"
+  (clojure.set/union sheet-core-events draft-dirty-events))
+
 (def all-sheet-events
   "All events for a complete sheet view"
-  (clojure.set/union sheet-events node-events blackboard-events tick-events))
+  (clojure.set/union sheet-events node-events blackboard-events tick-events version-events))
 
 ;; =============================================================================
 ;; Sheets Projection
@@ -98,7 +136,43 @@
   [state event]
   (dissoc state (:sheet-id event)))
 
-(defmethod sheets* :default [state _] state)
+;; Versioning methods
+(defmethod sheets* :sheet/version-published
+  [state event]
+  (-> state
+      (assoc-in [(:sheet-id event) :published-version] (:version-number event))
+      (assoc-in [(:sheet-id event) :draft-dirty?] false)))
+
+(defmethod sheets* :sheet/draft-stashed
+  [state event]
+  (assoc-in state [(:sheet-id event) :has-stash?] true))
+
+(defmethod sheets* :sheet/draft-reverted
+  [state event]
+  (assoc-in state [(:sheet-id event) :draft-dirty?] false))
+
+(defmethod sheets* :sheet/stash-restored
+  [state event]
+  ;; Restoring stash clears the stash (single stash per sheet)
+  (-> state
+      (assoc-in [(:sheet-id event) :has-stash?] false)
+      (assoc-in [(:sheet-id event) :draft-dirty?] true)))
+
+(defmethod sheets* :sheet/execution-mode-set
+  [state event]
+  (assoc-in state [(:sheet-id event) :execution-mode] (:mode event)))
+
+(defmethod sheets* :default
+  [state event]
+  ;; For events that modify the tree structure, mark draft as dirty
+  ;; (only if a published version exists)
+  (let [sheet-id (:sheet-id event)
+        event-type (:event/type event)]
+    (if (and sheet-id
+             (contains? draft-dirty-events event-type)
+             (get-in state [sheet-id :published-version]))
+      (assoc-in state [sheet-id :draft-dirty?] true)
+      state)))
 
 (defn sheets
   "Build sheets read model from events"
@@ -373,6 +447,70 @@
   (reduce ticks* (or initial-state {}) events))
 
 ;; =============================================================================
+;; Versions Projection
+;; =============================================================================
+
+(defmulti versions*
+  "Apply event to versions read model.
+   State structure: {sheet-id {version-number version-snapshot}}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod versions* :sheet/version-published
+  [state event]
+  (let [sheet-id (:sheet-id event)
+        version-num (:version-number event)]
+    (assoc-in state [sheet-id version-num]
+              {:snapshot-id (:snapshot-id event)
+               :sheet-id sheet-id
+               :version-number version-num
+               :published-at (str (:event/timestamp event))
+               :description (:description event)
+               :snapshot (:snapshot event)})))
+
+(defmethod versions* :default [state _] state)
+
+(defn versions
+  "Build versions read model from events"
+  [initial-state events]
+  (reduce versions* (or initial-state {}) events))
+
+;; =============================================================================
+;; Stash Projection
+;; =============================================================================
+
+(defmulti stashes*
+  "Apply event to stashes read model.
+   State structure: {sheet-id stash} - only one stash per sheet"
+  (fn [_state event] (:event/type event)))
+
+(defmethod stashes* :sheet/draft-stashed
+  [state event]
+  (let [sheet-id (:sheet-id event)]
+    (assoc state sheet-id
+           {:stash-id (:stash-id event)
+            :sheet-id sheet-id
+            :stashed-at (str (:event/timestamp event))
+            :snapshot (:snapshot event)})))
+
+(defmethod stashes* :sheet/stash-restored
+  [state event]
+  ;; Restoring a stash consumes it
+  (dissoc state (:sheet-id event)))
+
+(defmethod stashes* :sheet/draft-reverted
+  [state event]
+  ;; A new stash was created before revert, which overwrites old stash
+  ;; The stash event comes before the revert event, so nothing to do here
+  state)
+
+(defmethod stashes* :default [state _] state)
+
+(defn stashes
+  "Build stashes read model from events"
+  [initial-state events]
+  (reduce stashes* (or initial-state {}) events))
+
+;; =============================================================================
 ;; Query Helper Functions
 ;; =============================================================================
 
@@ -509,3 +647,41 @@
               (= parent-id ancestor-id) true
               (nil? parent-id) (recur remaining (conj visited current))
               :else (recur (conj remaining parent-id) (conj visited current)))))))))
+
+;; =============================================================================
+;; Version Query Helpers
+;; =============================================================================
+
+(defn get-versions-for-sheet
+  "Get all published versions for a sheet, sorted by version number"
+  [event-store sheet-id]
+  (let [events (event-store/read event-store
+                                 {:types version-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (->> (get (versions {} events) sheet-id)
+         vals
+         (sort-by :version-number))))
+
+(defn get-version
+  "Get a specific published version by version number"
+  [event-store sheet-id version-number]
+  (let [events (event-store/read event-store
+                                 {:types version-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (get-in (versions {} events) [sheet-id version-number])))
+
+(defn get-latest-version
+  "Get the latest published version for a sheet"
+  [event-store sheet-id]
+  (let [sheet (get-sheet event-store sheet-id)
+        version-num (:published-version sheet)]
+    (when version-num
+      (get-version event-store sheet-id version-num))))
+
+(defn get-stash
+  "Get the stash for a sheet, if any"
+  [event-store sheet-id]
+  (let [events (event-store/read event-store
+                                 {:types version-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (get (stashes {} events) sheet-id)))

@@ -10,6 +10,70 @@
             [cognitect.anomalies :as anom]))
 
 ;; =============================================================================
+;; Snapshot Parsing Helpers (for published mode display)
+;; =============================================================================
+
+(defn- flatten-node-tree
+  "Convert nested tree structure back to flat list of nodes with generated IDs.
+   Returns {:nodes-by-id {...} :root-id uuid}."
+  ([tree-node] (flatten-node-tree tree-node nil (atom {})))
+  ([tree-node parent-id nodes-atom]
+   (when tree-node
+     (let [node-id (random-uuid)
+           children (:children tree-node)
+           child-results (mapv #(flatten-node-tree % node-id nodes-atom) children)
+           children-ids (vec (keep :node-id child-results))
+           base-node {:id node-id
+                      :type (:type tree-node)
+                      :name (:name tree-node)
+                      :status :idle
+                      :parent-id parent-id
+                      :children-ids children-ids}
+           node (cond-> base-node
+                  ;; Leaf fields
+                  (:executor tree-node) (assoc :executor (:executor tree-node))
+                  (:model tree-node) (assoc :model (:model tree-node))
+                  (:fn tree-node) (assoc :fn (:fn tree-node))
+                  (:instruction tree-node) (assoc :instruction (:instruction tree-node))
+                  (seq (:reads tree-node)) (assoc :reads (:reads tree-node))
+                  (seq (:writes tree-node)) (assoc :writes (:writes tree-node))
+                  (:retry tree-node) (assoc :retry (:retry tree-node))
+                  ;; Condition fields
+                  (:check tree-node) (assoc :check (:check tree-node))
+                  (:on-fail tree-node) (assoc :on-fail (:on-fail tree-node))
+                  ;; Parallel fields
+                  (:success-policy tree-node) (assoc :success-policy (:success-policy tree-node))
+                  (:failure-policy tree-node) (assoc :failure-policy (:failure-policy tree-node))
+                  ;; Map-each fields
+                  (:source-key tree-node) (assoc :source-key (:source-key tree-node))
+                  (:item-key tree-node) (assoc :item-key (:item-key tree-node))
+                  (:output-key tree-node) (assoc :output-key (:output-key tree-node))
+                  (:max-concurrency tree-node) (assoc :max-concurrency (:max-concurrency tree-node)))]
+       (swap! nodes-atom assoc node-id node)
+       {:node-id node-id :nodes-atom nodes-atom}))))
+
+(defn- snapshot->nodes
+  "Convert a snapshot's nested tree to a flat list of nodes."
+  [snapshot]
+  (if-let [tree (:nodes snapshot)]
+    (let [nodes-atom (atom {})
+          result (flatten-node-tree tree nil nodes-atom)
+          nodes-by-id @nodes-atom]
+      {:nodes (vec (vals nodes-by-id))
+       :nodes-by-id nodes-by-id
+       :root-id (:node-id result)})
+    {:nodes [] :nodes-by-id {} :root-id nil}))
+
+(defn- snapshot->blackboard
+  "Convert a snapshot's blackboard-schema to a blackboard list."
+  [snapshot]
+  (mapv (fn [[k schema]]
+          {:key (name k)
+           :schema schema
+           :value nil})  ;; Published snapshots don't store runtime values
+        (:blackboard-schema snapshot)))
+
+;; =============================================================================
 ;; Sheets List Screen (/sheets)
 ;; =============================================================================
 
@@ -28,27 +92,55 @@
 
 (defquery :sheet sheet-view-screen
   "Fat query for sheet view screen.
-   Returns sheet metadata, all nodes, blackboard, layout, and current tick."
+   Returns sheet metadata, all nodes, blackboard, layout, current tick, and version info.
+   When execution-mode is :published, returns the published snapshot's nodes/blackboard."
   [{{:keys [sheet-id]} :query
     :keys [event-store]}]
   (let [sheet (rm/get-sheet event-store sheet-id)]
     (if-not sheet
       {::anom/category ::anom/not-found
        ::anom/message "Sheet not found"}
-      (let [nodes (rm/get-nodes-for-sheet event-store sheet-id)
-            nodes-by-id (into {} (map (juxt :id identity) nodes))
-            blackboard (rm/get-blackboard-for-sheet event-store sheet-id)
-            root-node (when-let [root-id (:root-node-id sheet)]
-                        (get nodes-by-id root-id))
+      (let [execution-mode (or (:execution-mode sheet) :draft)
+            published-version (:published-version sheet)
+            ;; Determine if we should show published snapshot
+            use-published? (and (= :published execution-mode) published-version)
+            ;; Get the data source based on mode
+            {:keys [nodes nodes-by-id blackboard root-id]}
+            (if use-published?
+              ;; Load from published snapshot
+              (let [version (rm/get-version event-store sheet-id published-version)
+                    snapshot (:snapshot version)
+                    parsed (snapshot->nodes snapshot)]
+                {:nodes (:nodes parsed)
+                 :nodes-by-id (:nodes-by-id parsed)
+                 :blackboard (snapshot->blackboard snapshot)
+                 :root-id (:root-id parsed)})
+              ;; Load from draft (current state)
+              (let [draft-nodes (rm/get-nodes-for-sheet event-store sheet-id)
+                    draft-nodes-by-id (into {} (map (juxt :id identity) draft-nodes))]
+                {:nodes draft-nodes
+                 :nodes-by-id draft-nodes-by-id
+                 :blackboard (rm/get-blackboard-for-sheet event-store sheet-id)
+                 :root-id (:root-node-id sheet)}))
+            root-node (when root-id (get nodes-by-id root-id))
             tree-layout (if root-node
                           (layout/compute-layout root-node nodes-by-id)
                           [])
-            current-tick (rm/get-current-tick event-store sheet-id)]
+            current-tick (rm/get-current-tick event-store sheet-id)
+            version-info {:published-version published-version
+                          :draft-dirty? (boolean (:draft-dirty? sheet))
+                          :execution-mode execution-mode
+                          :has-stash? (boolean (:has-stash? sheet))}
+            ;; Update sheet's root-node-id to match the data source
+            sheet-for-response (if (and use-published? root-id)
+                                 (assoc sheet :root-node-id root-id)
+                                 sheet)]
         {:query/result
-         (cond-> {:sheet sheet
+         (cond-> {:sheet sheet-for-response
                   :nodes (vec nodes)
                   :blackboard (vec blackboard)
-                  :layout tree-layout}
+                  :layout tree-layout
+                  :version-info version-info}
            current-tick (assoc :tick current-tick))}))))
 
 ;; =============================================================================
@@ -78,6 +170,12 @@
           (merge (cond-> {}
                    (:check node) (assoc :check (:check node))
                    (:on-fail node) (assoc :on-fail (:on-fail node))))
+          ;; LLM-condition-specific
+          (= :llm-condition (:type node))
+          (merge (cond-> {}
+                   (:instruction node) (assoc :instruction (:instruction node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (:model node) (assoc :model (:model node))))
           ;; Parallel-specific
           (= :parallel (:type node))
           (merge {:success-policy (or (:success-policy node) :all)
@@ -113,3 +211,45 @@
                                    (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
                                         blackboard))
           :nodes (build-node-tree nodes (:root-node-id sheet))}}))))
+
+;; =============================================================================
+;; Versioning Queries
+;; =============================================================================
+
+(defquery :sheet version-history
+  "Get all published versions for a sheet."
+  [{{:keys [sheet-id]} :query
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (if-not sheet
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+      (let [versions (rm/get-versions-for-sheet event-store sheet-id)]
+        {:query/result
+         {:versions (vec versions)
+          :current-published-version (:published-version sheet)
+          :draft-dirty? (boolean (:draft-dirty? sheet))
+          :has-stash? (boolean (:has-stash? sheet))}}))))
+
+(defquery :sheet get-version
+  "Get a specific published version by version number."
+  [{{:keys [sheet-id version-number]} :query
+    :keys [event-store]}]
+  (let [version (rm/get-version event-store sheet-id version-number)]
+    (if-not version
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " version-number " not found")}
+      {:query/result
+       {:version version}})))
+
+(defquery :sheet get-stash
+  "Get the stashed draft for a sheet, if any."
+  [{{:keys [sheet-id]} :query
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (if-not sheet
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+      (let [stash (rm/get-stash event-store sheet-id)]
+        {:query/result
+         {:stash stash}}))))

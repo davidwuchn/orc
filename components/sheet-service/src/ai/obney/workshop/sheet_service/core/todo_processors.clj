@@ -823,6 +823,210 @@
 ;; Todo Processor Registry
 ;; =============================================================================
 
+;; =============================================================================
+;; Snapshot Restore Processor
+;; =============================================================================
+
+(defn- flatten-snapshot-nodes
+  "Flatten a nested snapshot tree into a list of [node parent-id] pairs,
+   in creation order (parent before children)."
+  [snapshot-node parent-id]
+  (when snapshot-node
+    (let [node-id (random-uuid)
+          node-record [node-id parent-id snapshot-node]
+          children (or (:children snapshot-node) [])]
+      (cons node-record
+            (mapcat #(flatten-snapshot-nodes % node-id) children)))))
+
+(defn- collect-deletion-order
+  "Collect nodes in deletion order (children before parents, leaf-first).
+   Returns vector of node-ids to delete."
+  [nodes-by-id root-id]
+  (letfn [(collect [node-id]
+            (let [node (get nodes-by-id node-id)
+                  children-ids (:children-ids node)]
+              (concat (mapcat collect children-ids)
+                      [node-id])))]
+    (when root-id
+      (vec (collect root-id)))))
+
+(defn restore-from-snapshot
+  "Restore sheet state from a version or stash snapshot.
+   Handles both :sheet/draft-reverted and :sheet/stash-restored events.
+
+   This generates all events needed to:
+   1. Delete all existing nodes (leaf-first)
+   2. Delete all existing blackboard keys
+   3. Recreate nodes from snapshot
+   4. Recreate blackboard schema from snapshot"
+  [{:keys [event event-store]}]
+  (let [event-type (:event/type event)
+        sheet-id (:sheet-id event)
+        snapshot (:snapshot event)]
+    (when (and (#{:sheet/draft-reverted :sheet/stash-restored} event-type)
+               snapshot)
+      (let [;; Get current state to delete
+            current-nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
+            current-sheet (rm/get-sheet event-store sheet-id)
+            current-root-id (:root-node-id current-sheet)
+            current-blackboard (rm/get-blackboard-by-key event-store sheet-id)
+
+            ;; Generate deletion events for nodes (leaf-first order)
+            node-deletion-ids (collect-deletion-order current-nodes-by-id current-root-id)
+            node-deletion-events (mapv (fn [node-id]
+                                         (->event
+                                          {:type :sheet/node-deleted
+                                           :tags #{[:sheet sheet-id]
+                                                   [:node node-id]}
+                                           :body {:sheet-id sheet-id
+                                                  :node-id node-id}}))
+                                       node-deletion-ids)
+
+            ;; Generate deletion events for blackboard keys
+            key-deletion-events (mapv (fn [[k _]]
+                                        (->event
+                                         {:type :sheet/key-deleted
+                                          :tags #{[:sheet sheet-id]}
+                                          :body {:sheet-id sheet-id
+                                                 :key k}}))
+                                      current-blackboard)
+
+            ;; Extract snapshot data
+            snapshot-nodes (:nodes snapshot)
+            blackboard-schema (:blackboard-schema snapshot)
+
+            ;; Generate key declaration events
+            key-declaration-events (mapv (fn [[k schema]]
+                                           (->event
+                                            {:type :sheet/key-declared
+                                             :tags #{[:sheet sheet-id]}
+                                             :body {:sheet-id sheet-id
+                                                    :key (name k)
+                                                    :schema schema}}))
+                                         blackboard-schema)
+
+            ;; Flatten snapshot tree to get node creation order
+            node-records (flatten-snapshot-nodes snapshot-nodes nil)
+
+            ;; Generate node creation and configuration events
+            node-events (mapcat
+                         (fn [[node-id parent-id snapshot-node]]
+                           (let [node-type (:type snapshot-node)
+                                 create-event (->event
+                                               {:type :sheet/node-created
+                                                :tags #{[:sheet sheet-id]
+                                                        [:node node-id]}
+                                                :body (cond-> {:sheet-id sheet-id
+                                                               :node-id node-id
+                                                               :type node-type}
+                                                        parent-id (assoc :parent-id parent-id))})
+                                 ;; Name event
+                                 name-event (when (:name snapshot-node)
+                                              (->event
+                                               {:type :sheet/node-name-set
+                                                :tags #{[:sheet sheet-id]
+                                                        [:node node-id]}
+                                                :body {:sheet-id sheet-id
+                                                       :node-id node-id
+                                                       :name (:name snapshot-node)}}))
+                                 ;; Configuration events based on node type
+                                 config-events
+                                 (case node-type
+                                   :leaf
+                                   (filterv some?
+                                            [(when (:instruction snapshot-node)
+                                               (->event
+                                                {:type :sheet/node-instruction-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body {:sheet-id sheet-id
+                                                        :node-id node-id
+                                                        :instruction (:instruction snapshot-node)}}))
+                                             (when (or (seq (:reads snapshot-node))
+                                                       (seq (:writes snapshot-node)))
+                                               (->event
+                                                {:type :sheet/node-io-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body {:sheet-id sheet-id
+                                                        :node-id node-id
+                                                        :reads (or (:reads snapshot-node) [])
+                                                        :writes (or (:writes snapshot-node) [])}}))
+                                             (when (:executor snapshot-node)
+                                               (->event
+                                                {:type :sheet/node-executor-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body (cond-> {:sheet-id sheet-id
+                                                                :node-id node-id
+                                                                :executor (:executor snapshot-node)}
+                                                         (:model snapshot-node) (assoc :model (:model snapshot-node))
+                                                         (:fn snapshot-node) (assoc :fn (:fn snapshot-node))
+                                                         (:tools snapshot-node) (assoc :tools (:tools snapshot-node)))}))
+                                             (when (:retry snapshot-node)
+                                               (->event
+                                                {:type :sheet/node-retry-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body {:sheet-id sheet-id
+                                                        :node-id node-id
+                                                        :retry (:retry snapshot-node)}}))])
+
+                                   :condition
+                                   (filterv some?
+                                            [(when (:check snapshot-node)
+                                               (->event
+                                                {:type :sheet/node-check-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body {:sheet-id sheet-id
+                                                        :node-id node-id
+                                                        :check (:check snapshot-node)}}))])
+
+                                   :llm-condition
+                                   (filterv some?
+                                            [(when (or (:instruction snapshot-node)
+                                                       (seq (:reads snapshot-node)))
+                                               (->event
+                                                {:type :sheet/llm-condition-config-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body (cond-> {:sheet-id sheet-id
+                                                                :node-id node-id
+                                                                :instruction (or (:instruction snapshot-node) "")
+                                                                :reads (or (:reads snapshot-node) [])}
+                                                         (:model snapshot-node) (assoc :model (:model snapshot-node)))}))])
+
+                                   :parallel
+                                   [(->event
+                                     {:type :sheet/parallel-config-set
+                                      :tags #{[:sheet sheet-id] [:node node-id]}
+                                      :body {:sheet-id sheet-id
+                                             :node-id node-id
+                                             :success-policy (or (:success-policy snapshot-node) :all)
+                                             :failure-policy (or (:failure-policy snapshot-node) :any)}})]
+
+                                   :map-each
+                                   (filterv some?
+                                            [(when (and (:source-key snapshot-node)
+                                                        (:item-key snapshot-node)
+                                                        (:output-key snapshot-node))
+                                               (->event
+                                                {:type :sheet/map-each-config-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body (cond-> {:sheet-id sheet-id
+                                                                :node-id node-id
+                                                                :source-key (:source-key snapshot-node)
+                                                                :item-key (:item-key snapshot-node)
+                                                                :output-key (:output-key snapshot-node)}
+                                                         (:max-concurrency snapshot-node)
+                                                         (assoc :max-concurrency (:max-concurrency snapshot-node)))}))])
+
+                                   ;; sequence, fallback - no extra config needed
+                                   [])]
+                             (filterv some? (into [create-event name-event] config-events))))
+                         node-records)]
+
+        {:result/events
+         (vec (concat node-deletion-events
+                      key-deletion-events
+                      key-declaration-events
+                      node-events))}))))
+
 (def todo-processors
   "Registry of todo processors for the behavior tree sheet service."
   {;; Start tick execution
@@ -873,4 +1077,9 @@
    ;; Complete tree tick
    :sheet/complete-tree-tick
    {:handler-fn #'complete-tree-tick
-    :topics [:sheet/node-execution-completed]}})
+    :topics [:sheet/node-execution-completed]}
+
+   ;; Restore from snapshot (revert/stash restore)
+   :sheet/restore-from-snapshot
+   {:handler-fn #'restore-from-snapshot
+    :topics [:sheet/draft-reverted :sheet/stash-restored]}})

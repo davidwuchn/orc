@@ -430,3 +430,95 @@
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))
+
+;; =============================================================================
+;; Versioning Effects
+;; =============================================================================
+
+(rf/reg-fx
+  ::publish-version
+  (fn [{:keys [api-client sheet-id description on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        (cond-> {:command/name :sheet/publish-version
+                                                 :sheet-id sheet-id}
+                                          description (assoc :description description))))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::revert-to-version
+  (fn [{:keys [api-client sheet-id version-number on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/revert-to-version
+                                         :sheet-id sheet-id
+                                         :version-number version-number}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::restore-stash
+  (fn [{:keys [api-client sheet-id on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/restore-stash
+                                         :sheet-id sheet-id}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-execution-mode
+  (fn [{:keys [api-client sheet-id mode on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        {:command/name :sheet/set-execution-mode
+                                         :sheet-id sheet-id
+                                         :mode mode}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::load-version-history
+  (fn [{:keys [api-client sheet-id on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/query api-client
+                                      {:query/name :sheet/version-history
+                                       :sheet-id sheet-id}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::load-version
+  (fn [{:keys [api-client sheet-id version-number on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/query api-client
+                                      {:query/name :sheet/get-version
+                                       :sheet-id sheet-id
+                                       :version-number version-number}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::load-stash
+  (fn [{:keys [api-client sheet-id on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/query api-client
+                                      {:query/name :sheet/get-stash
+                                       :sheet-id sheet-id}))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))

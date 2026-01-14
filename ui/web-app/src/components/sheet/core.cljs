@@ -1162,6 +1162,149 @@
          ($ :p {:class "text-gray-400"} "Select a node to edit")))))
 
 ;; =============================================================================
+;; Version Status Badge
+;; =============================================================================
+
+(defui version-status-badge []
+  (let [version-info (use-subscribe [::sheet-subs/version-info])
+        {:keys [published-version draft-dirty? execution-mode has-stash?]} version-info]
+    ($ :div {:class "flex items-center gap-2"}
+       ;; Published version indicator
+       (if published-version
+         ($ :div {:class "flex items-center gap-1"}
+            ($ badge/Badge {:variant "outline" :class "text-xs"}
+               (str "v" published-version))
+            (when draft-dirty?
+              ($ badge/Badge {:variant "secondary" :class "text-xs bg-amber-100 text-amber-700"}
+                 "Draft modified")))
+         ($ badge/Badge {:variant "secondary" :class "text-xs"}
+            "Unpublished"))
+       ;; Execution mode indicator
+       (when published-version
+         ($ badge/Badge {:class (str "text-xs "
+                                     (if (= :published execution-mode)
+                                       "bg-green-100 text-green-700"
+                                       "bg-blue-100 text-blue-700"))}
+            (if (= :published execution-mode) "Published mode" "Draft mode")))
+       ;; Stash indicator
+       (when has-stash?
+         ($ badge/Badge {:variant "outline" :class "text-xs border-purple-300 text-purple-600"}
+            "Stash available")))))
+
+;; =============================================================================
+;; Publish Dialog
+;; =============================================================================
+
+(defui publish-dialog [{:keys [open? on-close sheet-id]}]
+  (let [[description set-description!] (use-state "")
+        publishing? (use-subscribe [::sheet-subs/publishing?])
+        ctx (context/use-context)
+        api-client (:api/client ctx)
+
+        handle-publish (fn []
+                         (rf/dispatch [::sheet-events/publish-version
+                                       api-client sheet-id
+                                       (when (seq description) description)])
+                         (on-close)
+                         (set-description! ""))]
+
+    ($ dialog/Dialog {:open open? :onOpenChange #(when-not publishing? (on-close))}
+       ($ dialog/DialogContent
+          ($ dialog/DialogHeader
+             ($ dialog/DialogTitle "Publish Version"))
+          ($ :div {:class "space-y-4 py-4"}
+             ($ :p {:class "text-sm text-gray-600"}
+                "Publishing will create a snapshot of the current tree that can be used for execution and reverted to later.")
+             ($ :div {:class "space-y-2"}
+                ($ label/Label "Description (optional)")
+                ($ input/Input {:value description
+                                :on-change #(set-description! (.. % -target -value))
+                                :placeholder "e.g., Added new validation step"
+                                :disabled publishing?})))
+          ($ dialog/DialogFooter
+             ($ button/Button {:variant "outline" :on-click on-close :disabled publishing?}
+                "Cancel")
+             ($ button/Button {:on-click handle-publish :disabled publishing?}
+                (if publishing? "Publishing..." "Publish")))))))
+
+;; =============================================================================
+;; Version History Dialog
+;; =============================================================================
+
+(defui version-history-dialog [{:keys [open? on-close sheet-id]}]
+  (let [versions (use-subscribe [::sheet-subs/versions-list])
+        loading? (use-subscribe [::sheet-subs/version-history-loading?])
+        reverting? (use-subscribe [::sheet-subs/reverting?])
+        has-stash? (use-subscribe [::sheet-subs/has-stash?])
+        restoring-stash? (use-subscribe [::sheet-subs/restoring-stash?])
+        ctx (context/use-context)
+        api-client (:api/client ctx)
+
+        handle-revert (fn [version-number]
+                        (rf/dispatch [::sheet-events/revert-to-version
+                                      api-client sheet-id version-number])
+                        (on-close))
+
+        handle-restore-stash (fn []
+                               (rf/dispatch [::sheet-events/restore-stash api-client sheet-id])
+                               (on-close))]
+
+    ;; Load history when dialog opens
+    (use-effect
+      (fn []
+        (when open?
+          (rf/dispatch [::sheet-events/load-version-history api-client sheet-id]))
+        js/undefined)
+      [open? api-client sheet-id])
+
+    ($ dialog/Dialog {:open open? :onOpenChange on-close}
+       ($ dialog/DialogContent {:class "max-w-lg"}
+          ($ dialog/DialogHeader
+             ($ dialog/DialogTitle "Version History"))
+          ($ :div {:class "py-4 max-h-96 overflow-y-auto"}
+             (if loading?
+               ($ :div {:class "flex justify-center py-8"}
+                  ($ spinner/Spinner {:class "w-6 h-6"}))
+               (if (empty? versions)
+                 ($ :p {:class "text-center text-gray-500 py-8"}
+                    "No versions published yet")
+                 ($ :div {:class "space-y-2"}
+                    ;; Stash option
+                    (when has-stash?
+                      ($ :div {:class "p-3 border rounded-lg bg-purple-50 border-purple-200"}
+                         ($ :div {:class "flex items-center justify-between"}
+                            ($ :div
+                               ($ :p {:class "font-medium text-purple-700"} "Stashed Draft")
+                               ($ :p {:class "text-xs text-purple-600"}
+                                  "Your draft changes before last revert"))
+                            ($ button/Button {:size "sm"
+                                              :variant "outline"
+                                              :disabled restoring-stash?
+                                              :on-click handle-restore-stash}
+                               (if restoring-stash? "Restoring..." "Restore")))))
+                    ;; Version list
+                    (for [version (reverse versions)]
+                      ($ :div {:key (:version-number version)
+                               :class "p-3 border rounded-lg hover:bg-gray-50"}
+                         ($ :div {:class "flex items-center justify-between"}
+                            ($ :div
+                               ($ :p {:class "font-medium"}
+                                  (str "Version " (:version-number version)))
+                               (when (:description version)
+                                 ($ :p {:class "text-sm text-gray-600"}
+                                    (:description version)))
+                               ($ :p {:class "text-xs text-gray-400"}
+                                  (:published-at version)))
+                            ($ button/Button {:size "sm"
+                                              :variant "outline"
+                                              :disabled reverting?
+                                              :on-click #(handle-revert (:version-number version))}
+                               "Revert"))))))))
+          ($ dialog/DialogFooter
+             ($ button/Button {:variant "outline" :on-click on-close}
+                "Close"))))))
+
+;; =============================================================================
 ;; Sheet Toolbar
 ;; =============================================================================
 
@@ -1169,37 +1312,85 @@
   (let [ticking? (use-subscribe [::sheet-subs/sheet-ticking?])
         tick-progress (use-subscribe [::sheet-subs/tick-progress])
         root-node (use-subscribe [::sheet-subs/root-node])
+        can-publish? (use-subscribe [::sheet-subs/can-publish?])
+        published-version (use-subscribe [::sheet-subs/published-version])
+        execution-mode (use-subscribe [::sheet-subs/execution-mode])
         ctx (context/use-context)
         api-client (:api/client ctx)
         navigate! (:router/navigate! ctx)
+
+        [publish-dialog-open? set-publish-dialog-open!] (use-state false)
+        [history-dialog-open? set-history-dialog-open!] (use-state false)
 
         handle-tick (fn []
                       (rf/dispatch [::sheet-events/tick-tree api-client sheet-id]))
         handle-stop (fn []
                       (rf/dispatch [::sheet-events/stop-ticking api-client sheet-id]))
         handle-export (fn []
-                        (rf/dispatch [::sheet-events/export-sheet api-client sheet-id]))]
+                        (rf/dispatch [::sheet-events/export-sheet api-client sheet-id]))
+        handle-toggle-mode (fn []
+                             (let [new-mode (if (= :published execution-mode) :draft :published)]
+                               (rf/dispatch [::sheet-events/set-execution-mode
+                                             api-client sheet-id new-mode])))]
 
-    ($ :div {:class "flex items-center justify-between p-4 border-b bg-white"}
-       ($ :div {:class "flex items-center gap-4"}
-          ($ button/Button {:variant "ghost" :size "sm" :on-click #(navigate! :sheets)}
-             "< Back")
-          ($ :h1 {:class "text-xl font-semibold"}
-             (:name sheet)))
-       ($ :div {:class "flex items-center gap-3"}
-          (when ticking?
-            ($ :div {:class "flex items-center gap-2 text-sm text-gray-600"}
-               ($ spinner/Spinner {:class "w-4 h-4"})
-               ($ :span (str "Iteration " (:iteration tick-progress) "/" (:budget tick-progress)))))
-          ($ button/Button {:variant "outline" :on-click handle-export}
-             "Download")
-          (if ticking?
-            ($ button/Button {:variant "outline" :on-click handle-stop}
-               "Stop")
-            ($ button/Button {:variant "default"
-                              :disabled (not root-node)
-                              :on-click handle-tick}
-               "Tick Tree"))))))
+    ($ :<>
+       ($ :div {:class "flex items-center justify-between p-4 border-b bg-white"}
+          ($ :div {:class "flex items-center gap-4"}
+             ($ button/Button {:variant "ghost" :size "sm" :on-click #(navigate! :sheets)}
+                "< Back")
+             ($ :h1 {:class "text-xl font-semibold"}
+                (:name sheet))
+             ($ version-status-badge))
+          ($ :div {:class "flex items-center gap-2"}
+             ;; Tick progress
+             (when ticking?
+               ($ :div {:class "flex items-center gap-2 text-sm text-gray-600 mr-2"}
+                  ($ spinner/Spinner {:class "w-4 h-4"})
+                  ($ :span (str "Iteration " (:iteration tick-progress) "/" (:budget tick-progress)))))
+
+             ;; Execution mode toggle (only if published)
+             (when published-version
+               ($ button/Button {:variant "outline"
+                                 :size "sm"
+                                 :on-click handle-toggle-mode}
+                  (if (= :published execution-mode) "Use Draft" "Use Published")))
+
+             ;; Version history
+             ($ button/Button {:variant "outline"
+                               :size "sm"
+                               :on-click #(set-history-dialog-open! true)}
+                "History")
+
+             ;; Publish
+             ($ button/Button {:variant "outline"
+                               :size "sm"
+                               :disabled (not can-publish?)
+                               :on-click #(set-publish-dialog-open! true)}
+                "Publish")
+
+             ($ separator/Separator {:orientation "vertical" :class "h-6"})
+
+             ;; Export
+             ($ button/Button {:variant "outline" :size "sm" :on-click handle-export}
+                "Download")
+
+             ;; Tick/Stop
+             (if ticking?
+               ($ button/Button {:variant "outline" :size "sm" :on-click handle-stop}
+                  "Stop")
+               ($ button/Button {:variant "default"
+                                 :size "sm"
+                                 :disabled (not root-node)
+                                 :on-click handle-tick}
+                  "Tick Tree"))))
+
+       ;; Dialogs
+       ($ publish-dialog {:open? publish-dialog-open?
+                          :on-close #(set-publish-dialog-open! false)
+                          :sheet-id sheet-id})
+       ($ version-history-dialog {:open? history-dialog-open?
+                                  :on-close #(set-history-dialog-open! false)
+                                  :sheet-id sheet-id}))))
 
 ;; =============================================================================
 ;; Main Sheet Page

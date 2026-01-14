@@ -48,6 +48,12 @@
 ;; Tick functions
 (def get-tick rm/get-tick)
 
+;; Version functions
+(def get-versions-for-sheet rm/get-versions-for-sheet)
+(def get-version rm/get-version)
+(def get-latest-version rm/get-latest-version)
+(def get-stash rm/get-stash)
+
 ;; =============================================================================
 ;; Tree Layout
 ;; =============================================================================
@@ -66,6 +72,7 @@
    1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
    2. Runs the tree to completion
    3. Returns output values
+   4. Supports execution mode (draft/published)
 
    Args:
      context - Map with :event-store and optional :dscloj-provider
@@ -74,15 +81,19 @@
 
    Options:
      :timeout-ms - Max execution time in ms (default 300000 = 5 minutes)
+     :use-version - Specific version number to execute (overrides execution-mode)
+     :force-draft - Force draft execution even if execution-mode is :published
 
    Returns:
      {:status :success | :failure | :timeout
       :outputs {\"key\" value ...}
       :duration-ms 1234
-      :error string?}
+      :error string?
+      :executed-version int?}  ;; Present if published version was used
 
    Example:
-     (sheet/execute ctx sheet-id {\"student-id\" student-id} :timeout-ms 60000)"
+     (sheet/execute ctx sheet-id {\"student-id\" student-id} :timeout-ms 60000)
+     (sheet/execute ctx sheet-id inputs :use-version 2)  ;; Execute specific version"
   runtime/execute)
 
 ;; =============================================================================

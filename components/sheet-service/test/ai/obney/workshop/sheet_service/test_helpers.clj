@@ -300,6 +300,68 @@
     overrides (assoc :overrides overrides)))
 
 ;; =============================================================================
+;; Factory Functions - Versioning Commands
+;; =============================================================================
+
+(defn make-publish-version-command
+  "Create a publish-version command."
+  [sheet-id & {:keys [description]}]
+  (cond-> {:command/name :sheet/publish-version
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id}
+    description (assoc :description description)))
+
+(defn make-revert-to-version-command
+  "Create a revert-to-version command."
+  [sheet-id version-number]
+  {:command/name :sheet/revert-to-version
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :version-number version-number})
+
+(defn make-restore-stash-command
+  "Create a restore-stash command."
+  [sheet-id]
+  {:command/name :sheet/restore-stash
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id})
+
+(defn make-set-execution-mode-command
+  "Create a set-execution-mode command."
+  [sheet-id mode]
+  {:command/name :sheet/set-execution-mode
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :mode mode})
+
+;; =============================================================================
+;; Factory Functions - Versioning Queries
+;; =============================================================================
+
+(defn make-version-history-query
+  "Create a version-history query."
+  [sheet-id]
+  {:query/name :sheet/version-history
+   :sheet-id sheet-id})
+
+(defn make-get-version-query
+  "Create a get-version query."
+  [sheet-id version-number]
+  {:query/name :sheet/get-version
+   :sheet-id sheet-id
+   :version-number version-number})
+
+(defn make-get-stash-query
+  "Create a get-stash query."
+  [sheet-id]
+  {:query/name :sheet/get-stash
+   :sheet-id sheet-id})
+
+;; =============================================================================
 ;; Assertion Helpers
 ;; =============================================================================
 

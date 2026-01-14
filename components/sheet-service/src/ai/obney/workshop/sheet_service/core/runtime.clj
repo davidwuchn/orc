@@ -373,6 +373,79 @@
         result))))
 
 ;; =============================================================================
+;; Snapshot Parsing for Published Version Execution
+;; =============================================================================
+
+(defn- parse-snapshot-nodes
+  "Parse a nested snapshot tree into a flat nodes-by-id map.
+   Generates deterministic UUIDs based on tree position for consistent execution."
+  [snapshot-node parent-id index path]
+  (when snapshot-node
+    (let [;; Generate a deterministic UUID based on path
+          node-id (java.util.UUID/nameUUIDFromBytes
+                   (.getBytes (str path) "UTF-8"))
+          children (or (:children snapshot-node) [])
+          node-record {:id node-id
+                       :type (:type snapshot-node)
+                       :name (:name snapshot-node)
+                       :parent-id parent-id
+                       :children-ids (mapv (fn [i _]
+                                             (java.util.UUID/nameUUIDFromBytes
+                                              (.getBytes (str path "/" i) "UTF-8")))
+                                           (range (count children))
+                                           children)
+                       :status :idle
+                       ;; Leaf fields
+                       :instruction (:instruction snapshot-node)
+                       :reads (or (:reads snapshot-node) [])
+                       :writes (or (:writes snapshot-node) [])
+                       :decorators []
+                       :executor (:executor snapshot-node)
+                       :model (:model snapshot-node)
+                       :fn (:fn snapshot-node)
+                       :tools (:tools snapshot-node)
+                       :retry (:retry snapshot-node)
+                       ;; Condition fields
+                       :check (:check snapshot-node)
+                       ;; Parallel fields
+                       :success-policy (:success-policy snapshot-node)
+                       :failure-policy (:failure-policy snapshot-node)
+                       ;; Map-each fields
+                       :source-key (:source-key snapshot-node)
+                       :item-key (:item-key snapshot-node)
+                       :output-key (:output-key snapshot-node)
+                       :max-concurrency (:max-concurrency snapshot-node)}
+          ;; Recursively parse children
+          child-records (mapcat (fn [i child]
+                                  (parse-snapshot-nodes child node-id i (str path "/" i)))
+                                (range)
+                                children)]
+      (cons [node-id node-record] child-records))))
+
+(defn- parse-snapshot-for-execution
+  "Parse a version snapshot into the format expected by execute.
+   Returns {:nodes-by-id {...} :root-id uuid :blackboard {...}}"
+  [snapshot]
+  (let [snapshot-nodes (:nodes snapshot)
+        blackboard-schema (:blackboard-schema snapshot)
+        ;; Parse nodes
+        node-pairs (parse-snapshot-nodes snapshot-nodes nil 0 "root")
+        nodes-by-id (into {} node-pairs)
+        ;; Get root ID (first node)
+        root-id (when (seq node-pairs) (first (first node-pairs)))
+        ;; Build blackboard from schema (values will be set from inputs)
+        blackboard (reduce (fn [bb [k schema]]
+                            (assoc bb (name k) {:key (name k)
+                                                :schema schema
+                                                :value nil
+                                                :version 0}))
+                          {}
+                          blackboard-schema)]
+    {:nodes-by-id nodes-by-id
+     :root-id root-id
+     :blackboard blackboard}))
+
+;; =============================================================================
 ;; Public API
 ;; =============================================================================
 
@@ -394,14 +467,17 @@
      :timeout-ms - Max execution time in ms (default 300000 = 5 minutes)
      :trace? - Enable local trace collection (default false)
      :langfuse-client - Langfuse client for sending traces (enables tracing)
+     :use-version - Specific version number to execute (overrides execution-mode)
+     :force-draft - Force draft execution even if execution-mode is :published
 
    Returns:
      {:status :success | :failure | :timeout
       :outputs {\"key\" value ...}
       :duration-ms 1234
       :error string?          ;; Present if status is :failure
-      :trace {...}}           ;; Present if tracing enabled"
-  [context sheet-id inputs & {:keys [timeout-ms trace? langfuse-client]
+      :trace {...}}           ;; Present if tracing enabled
+      :executed-version ...   ;; Version number if published version was used"
+  [context sheet-id inputs & {:keys [timeout-ms trace? langfuse-client use-version force-draft]
                               :or {timeout-ms 300000 trace? false}}]
   (let [start-time (System/currentTimeMillis)
         event-store (:event-store context)
@@ -420,15 +496,39 @@
         _ (when-not sheet
             (throw (ex-info "Sheet not found" {:sheet-id sheet-id})))
 
-        root-id (:root-node-id sheet)
+        ;; Determine execution source based on mode
+        execution-mode (or (:execution-mode sheet) :draft)
+        version-to-use (cond
+                         ;; Explicit version requested
+                         use-version use-version
+                         ;; Force draft mode
+                         force-draft nil
+                         ;; Use published if mode is :published
+                         (= :published execution-mode) (:published-version sheet)
+                         ;; Default: use draft (nil means use current state)
+                         :else nil)
+
+        ;; Load version snapshot if using published version
+        version-snapshot (when version-to-use
+                          (rm/get-version event-store sheet-id version-to-use))
+
+        ;; Parse execution source (from snapshot or current state)
+        {:keys [nodes-by-id root-id blackboard-entries executed-version]}
+        (if version-snapshot
+          ;; Use published version snapshot
+          (let [parsed (parse-snapshot-for-execution (:snapshot version-snapshot))]
+            {:nodes-by-id (:nodes-by-id parsed)
+             :root-id (:root-id parsed)
+             :blackboard-entries (:blackboard parsed)
+             :executed-version (:version-number version-snapshot)})
+          ;; Use current draft state
+          {:nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
+           :root-id (:root-node-id sheet)
+           :blackboard-entries (rm/get-blackboard-by-key event-store sheet-id)
+           :executed-version nil})
+
         _ (when-not root-id
             (throw (ex-info "Sheet has no root node" {:sheet-id sheet-id})))
-
-        ;; Load all nodes
-        nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
-
-        ;; Load blackboard schema (without values - we'll use inputs)
-        blackboard-entries (rm/get-blackboard-by-key event-store sheet-id)
 
         ;; Create isolated blackboard with inputs
         blackboard (reduce (fn [bb [key-name value]]
@@ -476,6 +576,7 @@
                  :outputs outputs
                  :duration-ms duration-ms}
           (:error result) (assoc :error (:error result))
+          executed-version (assoc :executed-version executed-version)
           trace-ctx (assoc :trace {:trace-id (:trace-id trace-ctx)
                                    :events @(:events trace-ctx)})))
       ;; Timeout

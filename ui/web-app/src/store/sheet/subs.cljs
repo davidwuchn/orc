@@ -268,3 +268,105 @@
       :success "green"
       :failure "red"
       "gray")))
+
+;; =============================================================================
+;; Versioning Subscriptions
+;; =============================================================================
+
+(rf/reg-sub
+  ::version-info
+  :<- [::sheet]
+  (fn [sheet _]
+    {:published-version (:published-version sheet)
+     :draft-dirty? (:draft-dirty? sheet)
+     :execution-mode (or (:execution-mode sheet) :draft)
+     :has-stash? (:has-stash? sheet)}))
+
+(rf/reg-sub
+  ::published-version
+  :<- [::version-info]
+  (fn [version-info _]
+    (:published-version version-info)))
+
+(rf/reg-sub
+  ::draft-dirty?
+  :<- [::version-info]
+  (fn [version-info _]
+    (:draft-dirty? version-info)))
+
+(rf/reg-sub
+  ::execution-mode
+  :<- [::version-info]
+  (fn [version-info _]
+    (:execution-mode version-info)))
+
+(rf/reg-sub
+  ::has-stash?
+  :<- [::version-info]
+  (fn [version-info _]
+    (:has-stash? version-info)))
+
+(rf/reg-sub
+  ::can-publish?
+  :<- [::sheet]
+  (fn [sheet _]
+    ;; Can publish if there's a root node
+    (some? (:root-node-id sheet))))
+
+(rf/reg-sub
+  ::can-set-published-mode?
+  :<- [::published-version]
+  (fn [published-version _]
+    ;; Can only set published mode if there's a published version
+    (some? published-version)))
+
+(rf/reg-sub
+  ::version-history
+  (fn [db _]
+    (get-in db [:sheet :version-history])))
+
+(rf/reg-sub
+  ::version-history-loading?
+  (fn [db _]
+    (get-in db [:sheet :version-history-loading?] false)))
+
+(rf/reg-sub
+  ::versions-list
+  :<- [::version-history]
+  (fn [history _]
+    (:versions history)))
+
+(rf/reg-sub
+  ::selected-version
+  (fn [db _]
+    (get-in db [:sheet :selected-version])))
+
+(rf/reg-sub
+  ::version-loading?
+  (fn [db _]
+    (get-in db [:sheet :version-loading?] false)))
+
+(rf/reg-sub
+  ::stash
+  (fn [db _]
+    (get-in db [:sheet :stash])))
+
+(rf/reg-sub
+  ::stash-loading?
+  (fn [db _]
+    (get-in db [:sheet :stash-loading?] false)))
+
+(rf/reg-sub
+  ::publishing?
+  (fn [db _]
+    (get-in db [:sheet :publishing?] false)))
+
+(rf/reg-sub
+  ::reverting?
+  (fn [db _]
+    (get-in db [:sheet :reverting?] false)))
+
+(rf/reg-sub
+  ::restoring-stash?
+  (fn [db _]
+    (get-in db [:sheet :restoring-stash?] false)))

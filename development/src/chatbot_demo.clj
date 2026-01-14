@@ -183,7 +183,91 @@
      We need to implement the new feature by Friday, test it thoroughly, and deploy to production.
      The team should also review the documentation and update the API endpoints.
      Additionally, please schedule a meeting with the stakeholders to discuss progress.")
-  
-  1
+
+  ;; ==========================================================================
+  ;; Versioning Demo
+  ;; ==========================================================================
+
+  ;; After building, the sheet is in draft mode with no published version
+  (sheet/get-sheet (:event-store rs/context) sheet-id)
+  ;; => {:published-version nil, :draft-dirty? false, :execution-mode nil, ...}
+
+  ;; --- Publish v1 ---
+  ;; Lock in the current state as version 1
+  (require '[ai.obney.workshop.sheet-service.test-helpers :as h])
+  (h/run-and-apply! rs/context
+    (h/make-publish-version-command sheet-id :description "Initial release"))
+
+  ;; Check sheet state after publish
+  (sheet/get-sheet (:event-store rs/context) sheet-id)
+  ;; => {:published-version 1, :draft-dirty? false, ...}
+
+  ;; --- Make Changes (Draft Becomes Dirty) ---
+  ;; Modify a node - changes the draft but not the published version
+  (let [nodes (sheet/get-nodes-for-sheet (:event-store rs/context) sheet-id)
+        summarize-node (->> nodes (filter #(= "summarize" (:name %))) first)]
+    (h/run-and-apply! rs/context
+      (h/make-set-node-instruction-command sheet-id (:id summarize-node)
+        "Provide a concise 1-sentence summary.")))
+
+  ;; Now draft-dirty? is true
+  (sheet/get-sheet (:event-store rs/context) sheet-id)
+  ;; => {:published-version 1, :draft-dirty? true, ...}
+
+  ;; --- Execution Mode ---
+  ;; By default, execute runs the draft
+  (run-demo sheet-id "Test message")  ; Uses draft (with new instruction)
+
+  ;; Switch to published mode - executes the v1 snapshot
+  (h/run-and-apply! rs/context
+    (h/make-set-execution-mode-command sheet-id :published))
+
+  (run-demo sheet-id "Test message")  ; Uses published v1 (old instruction)
+
+  ;; Or explicitly run a specific version
+  (sheet/execute rs/context sheet-id {"input-text" "Test"} :use-version 1)
+
+  ;; Switch back to draft mode for testing
+  (h/run-and-apply! rs/context
+    (h/make-set-execution-mode-command sheet-id :draft))
+
+  ;; --- Publish v2 ---
+  ;; Happy with changes? Publish a new version
+  (h/run-and-apply! rs/context
+    (h/make-publish-version-command sheet-id :description "Improved summarization"))
+
+  ;; --- Version History ---
+  ;; Query all versions
+  (h/run-query rs/context (h/make-version-history-query sheet-id))
+  ;; => {:versions [{:version-number 1, :description "Initial release", ...}
+  ;;                {:version-number 2, :description "Improved summarization", ...}]
+  ;;     :current-published-version 2
+  ;;     :draft-dirty? false}
+
+  ;; Get a specific version's snapshot
+  (h/run-query rs/context (h/make-get-version-query sheet-id 1))
+  ;; => {:version {:snapshot {:nodes {...}, :blackboard-schema {...}}, ...}}
+
+  ;; --- Revert to Previous Version ---
+  ;; Make more changes
+  (let [nodes (sheet/get-nodes-for-sheet (:event-store rs/context) sheet-id)
+        node (->> nodes (filter #(= "summarize" (:name %))) first)]
+    (h/run-and-apply! rs/context
+      (h/make-set-node-instruction-command sheet-id (:id node) "Bad instruction")))
+
+  ;; Revert to v1 - automatically stashes dirty draft first
+  (h/run-and-apply! rs/context
+    (h/make-revert-to-version-command sheet-id 1))
+
+  ;; Check that stash exists
+  (sheet/get-sheet (:event-store rs/context) sheet-id)
+  ;; => {:has-stash? true, ...}
+
+  ;; View the stash
+  (h/run-query rs/context (h/make-get-stash-query sheet-id))
+  ;; => {:stash {:snapshot {...with "Bad instruction"...}}}
+
+  ;; Restore from stash if needed
+  (h/run-and-apply! rs/context (h/make-restore-stash-command sheet-id))
 
   "")

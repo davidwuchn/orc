@@ -52,6 +52,10 @@
   "What to return when a condition check fails"
   [:enum :failure :running])
 
+(def execution-mode
+  "Which version to use for execution"
+  [:enum :draft :published])
+
 ;; =============================================================================
 ;; Domain Value Objects
 ;; =============================================================================
@@ -87,7 +91,12 @@
     [:id :uuid]
     [:name :string]
     [:root-node-id {:optional true} :uuid]
-    [:created-at {:optional true} :string]]
+    [:created-at {:optional true} :string]
+    ;; Versioning fields
+    [:draft-dirty? {:optional true} :boolean]
+    [:published-version {:optional true} :int]
+    [:execution-mode {:optional true} execution-mode]
+    [:has-stash? {:optional true} :boolean]]
 
    ::node
    [:map
@@ -136,7 +145,23 @@
     [:node-id :uuid]
     [:row :int]
     [:start-col :double]
-    [:end-col :double]]})
+    [:end-col :double]]
+
+   ::version-snapshot
+   [:map
+    [:snapshot-id :uuid]
+    [:sheet-id :uuid]
+    [:version-number :int]
+    [:published-at :any]
+    [:description {:optional true} :string]
+    [:snapshot :map]]  ;; Same structure as export-sheet result
+
+   ::stash
+   [:map
+    [:stash-id :uuid]
+    [:sheet-id :uuid]
+    [:stashed-at :any]
+    [:snapshot :map]]})
 
 ;; =============================================================================
 ;; Command Schemas
@@ -326,7 +351,30 @@
     [:tick-id :uuid]
     [:node-id :uuid]
     [:error :string]
-    [:duration-ms {:optional true} :int]]})
+    [:duration-ms {:optional true} :int]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Versioning Commands
+   ;; -------------------------------------------------------------------------
+
+   :sheet/publish-version
+   [:map
+    [:sheet-id :uuid]
+    [:description {:optional true} :string]]
+
+   :sheet/revert-to-version
+   [:map
+    [:sheet-id :uuid]
+    [:version-number :int]]
+
+   :sheet/restore-stash
+   [:map
+    [:sheet-id :uuid]]
+
+   :sheet/set-execution-mode
+   [:map
+    [:sheet-id :uuid]
+    [:mode execution-mode]]})
 
 ;; =============================================================================
 ;; Event Schemas
@@ -544,7 +592,44 @@
    :sheet/tick-cancelled
    [:map
     [:sheet-id :uuid]
-    [:tick-id :uuid]]})
+    [:tick-id :uuid]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Versioning Events
+   ;; -------------------------------------------------------------------------
+
+   :sheet/version-published
+   [:map
+    [:sheet-id :uuid]
+    [:snapshot-id :uuid]
+    [:version-number :int]
+    [:description {:optional true} :string]
+    [:snapshot :map]]
+
+   :sheet/draft-stashed
+   [:map
+    [:sheet-id :uuid]
+    [:stash-id :uuid]
+    [:snapshot :map]]
+
+   :sheet/draft-reverted
+   [:map
+    [:sheet-id :uuid]
+    [:target-version :int]
+    [:snapshot-id :uuid]
+    [:snapshot :map]]
+
+   :sheet/stash-restored
+   [:map
+    [:sheet-id :uuid]
+    [:stash-id :uuid]
+    [:snapshot :map]]
+
+   :sheet/execution-mode-set
+   [:map
+    [:sheet-id :uuid]
+    [:mode execution-mode]
+    [:previous-mode {:optional true} execution-mode]]})
 
 ;; =============================================================================
 ;; Query Schemas (Fat Query Model - one query per screen)
@@ -576,7 +661,13 @@
     [:sheet ::sheet]
     [:nodes [:vector ::node]]
     [:blackboard [:vector ::blackboard-entry]]
-    [:layout [:vector ::node-layout]]]
+    [:layout [:vector ::node-layout]]
+    [:version-info {:optional true}
+     [:map
+      [:published-version {:optional true} :int]
+      [:draft-dirty? :boolean]
+      [:execution-mode execution-mode]
+      [:has-stash? :boolean]]]]
 
    ;; -------------------------------------------------------------------------
    ;; Export Sheet (for download/backup)
@@ -594,4 +685,36 @@
              [:name :string]
              [:id :uuid]]]
     [:blackboard-schema [:map-of :keyword :any]]
-    [:nodes {:optional true} :any]]})
+    [:nodes {:optional true} :any]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Versioning Queries
+   ;; -------------------------------------------------------------------------
+
+   :sheet/version-history
+   [:map
+    [:sheet-id :uuid]]
+
+   :sheet/version-history-result
+   [:map
+    [:versions [:vector ::version-snapshot]]
+    [:current-published-version {:optional true} :int]
+    [:draft-dirty? :boolean]
+    [:has-stash? :boolean]]
+
+   :sheet/get-version
+   [:map
+    [:sheet-id :uuid]
+    [:version-number :int]]
+
+   :sheet/get-version-result
+   [:map
+    [:version ::version-snapshot]]
+
+   :sheet/get-stash
+   [:map
+    [:sheet-id :uuid]]
+
+   :sheet/get-stash-result
+   [:map
+    [:stash {:optional true} ::stash]]})

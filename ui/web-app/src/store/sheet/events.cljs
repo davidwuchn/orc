@@ -58,10 +58,13 @@
   (fn [db [_ result]]
     (let [nodes-by-id (into {} (map (juxt :id identity) (:nodes result)))
           blackboard-by-key (into {} (map (juxt :key identity) (:blackboard result)))
-          tick (:tick result)]
+          tick (:tick result)
+          version-info (:version-info result)
+          ;; Merge version-info into sheet data for subscriptions
+          sheet-with-version (merge (:sheet result) version-info)]
       (cond-> (-> db
                   (assoc-in [:sheet :loading?] false)
-                  (assoc-in [:sheet :data] (:sheet result))
+                  (assoc-in [:sheet :data] sheet-with-version)
                   (assoc-in [:sheet :nodes] nodes-by-id)
                   (assoc-in [:sheet :blackboard] blackboard-by-key)
                   (assoc-in [:sheet :layout] (:layout result)))
@@ -536,3 +539,147 @@
   (fn [db [_ error]]
     (js/console.error "Export failed:" error)
     (assoc-in db [:sheet :error] error)))
+
+;; =============================================================================
+;; Versioning Events
+;; =============================================================================
+
+(rf/reg-event-fx
+  ::publish-version
+  (fn [{:keys [db]} [_ api-client sheet-id description]]
+    {:db (assoc-in db [:sheet :publishing?] true)
+     ::sheet-fx/publish-version {:api-client api-client
+                                 :sheet-id sheet-id
+                                 :description description
+                                 :on-success [::publish-version-success api-client sheet-id]
+                                 :on-failure [::versioning-failure]}}))
+
+(rf/reg-event-fx
+  ::publish-version-success
+  (fn [{:keys [db]} [_ api-client sheet-id _response]]
+    {:db (assoc-in db [:sheet :publishing?] false)
+     :dispatch [::load-sheet-view-screen api-client sheet-id]}))
+
+(rf/reg-event-fx
+  ::revert-to-version
+  (fn [{:keys [db]} [_ api-client sheet-id version-number]]
+    {:db (assoc-in db [:sheet :reverting?] true)
+     ::sheet-fx/revert-to-version {:api-client api-client
+                                   :sheet-id sheet-id
+                                   :version-number version-number
+                                   :on-success [::revert-to-version-success api-client sheet-id]
+                                   :on-failure [::versioning-failure]}}))
+
+(rf/reg-event-fx
+  ::revert-to-version-success
+  (fn [{:keys [db]} [_ api-client sheet-id _response]]
+    {:db (assoc-in db [:sheet :reverting?] false)
+     :dispatch [::load-sheet-view-screen api-client sheet-id]}))
+
+(rf/reg-event-fx
+  ::restore-stash
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    {:db (assoc-in db [:sheet :restoring-stash?] true)
+     ::sheet-fx/restore-stash {:api-client api-client
+                               :sheet-id sheet-id
+                               :on-success [::restore-stash-success api-client sheet-id]
+                               :on-failure [::versioning-failure]}}))
+
+(rf/reg-event-fx
+  ::restore-stash-success
+  (fn [{:keys [db]} [_ api-client sheet-id _response]]
+    {:db (assoc-in db [:sheet :restoring-stash?] false)
+     :dispatch [::load-sheet-view-screen api-client sheet-id]}))
+
+(rf/reg-event-fx
+  ::set-execution-mode
+  (fn [_ [_ api-client sheet-id mode]]
+    {::sheet-fx/set-execution-mode {:api-client api-client
+                                    :sheet-id sheet-id
+                                    :mode mode
+                                    :on-success [::node-command-success api-client sheet-id]
+                                    :on-failure [::versioning-failure]}}))
+
+(rf/reg-event-db
+  ::versioning-failure
+  (fn [db [_ error]]
+    (-> db
+        (assoc-in [:sheet :publishing?] false)
+        (assoc-in [:sheet :reverting?] false)
+        (assoc-in [:sheet :restoring-stash?] false)
+        (assoc-in [:sheet :error] error))))
+
+(rf/reg-event-fx
+  ::load-version-history
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    {:db (assoc-in db [:sheet :version-history-loading?] true)
+     ::sheet-fx/load-version-history {:api-client api-client
+                                      :sheet-id sheet-id
+                                      :on-success [::load-version-history-success]
+                                      :on-failure [::load-version-history-failure]}}))
+
+(rf/reg-event-db
+  ::load-version-history-success
+  (fn [db [_ result]]
+    (-> db
+        (assoc-in [:sheet :version-history-loading?] false)
+        (assoc-in [:sheet :version-history] result))))
+
+(rf/reg-event-db
+  ::load-version-history-failure
+  (fn [db [_ error]]
+    (-> db
+        (assoc-in [:sheet :version-history-loading?] false)
+        (assoc-in [:sheet :error] error))))
+
+(rf/reg-event-fx
+  ::load-version
+  (fn [{:keys [db]} [_ api-client sheet-id version-number]]
+    {:db (assoc-in db [:sheet :version-loading?] true)
+     ::sheet-fx/load-version {:api-client api-client
+                              :sheet-id sheet-id
+                              :version-number version-number
+                              :on-success [::load-version-success]
+                              :on-failure [::load-version-failure]}}))
+
+(rf/reg-event-db
+  ::load-version-success
+  (fn [db [_ result]]
+    (-> db
+        (assoc-in [:sheet :version-loading?] false)
+        (assoc-in [:sheet :selected-version] (:version result)))))
+
+(rf/reg-event-db
+  ::load-version-failure
+  (fn [db [_ error]]
+    (-> db
+        (assoc-in [:sheet :version-loading?] false)
+        (assoc-in [:sheet :error] error))))
+
+(rf/reg-event-db
+  ::clear-selected-version
+  (fn [db _]
+    (update db :sheet dissoc :selected-version)))
+
+(rf/reg-event-fx
+  ::load-stash
+  (fn [{:keys [db]} [_ api-client sheet-id]]
+    {:db (assoc-in db [:sheet :stash-loading?] true)
+     ::sheet-fx/load-stash {:api-client api-client
+                            :sheet-id sheet-id
+                            :on-success [::load-stash-success]
+                            :on-failure [::load-stash-failure]}}))
+
+(rf/reg-event-db
+  ::load-stash-success
+  (fn [db [_ result]]
+    (-> db
+        (assoc-in [:sheet :stash-loading?] false)
+        (assoc-in [:sheet :stash] (:stash result)))))
+
+(rf/reg-event-db
+  ::load-stash-failure
+  (fn [db [_ error]]
+    (-> db
+        (assoc-in [:sheet :stash-loading?] false)
+        (assoc-in [:sheet :error] error))))

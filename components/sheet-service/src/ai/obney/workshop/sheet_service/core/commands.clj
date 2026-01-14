@@ -747,3 +747,182 @@
               [:tick tick-id]}
       :body {:sheet-id sheet-id
              :tick-id tick-id}})]})
+
+;; =============================================================================
+;; Versioning Commands
+;; =============================================================================
+
+(defn- build-node-tree
+  "Convert flat nodes map to nested tree structure for snapshots."
+  [nodes-by-id root-id]
+  (when root-id
+    (let [node (get nodes-by-id root-id)]
+      (when node
+        (cond-> {:type (:type node)
+                 :name (:name node)}
+          ;; Leaf-specific fields
+          (= :leaf (:type node))
+          (merge (cond-> {}
+                   (:executor node) (assoc :executor (:executor node))
+                   (:model node) (assoc :model (:model node))
+                   (:fn node) (assoc :fn (:fn node))
+                   (:instruction node) (assoc :instruction (:instruction node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (seq (:writes node)) (assoc :writes (:writes node))
+                   (:tools node) (assoc :tools (:tools node))
+                   (:retry node) (assoc :retry (:retry node))))
+          ;; Condition-specific
+          (= :condition (:type node))
+          (merge (cond-> {}
+                   (:check node) (assoc :check (:check node))))
+          ;; LLM-Condition-specific
+          (= :llm-condition (:type node))
+          (merge (cond-> {}
+                   (:instruction node) (assoc :instruction (:instruction node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (:model node) (assoc :model (:model node))))
+          ;; Parallel-specific
+          (= :parallel (:type node))
+          (merge {:success-policy (or (:success-policy node) :all)
+                  :failure-policy (or (:failure-policy node) :any)})
+          ;; Map-each-specific
+          (= :map-each (:type node))
+          (merge (cond-> {}
+                   (:source-key node) (assoc :source-key (:source-key node))
+                   (:item-key node) (assoc :item-key (:item-key node))
+                   (:output-key node) (assoc :output-key (:output-key node))
+                   (:max-concurrency node) (assoc :max-concurrency (:max-concurrency node))))
+          ;; Children for composite nodes
+          (seq (:children-ids node))
+          (assoc :children
+                 (vec (keep #(build-node-tree nodes-by-id %) (:children-ids node)))))))))
+
+(defn- create-snapshot
+  "Create a snapshot of the current sheet state."
+  [event-store sheet-id]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        nodes-by-id (rm/get-nodes-by-id event-store sheet-id)
+        blackboard (rm/get-blackboard-for-sheet event-store sheet-id)]
+    {:sheet {:name (:name sheet) :id sheet-id}
+     :blackboard-schema (into {}
+                              (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
+                                   blackboard))
+     :nodes (build-node-tree nodes-by-id (:root-node-id sheet))}))
+
+(defcommand :sheet publish-version
+  "Create a new published version from the current draft state.
+   Captures all nodes and blackboard schema as an immutable snapshot."
+  [{{:keys [sheet-id description]} :command
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (not (:root-node-id sheet))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Cannot publish sheet without root node"}
+
+      :else
+      (let [snapshot (create-snapshot event-store sheet-id)
+            current-version (or (:published-version sheet) 0)
+            new-version (inc current-version)
+            snapshot-id (random-uuid)]
+        {:command-result/events
+         [(->event
+           {:type :sheet/version-published
+            :tags #{[:sheet sheet-id]
+                    [:version snapshot-id]}
+            :body (cond-> {:sheet-id sheet-id
+                           :snapshot-id snapshot-id
+                           :version-number new-version
+                           :snapshot snapshot}
+                    description (assoc :description description))})]}))))
+
+(defcommand :sheet revert-to-version
+  "Discard current draft and restore state from a published version.
+   If the draft has changes, it will be stashed first for recovery."
+  [{{:keys [sheet-id version-number]} :command
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        version (rm/get-version event-store sheet-id version-number)]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (not version)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " version-number " not found")}
+
+      :else
+      (let [;; If draft is dirty, stash it first
+            draft-dirty? (:draft-dirty? sheet)
+            stash-events (when draft-dirty?
+                           (let [snapshot (create-snapshot event-store sheet-id)
+                                 stash-id (random-uuid)]
+                             [(->event
+                               {:type :sheet/draft-stashed
+                                :tags #{[:sheet sheet-id]}
+                                :body {:sheet-id sheet-id
+                                       :stash-id stash-id
+                                       :snapshot snapshot}})]))
+            revert-event (->event
+                          {:type :sheet/draft-reverted
+                           :tags #{[:sheet sheet-id]}
+                           :body {:sheet-id sheet-id
+                                  :target-version version-number
+                                  :snapshot-id (:snapshot-id version)
+                                  :snapshot (:snapshot version)}})]
+        {:command-result/events
+         (if stash-events
+           (conj (vec stash-events) revert-event)
+           [revert-event])}))))
+
+(defcommand :sheet restore-stash
+  "Restore the stashed draft. The stash is consumed after restoration."
+  [{{:keys [sheet-id]} :command
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        stash (rm/get-stash event-store sheet-id)]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (not stash)
+      {::anom/category ::anom/not-found
+       ::anom/message "No stash found"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/stash-restored
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :stash-id (:stash-id stash)
+                 :snapshot (:snapshot stash)}})]})))
+
+(defcommand :sheet set-execution-mode
+  "Toggle between executing draft or published version."
+  [{{:keys [sheet-id mode]} :command
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (and (= mode :published) (nil? (:published-version sheet)))
+      {::anom/category ::anom/incorrect
+       ::anom/message "No published version exists. Publish first."}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/execution-mode-set
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :mode mode
+                 :previous-mode (or (:execution-mode sheet) :draft)}})]})))
