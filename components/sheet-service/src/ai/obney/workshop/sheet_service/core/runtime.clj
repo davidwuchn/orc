@@ -233,16 +233,15 @@
                                                      result-bb)
                                      ;; Get the updated item (may have been modified by subtree)
                                      updated-item (get-in result-bb [item-key :value])]
-                                 ;; Merge written values into the item
+                                 ;; Merge written values into the item (if map) or just return written values
                                  (if (map? updated-item)
                                    (merge updated-item written-values)
                                    (if (seq written-values)
-                                     (merge {:__original updated-item} written-values)
+                                     written-values
                                      updated-item)))
-                               ;; Failed - return original item with error marker
-                               (assoc (if (map? item) item {:__original item})
-                                      :__status :failure
-                                      :__error (:error result)))))
+                               ;; Failed - return error info only
+                               {:__status :failure
+                                :__error (:error result)})))
             ;; Process with concurrency
             results (if (= max-concurrency 1)
                       ;; Sequential

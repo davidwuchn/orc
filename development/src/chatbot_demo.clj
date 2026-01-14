@@ -4,6 +4,7 @@
    Demonstrates tracing with multiple node types:
    - Sequence (control node)
    - Parallel (control node)
+   - Map-each (control node)
    - AI nodes (leaf nodes with generation events)
    - Code node (leaf node with span event)
 
@@ -43,6 +44,12 @@
        :user-message :string
        :sentiment [:enum "positive" "negative" "neutral"]
        :intent [:enum "question" "statement" "greeting" "farewell" "other"]
+       ;; For map-each demo: extract and classify topics
+       :topics [:vector :string]
+       :current-topic :string
+       :topic-category [:enum "technical" "personal" "business" "general"]
+       :classified-topics [:vector [:map
+                                    [:topic-category :string]]]
        :assistant-response :string})
 
     (sheet/sequence
@@ -58,16 +65,35 @@
           :model "google/gemini-2.0-flash-001"
           :instruction "Classify the intent of the user's message."
           :reads ["user-message"]
-          :writes ["intent"]))
+          :writes ["intent"])
 
-      ;; Step 2: Generate response informed by analysis
+        (sheet/ai-node "extract-topics"
+          :model "google/gemini-2.0-flash-001"
+          :instruction "Extract 1-3 key topics or subjects mentioned in the user's message. Return as a list of short phrases."
+          :reads ["user-message"]
+          :writes ["topics"]))
+
+      ;; Step 2: Classify each topic using map-each
+      (sheet/map-each "classify-topics"
+        :source "topics"
+        :item "current-topic"
+        :output "classified-topics"
+        :concurrency 2
+
+        (sheet/ai-node "classify-topic"
+          :model "google/gemini-2.0-flash-001"
+          :instruction "Classify this topic into a category."
+          :reads ["current-topic"]
+          :writes ["topic-category"]))
+
+      ;; Step 3: Generate response informed by analysis
       (sheet/ai-node "respond"
         :model "google/gemini-2.0-flash-001"
-        :instruction "Generate a conversational response. Adapt tone based on sentiment and intent."
-        :reads ["system-prompt" "conversation-history" "user-message" "sentiment" "intent"]
+        :instruction "Generate a conversational response. Adapt tone based on sentiment, intent, and the classified topics."
+        :reads ["system-prompt" "conversation-history" "user-message" "sentiment" "intent" "classified-topics"]
         :writes ["assistant-response"])
 
-      ;; Step 3: Update history
+      ;; Step 4: Update history
       (sheet/code-node "update-history"
         :fn "chatbot-demo/append-to-history"
         :reads ["conversation-history" "user-message" "assistant-response"]
