@@ -5,7 +5,8 @@
    1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
    2. Runs the tree to completion
    3. Returns output values
-   4. Optionally traces execution to Langfuse
+   4. Always traces execution for event storage
+   5. Optionally traces execution to Langfuse
 
    This is designed for calling behavior trees from command handlers,
    todo processors, or other code contexts where you need synchronous
@@ -13,6 +14,8 @@
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
             [ai.obney.workshop.sheet-service.core.executor :as executor]
             [ai.obney.workshop.sheet-service.core.tracing :as tracing]
+            [ai.obney.grain.event-store-v2.interface :as es :refer [->event]]
+            [ai.obney.grain.time.interface :as time]
             [clojure.core.async :as async :refer [<!! >!! chan go timeout alts!!]]))
 
 ;; =============================================================================
@@ -78,38 +81,45 @@
 (declare execute-node-sync)
 
 (defn- execute-sequence-sync
-  "Execute a sequence node synchronously."
-  [node nodes-by-id blackboard context parent-node-id]
+  "Execute a sequence node synchronously.
+   path-ctx already contains this node's ID and path set by execute-node-sync."
+  [node nodes-by-id blackboard context path-ctx]
   (let [children-ids (:children-ids node)]
     (if (empty? children-ids)
       {:status :success :blackboard blackboard}
       (loop [remaining children-ids
-             current-bb blackboard]
+             current-bb blackboard
+             child-idx 0]
         (if (empty? remaining)
           {:status :success :blackboard current-bb}
           (let [child-id (first remaining)
-                result (execute-node-sync child-id nodes-by-id current-bb context parent-node-id)]
+                ;; Only update child-index, path is already set correctly
+                child-path-ctx (assoc path-ctx :child-index child-idx)
+                result (execute-node-sync child-id nodes-by-id current-bb context child-path-ctx)]
             (case (:status result)
-              :success (recur (rest remaining) (:blackboard result))
+              :success (recur (rest remaining) (:blackboard result) (inc child-idx))
               :failure result
               :running result
               result)))))))
 
 (defn- execute-fallback-sync
-  "Execute a fallback node synchronously."
-  [node nodes-by-id blackboard context parent-node-id]
+  "Execute a fallback node synchronously.
+   path-ctx already contains this node's ID and path set by execute-node-sync."
+  [node nodes-by-id blackboard context path-ctx]
   (let [children-ids (:children-ids node)]
     (if (empty? children-ids)
       {:status :failure :blackboard blackboard}
       (loop [remaining children-ids
-             current-bb blackboard]
+             current-bb blackboard
+             child-idx 0]
         (if (empty? remaining)
           {:status :failure :blackboard current-bb}
           (let [child-id (first remaining)
-                result (execute-node-sync child-id nodes-by-id current-bb context parent-node-id)]
+                child-path-ctx (assoc path-ctx :child-index child-idx)
+                result (execute-node-sync child-id nodes-by-id current-bb context child-path-ctx)]
             (case (:status result)
               :success result
-              :failure (recur (rest remaining) (:blackboard result))
+              :failure (recur (rest remaining) (:blackboard result) (inc child-idx))
               :running result
               result)))))))
 
@@ -132,18 +142,21 @@
           result-bbs))
 
 (defn- execute-parallel-sync
-  "Execute a parallel node synchronously using futures for concurrency."
-  [node nodes-by-id blackboard context parent-node-id]
+  "Execute a parallel node synchronously using futures for concurrency.
+   path-ctx already contains this node's ID and path set by execute-node-sync."
+  [node nodes-by-id blackboard context path-ctx]
   (let [children-ids (:children-ids node)
         success-policy (or (:success-policy node) :all)
         failure-policy (or (:failure-policy node) :any)]
     (if (empty? children-ids)
       {:status :success :blackboard blackboard}
       ;; Execute all children in parallel using futures
-      (let [futures (mapv (fn [child-id]
-                            (future
-                              (execute-node-sync child-id nodes-by-id blackboard context parent-node-id)))
-                          children-ids)
+      (let [futures (map-indexed
+                     (fn [child-idx child-id]
+                       (let [child-path-ctx (assoc path-ctx :child-index child-idx)]
+                         (future
+                           (execute-node-sync child-id nodes-by-id blackboard context child-path-ctx))))
+                     children-ids)
             results (mapv deref futures)
             success-count (count (filter #(= :success (:status %)) results))
             failure-count (count (filter #(= :failure (:status %)) results))
@@ -174,8 +187,9 @@
         {:status final-status :blackboard merged-bb}))))
 
 (defn- execute-map-each-sync
-  "Execute a map-each node synchronously."
-  [node nodes-by-id blackboard context parent-node-id]
+  "Execute a map-each node synchronously.
+   path-ctx already contains this node's ID and path set by execute-node-sync."
+  [node nodes-by-id blackboard context path-ctx]
   (let [source-key (:source-key node)
         item-key (:item-key node)
         output-key (:output-key node)
@@ -207,12 +221,14 @@
                                           (assoc acc k (or (:version entry) 0)))
                                         {}
                                         blackboard)
-            process-item (fn [item]
+            process-item (fn [item-idx item]
                            ;; Set item value in blackboard with incremented version
                            (let [item-bb (-> blackboard
                                              (assoc-in [item-key :value] item)
                                              (update-in [item-key :version] (fnil inc 0)))
-                                 result (execute-node-sync child-id nodes-by-id item-bb context parent-node-id)]
+                                 ;; Child path context includes iteration index
+                                 child-path-ctx (assoc path-ctx :child-index item-idx)
+                                 result (execute-node-sync child-id nodes-by-id item-bb context child-path-ctx)]
                              (if (= :success (:status result))
                                ;; Collect all values written during subtree execution
                                ;; and merge them into the item
@@ -245,11 +261,12 @@
             ;; Process with concurrency
             results (if (= max-concurrency 1)
                       ;; Sequential
-                      (mapv process-item items)
+                      (vec (map-indexed process-item items))
                       ;; Parallel with partitioning
-                      (let [batches (partition-all max-concurrency items)]
+                      (let [indexed-items (map-indexed vector items)
+                            batches (partition-all max-concurrency indexed-items)]
                         (vec (mapcat (fn [batch]
-                                       (let [futures (mapv #(future (process-item %)) batch)]
+                                       (let [futures (mapv (fn [[idx item]] (future (process-item idx item))) batch)]
                                          (mapv deref futures)))
                                      batches))))
             new-bb (-> blackboard
@@ -259,17 +276,34 @@
 
 (defn- execute-node-sync
   "Execute a single node synchronously.
-   Returns {:status :success/:failure/:running :blackboard updated-bb :error ... :trace-data ...}"
-  [node-id nodes-by-id blackboard context & [parent-node-id]]
+   Returns {:status :success/:failure/:running :blackboard updated-bb :error ... :trace-data ...}
+
+   path-ctx is a map with:
+     :parent-id - UUID of parent node (nil for root)
+     :path - Vector of node names from root to this node's parent
+     :child-index - Index of this node among its siblings (nil for root)"
+  [node-id nodes-by-id blackboard context path-ctx]
   (let [node (get nodes-by-id node-id)
         trace-ctx (:trace-ctx context)
+        internal-trace (:internal-trace context)
         start-time (System/currentTimeMillis)
+        started-at (time/now)
+        ;; Extract path context
+        parent-id (:parent-id path-ctx)
+        current-path (or (:path path-ctx) [])
+        child-index (:child-index path-ctx)
         ;; Parent observation ID for Langfuse nesting
-        parent-obs-id (when parent-node-id (tracing/node-observation-id parent-node-id))]
+        parent-obs-id (when parent-id (tracing/node-observation-id parent-id))]
     (if-not node
       {:status :failure :error (str "Node not found: " node-id) :blackboard blackboard}
-      (let [result
-            (case (:type node)
+      (let [node-name (:name node)
+            node-type (:type node)
+            ;; Path context for children
+            child-path-ctx {:parent-id node-id
+                            :path (conj current-path node-name)
+                            :child-index 0}
+            result
+            (case node-type
               :leaf
               (let [inputs (gather-inputs node blackboard)
                     ;; Add inputs to blackboard temporarily for code executor
@@ -278,11 +312,11 @@
                                            blackboard
                                            inputs)
                     leaf-result (execute-leaf-sync node bb-with-inputs context)]
-                ;; Trace the leaf execution
+                ;; Trace the leaf execution (Langfuse)
                 (when trace-ctx
                   (tracing/trace-node! trace-ctx
                                        {:node-id node-id
-                                        :node-name (:name node)
+                                        :node-name node-name
                                         :node-type :leaf
                                         :executor (:executor leaf-result)
                                         :model (:model leaf-result)
@@ -293,6 +327,22 @@
                                         :status (:status leaf-result)
                                         :error (:error leaf-result)
                                         :parent-observation-id parent-obs-id}))
+                ;; Record to internal trace (always)
+                (when internal-trace
+                  (tracing/record-node-trace! internal-trace
+                                              {:node-id node-id
+                                               :node-name node-name
+                                               :node-type :leaf
+                                               :parent-id parent-id
+                                               :path current-path
+                                               :child-index child-index
+                                               :status (:status leaf-result)
+                                               :started-at started-at
+                                               :completed-at (time/now)
+                                               :duration-ms (- (:end-time leaf-result) (:start-time leaf-result))
+                                               :inputs inputs
+                                               :outputs (:outputs leaf-result)
+                                               :error (:error leaf-result)}))
                 (if (= :success (:status leaf-result))
                   ;; Write outputs to blackboard
                   (let [new-bb (reduce (fn [bb [k v]]
@@ -307,56 +357,90 @@
                   {:status :failure :error (:error leaf-result) :blackboard blackboard}))
 
               :condition
-              (let [cond-result (execute-condition-sync node blackboard)]
+              (let [cond-result (execute-condition-sync node blackboard)
+                    end-time (System/currentTimeMillis)]
+                ;; Record to internal trace
+                (when internal-trace
+                  (tracing/record-node-trace! internal-trace
+                                              {:node-id node-id
+                                               :node-name node-name
+                                               :node-type :condition
+                                               :parent-id parent-id
+                                               :path current-path
+                                               :child-index child-index
+                                               :status (:status cond-result)
+                                               :started-at started-at
+                                               :completed-at (time/now)
+                                               :duration-ms (- end-time start-time)
+                                               :inputs {:check (:check node)}
+                                               :outputs {}
+                                               :error (:error cond-result)}))
                 (assoc cond-result :blackboard blackboard))
 
               :llm-condition
               (let [provider (:dscloj-provider context)
                     inputs (gather-inputs node blackboard)
-                    start-time (System/currentTimeMillis)
+                    llm-start-time (System/currentTimeMillis)
                     llm-result (if provider
                                  (executor/execute-llm-condition node blackboard provider
                                                                  :context context)
                                  {:status :failure :error "No DSCloj provider configured"})
-                    end-time (System/currentTimeMillis)
+                    llm-end-time (System/currentTimeMillis)
                     passed? (and (= :success (:status llm-result))
-                                 (:result llm-result))]
-                ;; Trace the LLM condition execution
+                                 (:result llm-result))
+                    final-status (if passed? :success :failure)]
+                ;; Trace the LLM condition execution (Langfuse)
                 (when trace-ctx
                   (tracing/trace-node! trace-ctx
                                        {:node-id node-id
-                                        :node-name (:name node)
+                                        :node-name node-name
                                         :node-type :llm-condition
                                         :executor :ai
                                         :model (:model node)
-                                        :start-time start-time
-                                        :end-time end-time
+                                        :start-time llm-start-time
+                                        :end-time llm-end-time
                                         :inputs inputs
                                         :outputs {:result (:result llm-result)}
-                                        :status (if passed? :success :failure)
+                                        :status final-status
                                         :error (:error llm-result)
                                         :parent-observation-id parent-obs-id}))
-                {:status (if passed? :success :failure)
+                ;; Record to internal trace
+                (when internal-trace
+                  (tracing/record-node-trace! internal-trace
+                                              {:node-id node-id
+                                               :node-name node-name
+                                               :node-type :llm-condition
+                                               :parent-id parent-id
+                                               :path current-path
+                                               :child-index child-index
+                                               :status final-status
+                                               :started-at started-at
+                                               :completed-at (time/now)
+                                               :duration-ms (- llm-end-time llm-start-time)
+                                               :inputs inputs
+                                               :outputs {:result (:result llm-result)}
+                                               :error (:error llm-result)}))
+                {:status final-status
                  :blackboard blackboard
                  :error (:error llm-result)})
 
               :sequence
-              (execute-sequence-sync node nodes-by-id blackboard context node-id)
+              (execute-sequence-sync node nodes-by-id blackboard context child-path-ctx)
 
               :fallback
-              (execute-fallback-sync node nodes-by-id blackboard context node-id)
+              (execute-fallback-sync node nodes-by-id blackboard context child-path-ctx)
 
               :parallel
-              (execute-parallel-sync node nodes-by-id blackboard context node-id)
+              (execute-parallel-sync node nodes-by-id blackboard context child-path-ctx)
 
               :map-each
-              (execute-map-each-sync node nodes-by-id blackboard context node-id)
+              (execute-map-each-sync node nodes-by-id blackboard context child-path-ctx)
 
               ;; Unknown type
-              {:status :failure :error (str "Unknown node type: " (:type node)) :blackboard blackboard})
+              {:status :failure :error (str "Unknown node type: " node-type) :blackboard blackboard})
             end-time (System/currentTimeMillis)]
-        ;; Trace composite nodes (non-leaf, non-llm-condition which traces itself)
-        (when (and trace-ctx (not (#{:leaf :llm-condition} (:type node))))
+        ;; Trace composite nodes (non-leaf, non-condition, non-llm-condition which trace themselves)
+        (when (and trace-ctx (not (#{:leaf :condition :llm-condition} (:type node))))
           (tracing/trace-node! trace-ctx
                                {:node-id node-id
                                 :node-name (:name node)
@@ -370,6 +454,22 @@
                                 :status (:status result)
                                 :error (:error result)
                                 :parent-observation-id parent-obs-id}))
+        ;; Record composite nodes to internal trace (always)
+        (when (and internal-trace (not (#{:leaf :condition :llm-condition} (:type node))))
+          (tracing/record-node-trace! internal-trace
+                                      {:node-id node-id
+                                       :node-name node-name
+                                       :node-type node-type
+                                       :parent-id parent-id
+                                       :path current-path
+                                       :child-index child-index
+                                       :status (:status result)
+                                       :started-at started-at
+                                       :completed-at (time/now)
+                                       :duration-ms (- end-time start-time)
+                                       :inputs nil
+                                       :outputs nil
+                                       :error (:error result)}))
         result))))
 
 ;; =============================================================================
@@ -449,6 +549,28 @@
 ;; Public API
 ;; =============================================================================
 
+(defn- store-execution-trace!
+  "Store an execution trace event in the event store."
+  [event-store trace-data]
+  (let [trace-id (:trace-id trace-data)
+        sheet-id (:sheet-id trace-data)
+        ;; Build body with only non-nil optional fields
+        body (cond-> {:trace-id trace-id
+                      :sheet-id sheet-id
+                      :started-at (:started-at trace-data)
+                      :completed-at (:completed-at trace-data)
+                      :duration-ms (:duration-ms trace-data)
+                      :status (:status trace-data)
+                      :input-snapshot (:input-snapshot trace-data)
+                      :output-snapshot (:output-snapshot trace-data)
+                      :node-traces (:node-traces trace-data)}
+               (:version-number trace-data) (assoc :version-number (:version-number trace-data))
+               (:error trace-data) (assoc :error (:error trace-data)))
+        event (->event {:type :sheet/execution-traced
+                        :tags #{[:sheet sheet-id] [:trace trace-id]}
+                        :body body})]
+    (es/append event-store {:events [event]})))
+
 (defn execute
   "Execute a sheet (behavior tree) with inputs and return outputs.
 
@@ -456,7 +578,8 @@
    1. Creates an isolated execution context (doesn't mutate sheet's blackboard)
    2. Runs the tree to completion
    3. Returns output values
-   4. Optionally traces execution to Langfuse
+   4. Always stores execution trace for analytics
+   5. Optionally traces execution to Langfuse
 
    Args:
      context - Map with :event-store and optional :dscloj-provider
@@ -465,31 +588,37 @@
 
    Options:
      :timeout-ms - Max execution time in ms (default 300000 = 5 minutes)
-     :trace? - Enable local trace collection (default false)
-     :langfuse-client - Langfuse client for sending traces (enables tracing)
+     :trace? - Enable local trace collection in response (default false)
+     :langfuse-client - Langfuse client for sending traces
      :use-version - Specific version number to execute (overrides execution-mode)
      :force-draft - Force draft execution even if execution-mode is :published
+     :store-trace? - Store trace in event store (default true)
 
    Returns:
      {:status :success | :failure | :timeout
       :outputs {\"key\" value ...}
       :duration-ms 1234
-      :error string?          ;; Present if status is :failure
-      :trace {...}}           ;; Present if tracing enabled
-      :executed-version ...   ;; Version number if published version was used"
-  [context sheet-id inputs & {:keys [timeout-ms trace? langfuse-client use-version force-draft]
-                              :or {timeout-ms 300000 trace? false}}]
+      :trace-id uuid             ;; ID of stored trace
+      :error string?             ;; Present if status is :failure
+      :trace {...}               ;; Present if trace? is true
+      :executed-version ...}     ;; Version number if published version was used"
+  [context sheet-id inputs & {:keys [timeout-ms trace? langfuse-client use-version force-draft store-trace?]
+                              :or {timeout-ms 300000 trace? false store-trace? true}}]
   (let [start-time (System/currentTimeMillis)
+        started-at (time/now)
         event-store (:event-store context)
 
         ;; Use explicit langfuse-client, or fall back to one from context
         effective-langfuse-client (or langfuse-client (:langfuse-client context))
 
-        ;; Create trace context if tracing enabled
+        ;; Create Langfuse trace context if enabled
         trace-ctx (when (or trace? effective-langfuse-client)
                     (if effective-langfuse-client
                       (tracing/create-trace-context effective-langfuse-client)
                       (tracing/create-local-trace)))
+
+        ;; Always create internal trace for event storage
+        internal-trace (tracing/create-internal-trace)
 
         ;; Load sheet structure
         sheet (rm/get-sheet event-store sheet-id)
@@ -540,25 +669,38 @@
                           blackboard-entries
                           inputs)
 
-        ;; Add trace context to execution context
-        exec-context (cond-> context
-                       trace-ctx (assoc :trace-ctx trace-ctx))
+        ;; Capture input snapshot for trace
+        input-snapshot (reduce (fn [acc [k entry]]
+                                 (assoc acc k (:value entry)))
+                               {}
+                               blackboard)
 
-        ;; Start trace
+        ;; Add trace contexts to execution context
+        exec-context (cond-> context
+                       trace-ctx (assoc :trace-ctx trace-ctx)
+                       internal-trace (assoc :internal-trace internal-trace))
+
+        ;; Start Langfuse trace
         _ (when trace-ctx
             (tracing/start-trace! trace-ctx (:name sheet) inputs))
+
+        ;; Root path context (no parent)
+        root-path-ctx {:parent-id nil
+                       :path []
+                       :child-index nil}
 
         ;; Execute with timeout
         result-chan (chan 1)
         _ (future
             (try
-              (let [result (execute-node-sync root-id nodes-by-id blackboard exec-context)]
+              (let [result (execute-node-sync root-id nodes-by-id blackboard exec-context root-path-ctx)]
                 (>!! result-chan result))
               (catch Exception e
                 (>!! result-chan {:status :failure :error (.getMessage e) :blackboard blackboard}))))
 
         [result _] (alts!! [result-chan (timeout timeout-ms)])
-        duration-ms (- (System/currentTimeMillis) start-time)]
+        duration-ms (- (System/currentTimeMillis) start-time)
+        completed-at (time/now)]
 
     (if result
       ;; Got a result
@@ -567,22 +709,56 @@
             outputs (reduce (fn [acc [k entry]]
                               (assoc acc k (:value entry)))
                             {}
-                            final-bb)]
-        ;; End trace
+                            final-bb)
+            trace-id (:trace-id internal-trace)]
+        ;; End Langfuse trace
         (when trace-ctx
           (tracing/end-trace! trace-ctx (:status result) outputs duration-ms (:error result)))
 
+        ;; Store execution trace event
+        (when store-trace?
+          (store-execution-trace! event-store
+                                  {:trace-id trace-id
+                                   :sheet-id sheet-id
+                                   :version-number executed-version
+                                   :started-at started-at
+                                   :completed-at completed-at
+                                   :duration-ms duration-ms
+                                   :status (:status result)
+                                   :input-snapshot input-snapshot
+                                   :output-snapshot outputs
+                                   :node-traces (tracing/get-node-traces internal-trace)
+                                   :error (:error result)}))
+
         (cond-> {:status (:status result)
                  :outputs outputs
-                 :duration-ms duration-ms}
+                 :duration-ms duration-ms
+                 :trace-id trace-id}
           (:error result) (assoc :error (:error result))
           executed-version (assoc :executed-version executed-version)
           trace-ctx (assoc :trace {:trace-id (:trace-id trace-ctx)
                                    :events @(:events trace-ctx)})))
       ;; Timeout
-      (do
+      (let [trace-id (:trace-id internal-trace)]
         (when trace-ctx
           (tracing/end-trace! trace-ctx :timeout {} duration-ms "Execution timed out"))
+
+        ;; Store timeout trace
+        (when store-trace?
+          (store-execution-trace! event-store
+                                  {:trace-id trace-id
+                                   :sheet-id sheet-id
+                                   :version-number executed-version
+                                   :started-at started-at
+                                   :completed-at completed-at
+                                   :duration-ms duration-ms
+                                   :status :timeout
+                                   :input-snapshot input-snapshot
+                                   :output-snapshot {}
+                                   :node-traces (tracing/get-node-traces internal-trace)
+                                   :error "Execution timed out"}))
+
         {:status :timeout
          :error "Execution timed out"
-         :duration-ms duration-ms}))))
+         :duration-ms duration-ms
+         :trace-id trace-id}))))

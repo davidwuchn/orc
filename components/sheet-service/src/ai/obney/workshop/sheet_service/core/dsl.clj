@@ -349,12 +349,14 @@
 ;; =============================================================================
 
 (defn- build-node-tree
-  "Convert flat nodes map to nested tree structure for export."
+  "Convert flat nodes map to nested tree structure for export.
+   Preserves original node IDs for accurate structural diffing."
   [nodes-by-id root-id]
   (when root-id
     (let [node (get nodes-by-id root-id)]
       (when node
-        (cond-> {:type (:type node)
+        (cond-> {:id (:id node)
+                 :type (:type node)
                  :name (:name node)}
           ;; Leaf-specific fields
           (= :leaf (:type node))

@@ -248,3 +248,48 @@
       {:trace-id (:trace-id trace-ctx)
        :node-count (count nodes)
        :nodes nodes})))
+
+;; =============================================================================
+;; Internal Trace Collection (Always-On for Event Storage)
+;; =============================================================================
+
+(defn create-internal-trace
+  "Create an internal trace collector for event storage.
+   This always collects traces for storing in the event store,
+   independent of Langfuse tracing."
+  []
+  {:trace-id (random-uuid)
+   :node-traces (atom [])
+   :started-at nil
+   :completed-at nil})
+
+(defn start-internal-trace!
+  "Mark the start time for internal trace collection."
+  [internal-trace]
+  (assoc internal-trace :started-at (time/now)))
+
+(defn record-node-trace!
+  "Record a node trace entry for internal storage.
+
+   Args:
+     internal-trace - The internal trace context
+     node-trace - Map with:
+       :node-id, :node-name, :node-type
+       :parent-id, :path, :child-index
+       :status, :started-at, :completed-at, :duration-ms
+       :inputs, :outputs, :error"
+  [internal-trace node-trace]
+  (swap! (:node-traces internal-trace) conj node-trace))
+
+(defn complete-internal-trace!
+  "Mark the completion time and return the finalized trace."
+  [internal-trace status error]
+  (assoc internal-trace
+         :completed-at (time/now)
+         :status status
+         :error error))
+
+(defn get-node-traces
+  "Get all collected node traces."
+  [internal-trace]
+  @(:node-traces internal-trace))

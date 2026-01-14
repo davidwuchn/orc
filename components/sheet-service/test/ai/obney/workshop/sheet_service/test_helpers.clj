@@ -384,3 +384,65 @@
   "Get the anomaly category from a result."
   [result]
   (:cognitect.anomalies/category result))
+
+;; =============================================================================
+;; Factory Functions - Execution Commands
+;; =============================================================================
+
+(defn make-execute-version-command
+  "Create an execute-version command."
+  [sheet-id version-number & {:keys [inputs]}]
+  {:command/name :sheet/execute-version
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :version-number version-number
+   :inputs (or inputs {})})
+
+(defn make-batch-execute-command
+  "Create a batch-execute command."
+  [sheet-id inputs-list & {:keys [version-number]}]
+  (cond-> {:command/name :sheet/batch-execute
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :inputs-list inputs-list}
+    version-number (assoc :version-number version-number)))
+
+;; =============================================================================
+;; Factory Functions - Trace Queries
+;; =============================================================================
+
+(defn make-get-trace-query
+  "Create a get-trace query."
+  [trace-id]
+  {:query/name :sheet/get-trace
+   :trace-id trace-id})
+
+(defn make-get-traces-query
+  "Create a get-traces query."
+  [sheet-id & {:keys [version-number status node-id since limit]}]
+  (cond-> {:query/name :sheet/get-traces
+           :sheet-id sheet-id}
+    (some? version-number) (assoc :version-number version-number)
+    status (assoc :status status)
+    node-id (assoc :node-id node-id)
+    since (assoc :since since)
+    limit (assoc :limit limit)))
+
+(defn make-diff-versions-query
+  "Create a diff-versions query."
+  [sheet-id from-version to-version]
+  {:query/name :sheet/diff-versions
+   :sheet-id sheet-id
+   :from-version from-version
+   :to-version to-version})
+
+(defn make-node-stats-query
+  "Create a node-stats query."
+  [sheet-id & {:keys [version-number since node-ids]}]
+  (cond-> {:query/name :sheet/node-stats
+           :sheet-id sheet-id}
+    (some? version-number) (assoc :version-number version-number)
+    since (assoc :since since)
+    (seq node-ids) (assoc :node-ids node-ids)))

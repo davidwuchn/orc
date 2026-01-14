@@ -7,6 +7,7 @@
    - Return cognitect anomaly on failure
    - Last write wins (no optimistic concurrency)"
   (:require [ai.obney.workshop.sheet-service.core.read-models :as rm]
+            [ai.obney.workshop.sheet-service.core.runtime :as runtime]
             [ai.obney.grain.event-store-v2.interface :refer [->event]]
             [ai.obney.grain.command-processor.interface :refer [defcommand]]
             [cognitect.anomalies :as anom]
@@ -753,12 +754,14 @@
 ;; =============================================================================
 
 (defn- build-node-tree
-  "Convert flat nodes map to nested tree structure for snapshots."
+  "Convert flat nodes map to nested tree structure for snapshots.
+   Preserves original node IDs for accurate structural diffing."
   [nodes-by-id root-id]
   (when root-id
     (let [node (get nodes-by-id root-id)]
       (when node
-        (cond-> {:type (:type node)
+        (cond-> {:id (:id node)
+                 :type (:type node)
                  :name (:name node)}
           ;; Leaf-specific fields
           (= :leaf (:type node))
@@ -926,3 +929,79 @@
           :body {:sheet-id sheet-id
                  :mode mode
                  :previous-mode (or (:execution-mode sheet) :draft)}})]})))
+
+;; =============================================================================
+;; Execution Commands
+;; =============================================================================
+
+(defcommand :sheet execute-version
+  "Execute a specific published version of a sheet.
+
+   This command executes a sheet workflow using a specific version snapshot,
+   not the current draft state. Useful for comparing behavior across versions.
+
+   Traces are always stored and the trace-id is returned in the result."
+  [{{:keys [sheet-id version-number inputs]} :command
+    :keys [event-store] :as context}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        version (when sheet (rm/get-version event-store sheet-id version-number))]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (not version)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " version-number " not found")}
+
+      :else
+      (let [result (runtime/execute context sheet-id (or inputs {})
+                                    :use-version version-number)]
+        {:command-result/data result}))))
+
+(defcommand :sheet batch-execute
+  "Execute a sheet with multiple input sets in parallel.
+
+   This command runs the same sheet multiple times with different inputs,
+   executing them concurrently for efficiency. Each execution stores its own trace.
+
+   Returns results for all executions along with total wall-clock time."
+  [{{:keys [sheet-id version-number inputs-list]} :command
+    :keys [event-store] :as context}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        version (when (and sheet version-number)
+                  (rm/get-version event-store sheet-id version-number))]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (and version-number (not version))
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " version-number " not found")}
+
+      (empty? inputs-list)
+      {::anom/category ::anom/incorrect
+       ::anom/message "inputs-list cannot be empty"}
+
+      :else
+      (let [start-time (System/currentTimeMillis)
+            ;; Execute all inputs in parallel using futures
+            futures (mapv (fn [input-set]
+                            (future
+                              (try
+                                (runtime/execute context sheet-id (or input-set {})
+                                                 :use-version version-number)
+                                (catch Exception e
+                                  {:status :failure
+                                   :error (.getMessage e)}))))
+                          inputs-list)
+            ;; Collect all results (blocks until all complete)
+            results (mapv deref futures)
+            end-time (System/currentTimeMillis)]
+        {:command-result/data
+         {:results results
+          :total-executions (count results)
+          :successful-count (count (filter #(= :success (:status %)) results))
+          :failed-count (count (filter #(not= :success (:status %)) results))
+          :duration-ms (- end-time start-time)}}))))

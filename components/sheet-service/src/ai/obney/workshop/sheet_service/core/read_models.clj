@@ -685,3 +685,65 @@
                                  {:types version-events
                                   :tags #{[:sheet sheet-id]}})]
     (get (stashes {} events) sheet-id)))
+
+;; =============================================================================
+;; Traces Projection
+;; =============================================================================
+
+(def trace-events
+  "Events that affect execution traces read model"
+  #{:sheet/execution-traced})
+
+(defmulti traces*
+  "Apply event to traces read model.
+   State structure: {trace-id trace}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod traces* :sheet/execution-traced
+  [state event]
+  (let [trace-id (:trace-id event)]
+    (assoc state trace-id
+           {:trace-id trace-id
+            :sheet-id (:sheet-id event)
+            :version-number (:version-number event)
+            :started-at (:started-at event)
+            :completed-at (:completed-at event)
+            :duration-ms (:duration-ms event)
+            :status (:status event)
+            :input-snapshot (:input-snapshot event)
+            :output-snapshot (:output-snapshot event)
+            :node-traces (:node-traces event)
+            :error (:error event)})))
+
+(defmethod traces* :default [state _] state)
+
+(defn traces
+  "Build traces read model from events"
+  [initial-state events]
+  (reduce traces* (or initial-state {}) events))
+
+;; =============================================================================
+;; Trace Query Helpers
+;; =============================================================================
+
+(defn get-trace
+  "Get a single execution trace by ID"
+  [event-store trace-id]
+  (let [events (event-store/read event-store
+                                 {:types trace-events
+                                  :tags #{[:trace trace-id]}})]
+    (get (traces {} events) trace-id)))
+
+(defn get-traces-for-sheet
+  "Get all execution traces for a sheet"
+  [event-store sheet-id]
+  (let [events (event-store/read event-store
+                                 {:types trace-events
+                                  :tags #{[:sheet sheet-id]}})]
+    (vals (traces {} events))))
+
+(defn get-traces-for-version
+  "Get all execution traces for a specific version of a sheet"
+  [event-store sheet-id version-number]
+  (->> (get-traces-for-sheet event-store sheet-id)
+       (filter #(= version-number (:version-number %)))))

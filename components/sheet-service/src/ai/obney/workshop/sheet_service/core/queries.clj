@@ -7,6 +7,7 @@
             [ai.obney.workshop.sheet-service.core.tree-layout :as layout]
             [ai.obney.grain.time.interface :as time]
             [ai.obney.grain.query-processor.interface :refer [defquery]]
+            [clojure.set]
             [cognitect.anomalies :as anom]))
 
 ;; =============================================================================
@@ -14,12 +15,13 @@
 ;; =============================================================================
 
 (defn- flatten-node-tree
-  "Convert nested tree structure back to flat list of nodes with generated IDs.
+  "Convert nested tree structure back to flat list of nodes.
+   Preserves existing IDs if present, otherwise generates new ones.
    Returns {:nodes-by-id {...} :root-id uuid}."
   ([tree-node] (flatten-node-tree tree-node nil (atom {})))
   ([tree-node parent-id nodes-atom]
    (when tree-node
-     (let [node-id (random-uuid)
+     (let [node-id (or (:id tree-node) (random-uuid))
            children (:children tree-node)
            child-results (mapv #(flatten-node-tree % node-id nodes-atom) children)
            children-ids (vec (keep :node-id child-results))
@@ -148,12 +150,14 @@
 ;; =============================================================================
 
 (defn- build-node-tree
-  "Convert flat nodes map to nested tree structure for export."
+  "Convert flat nodes map to nested tree structure for export.
+   Preserves original node IDs for accurate structural diffing."
   [nodes-by-id root-id]
   (when root-id
     (let [node (get nodes-by-id root-id)]
       (when node
-        (cond-> {:type (:type node)
+        (cond-> {:id (:id node)
+                 :type (:type node)
                  :name (:name node)}
           ;; Leaf-specific fields
           (= :leaf (:type node))
@@ -253,3 +257,264 @@
       (let [stash (rm/get-stash event-store sheet-id)]
         {:query/result
          {:stash stash}}))))
+
+;; =============================================================================
+;; Execution Traces
+;; =============================================================================
+
+(defquery :sheet get-trace
+  "Get a single execution trace by ID."
+  [{{:keys [trace-id]} :query
+    :keys [event-store]}]
+  (let [trace (rm/get-trace event-store trace-id)]
+    (if-not trace
+      {::anom/category ::anom/not-found
+       ::anom/message "Trace not found"}
+      {:query/result trace})))
+
+(defquery :sheet get-traces
+  "Get execution traces for a sheet with optional filtering.
+
+   Query params:
+     :sheet-id - Required. The sheet to get traces for.
+     :version-number - Optional. Filter by specific version (nil = draft).
+     :status - Optional. Filter by status (:success, :failure, :timeout).
+     :node-id - Optional. Filter to traces that executed this node.
+     :since - Optional. Filter to traces after this time.
+     :limit - Optional. Max traces to return (default 100)."
+  [{{:keys [sheet-id version-number status node-id since limit]} :query
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (if-not sheet
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+      (let [all-traces (rm/get-traces-for-sheet event-store sheet-id)
+            ;; Apply filters
+            filtered (cond->> all-traces
+                       ;; Filter by version (nil matches nil, number matches number)
+                       (some? version-number)
+                       (filter #(= version-number (:version-number %)))
+
+                       ;; Filter by status
+                       status
+                       (filter #(= status (:status %)))
+
+                       ;; Filter by node involvement
+                       node-id
+                       (filter #(some (fn [nt] (= node-id (:node-id nt)))
+                                      (:node-traces %)))
+
+                       ;; Filter by time (since should be an Instant or compatible)
+                       since
+                       (filter #(pos? (compare (:started-at %) since))))
+            ;; Sort by started-at descending (most recent first)
+            sorted (sort-by :started-at #(compare %2 %1) filtered)
+            ;; Apply limit
+            limited (take (or limit 100) sorted)]
+        {:query/result
+         {:traces (vec limited)
+          :total (count filtered)}}))))
+
+;; =============================================================================
+;; Structural Diff
+;; =============================================================================
+
+(defn- flatten-tree-with-paths
+  "Flatten a nested snapshot tree to a map of {node-id {:node ... :path [...]}}."
+  ([tree] (flatten-tree-with-paths tree []))
+  ([tree path]
+   (when tree
+     (let [node-id (:id tree)
+           node-name (:name tree)
+           current-path (conj path node-name)
+           children (or (:children tree) [])
+           ;; Recursively flatten children
+           child-results (mapcat #(flatten-tree-with-paths % current-path) children)]
+       (cons {node-id {:node tree :path current-path}}
+             child-results)))))
+
+(defn- diff-node-fields
+  "Compare two nodes and return a list of changes."
+  [from-node to-node]
+  (let [fields-to-compare [:type :name :executor :model :instruction :fn
+                           :reads :writes :check :on-fail
+                           :success-policy :failure-policy
+                           :source-key :item-key :output-key :max-concurrency]]
+    (for [field fields-to-compare
+          :let [from-val (get from-node field)
+                to-val (get to-node field)]
+          :when (not= from-val to-val)]
+      {:field field
+       :old from-val
+       :new to-val})))
+
+(defn- diff-node-trees
+  "Compute structural diff between two node trees."
+  [from-tree to-tree]
+  (let [;; Flatten both trees
+        from-flat (into {} (flatten-tree-with-paths from-tree))
+        to-flat (into {} (flatten-tree-with-paths to-tree))
+        from-ids (set (keys from-flat))
+        to-ids (set (keys to-flat))
+        ;; Compute set differences
+        added-ids (clojure.set/difference to-ids from-ids)
+        removed-ids (clojure.set/difference from-ids to-ids)
+        common-ids (clojure.set/intersection from-ids to-ids)]
+    {:added-nodes (mapv (fn [id]
+                          (let [{:keys [node path]} (get to-flat id)]
+                            {:id id
+                             :name (:name node)
+                             :type (:type node)
+                             :path path}))
+                        added-ids)
+     :removed-nodes (mapv (fn [id]
+                            (let [{:keys [node path]} (get from-flat id)]
+                              {:id id
+                               :name (:name node)
+                               :type (:type node)
+                               :path path}))
+                          removed-ids)
+     :modified-nodes (vec (for [id common-ids
+                                :let [from-entry (get from-flat id)
+                                      to-entry (get to-flat id)
+                                      changes (diff-node-fields (:node from-entry) (:node to-entry))]
+                                :when (seq changes)]
+                            {:id id
+                             :name (:name (:node to-entry))
+                             :path (:path to-entry)
+                             :changes (vec changes)}))}))
+
+(defn- diff-blackboard-schemas
+  "Compute diff between two blackboard schemas."
+  [from-schema to-schema]
+  (let [from-keys (set (keys from-schema))
+        to-keys (set (keys to-schema))
+        added-keys (clojure.set/difference to-keys from-keys)
+        removed-keys (clojure.set/difference from-keys to-keys)
+        common-keys (clojure.set/intersection from-keys to-keys)]
+    {:added (vec added-keys)
+     :removed (vec removed-keys)
+     :modified (vec (for [k common-keys
+                          :let [from-val (get from-schema k)
+                                to-val (get to-schema k)]
+                          :when (not= from-val to-val)]
+                      {:key k
+                       :old-schema from-val
+                       :new-schema to-val}))}))
+
+(defquery :sheet diff-versions
+  "Compare two published versions and return structural differences.
+
+   Returns:
+     :node-diff - Added, removed, and modified nodes
+     :blackboard-diff - Added, removed, and modified blackboard keys"
+  [{{:keys [sheet-id from-version to-version]} :query
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        v1 (when sheet (rm/get-version event-store sheet-id from-version))
+        v2 (when sheet (rm/get-version event-store sheet-id to-version))]
+    (cond
+      (not sheet)
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+
+      (not v1)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " from-version " not found")}
+
+      (not v2)
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Version " to-version " not found")}
+
+      :else
+      (let [from-snapshot (:snapshot v1)
+            to-snapshot (:snapshot v2)]
+        {:query/result
+         {:from-version from-version
+          :to-version to-version
+          :node-diff (diff-node-trees (:nodes from-snapshot) (:nodes to-snapshot))
+          :blackboard-diff (diff-blackboard-schemas (:blackboard-schema from-snapshot)
+                                                     (:blackboard-schema to-snapshot))}}))))
+
+;; =============================================================================
+;; Node Statistics
+;; =============================================================================
+
+(defn- percentile
+  "Calculate the nth percentile from a sorted list of values."
+  [sorted-values n]
+  (when (seq sorted-values)
+    (let [idx (int (* (/ n 100.0) (dec (count sorted-values))))]
+      (nth sorted-values (min idx (dec (count sorted-values)))))))
+
+(defn- top-errors
+  "Get the top N most common errors."
+  [traces n]
+  (->> traces
+       (keep :error)
+       (frequencies)
+       (sort-by val >)
+       (take n)
+       (mapv (fn [[msg cnt]] {:message msg :count cnt}))))
+
+(defn- compute-node-stats
+  "Compute statistics for a single node from its traces."
+  [node-id traces]
+  (when (seq traces)
+    (let [first-trace (first traces)
+          durations (sort (keep :duration-ms traces))
+          statuses (frequencies (map :status traces))
+          total (count traces)
+          success-count (get statuses :success 0)]
+      {:node-id node-id
+       :node-name (:node-name first-trace)
+       :node-type (:node-type first-trace)
+       :execution-count total
+       :success-count success-count
+       :failure-count (get statuses :failure 0)
+       :skip-count (get statuses :skipped 0)
+       :success-rate (if (pos? total) (double (/ success-count total)) 0.0)
+       :avg-duration-ms (when (seq durations)
+                          (double (/ (reduce + durations) (count durations))))
+       :p50-duration-ms (percentile durations 50)
+       :p95-duration-ms (percentile durations 95)
+       :common-errors (top-errors traces 5)})))
+
+(defquery :sheet node-stats
+  "Get aggregated execution statistics per node.
+
+   Query params:
+     :sheet-id - Required. The sheet to get stats for.
+     :version-number - Optional. Filter to specific version.
+     :since - Optional. Filter to traces after this time.
+     :node-ids - Optional. Vector of specific node IDs to include (nil = all)."
+  [{{:keys [sheet-id version-number since node-ids]} :query
+    :keys [event-store]}]
+  (let [sheet (rm/get-sheet event-store sheet-id)]
+    (if-not sheet
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+      (let [;; Get all traces for this sheet
+            all-traces (rm/get-traces-for-sheet event-store sheet-id)
+            ;; Apply filters
+            filtered-traces (cond->> all-traces
+                              version-number
+                              (filter #(= version-number (:version-number %)))
+
+                              since
+                              (filter #(pos? (compare (:started-at %) since))))
+            ;; Flatten all node traces from filtered traces
+            all-node-traces (mapcat :node-traces filtered-traces)
+            ;; Group by node-id
+            by-node (group-by :node-id all-node-traces)
+            ;; Filter to requested nodes if specified
+            by-node (if (seq node-ids)
+                      (select-keys by-node (set node-ids))
+                      by-node)
+            ;; Compute stats per node
+            stats (keep (fn [[node-id traces]]
+                          (compute-node-stats node-id traces))
+                        by-node)]
+        {:query/result
+         {:stats (vec (sort-by :success-rate stats))
+          :trace-count (count filtered-traces)}}))))

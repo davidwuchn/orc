@@ -161,7 +161,41 @@
     [:stash-id :uuid]
     [:sheet-id :uuid]
     [:stashed-at :any]
-    [:snapshot :map]]})
+    [:snapshot :map]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Execution Trace Schemas
+   ;; -------------------------------------------------------------------------
+
+   ::node-trace
+   [:map
+    [:node-id :uuid]
+    [:node-name :string]
+    [:node-type node-type]
+    [:parent-id {:optional true} :uuid]           ;; Parent node in tree
+    [:path [:vector :string]]                     ;; Path from root e.g. ["root" "fallback-1" "task-a"]
+    [:child-index {:optional true} :int]          ;; Which child of parent (0-indexed)
+    [:status [:enum :success :failure :running :skipped]]
+    [:started-at :any]
+    [:completed-at {:optional true} :any]
+    [:duration-ms {:optional true} :int]
+    [:inputs {:optional true} :map]               ;; Blackboard values read
+    [:outputs {:optional true} :map]              ;; Blackboard values written
+    [:error {:optional true} :string]]
+
+   ::execution-trace
+   [:map
+    [:trace-id :uuid]
+    [:sheet-id :uuid]
+    [:version-number {:optional true} :int]       ;; nil = draft execution
+    [:started-at :any]
+    [:completed-at :any]
+    [:duration-ms :int]
+    [:status [:enum :success :failure :timeout]]
+    [:input-snapshot :map]                        ;; Blackboard at start
+    [:output-snapshot :map]                       ;; Blackboard at end
+    [:node-traces [:vector ::node-trace]]
+    [:error {:optional true} :string]]})
 
 ;; =============================================================================
 ;; Command Schemas
@@ -374,7 +408,23 @@
    :sheet/set-execution-mode
    [:map
     [:sheet-id :uuid]
-    [:mode execution-mode]]})
+    [:mode execution-mode]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Version-Targeted Execution Commands
+   ;; -------------------------------------------------------------------------
+
+   :sheet/execute-version
+   [:map
+    [:sheet-id :uuid]
+    [:version-number :int]                        ;; Specific version to execute
+    [:inputs {:optional true} :map]]              ;; Input overrides
+
+   :sheet/batch-execute
+   [:map
+    [:sheet-id :uuid]
+    [:version-number {:optional true} :int]       ;; nil = draft
+    [:inputs [:vector :map]]]})
 
 ;; =============================================================================
 ;; Event Schemas
@@ -629,7 +679,25 @@
    [:map
     [:sheet-id :uuid]
     [:mode execution-mode]
-    [:previous-mode {:optional true} execution-mode]]})
+    [:previous-mode {:optional true} execution-mode]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Trace Events
+   ;; -------------------------------------------------------------------------
+
+   :sheet/execution-traced
+   [:map
+    [:trace-id :uuid]
+    [:sheet-id :uuid]
+    [:version-number {:optional true} :int]
+    [:started-at :any]
+    [:completed-at :any]
+    [:duration-ms :int]
+    [:status [:enum :success :failure :timeout]]
+    [:input-snapshot :map]
+    [:output-snapshot :map]
+    [:node-traces [:vector :any]]                 ;; Vector of ::node-trace
+    [:error {:optional true} :string]]})
 
 ;; =============================================================================
 ;; Query Schemas (Fat Query Model - one query per screen)
@@ -717,4 +785,79 @@
 
    :sheet/get-stash-result
    [:map
-    [:stash {:optional true} ::stash]]})
+    [:stash {:optional true} ::stash]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Trace Queries
+   ;; -------------------------------------------------------------------------
+
+   :sheet/get-trace
+   [:map
+    [:trace-id :uuid]]
+
+   :sheet/get-trace-result
+   [:map
+    [:trace ::execution-trace]]
+
+   :sheet/get-traces
+   [:map
+    [:sheet-id :uuid]
+    [:version-number {:optional true} :int]       ;; Filter by version
+    [:status {:optional true} [:enum :success :failure :timeout]]
+    [:node-id {:optional true} :uuid]             ;; Filter by node involvement
+    [:since {:optional true} :any]                ;; Filter by time
+    [:limit {:optional true} :int]]
+
+   :sheet/get-traces-result
+   [:map
+    [:traces [:vector ::execution-trace]]
+    [:total :int]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Structural Diff Query
+   ;; -------------------------------------------------------------------------
+
+   :sheet/diff-versions
+   [:map
+    [:sheet-id :uuid]
+    [:from-version :int]
+    [:to-version :int]]
+
+   :sheet/diff-versions-result
+   [:map
+    [:node-diff [:map
+                 [:added-nodes [:vector :any]]
+                 [:removed-nodes [:vector :any]]
+                 [:modified-nodes [:vector :any]]]]
+    [:blackboard-diff [:map
+                       [:added [:vector :keyword]]
+                       [:removed [:vector :keyword]]
+                       [:modified [:vector :any]]]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Node Statistics Query
+   ;; -------------------------------------------------------------------------
+
+   :sheet/node-stats
+   [:map
+    [:sheet-id :uuid]
+    [:version-number {:optional true} :int]       ;; Filter to specific version
+    [:since {:optional true} :any]                ;; Time window
+    [:node-ids {:optional true} [:vector :uuid]]] ;; Specific nodes, or all if nil
+
+   :sheet/node-stats-result
+   [:map
+    [:stats [:vector [:map
+                      [:node-id :uuid]
+                      [:node-name :string]
+                      [:node-type node-type]
+                      [:execution-count :int]
+                      [:success-count :int]
+                      [:failure-count :int]
+                      [:skip-count :int]
+                      [:success-rate :double]
+                      [:avg-duration-ms {:optional true} :double]
+                      [:p50-duration-ms {:optional true} :int]
+                      [:p95-duration-ms {:optional true} :int]
+                      [:common-errors {:optional true} [:vector :any]]]]]
+    [:trace-count :int]]})
