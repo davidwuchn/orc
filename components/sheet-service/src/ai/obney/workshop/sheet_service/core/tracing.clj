@@ -54,34 +54,50 @@
   [node-id]
   (str "obs-" node-id))
 
+(defn- make-unique-observation-id
+  "Create a unique observation ID for leaf nodes that may execute multiple times."
+  [node-id]
+  (str "obs-" node-id "-" (random-uuid)))
+
+(def ^:private composite-node-types
+  "Node types that can have children and need stable observation IDs."
+  #{:sequence :fallback :parallel :map-each})
+
 (defn span-event
-  "Create a span-create event for a node execution."
+  "Create a span-create event for a node execution.
+   Composite nodes get stable IDs (for parent refs), leaf nodes get unique IDs."
   [trace-id node-id node-name node-type start-time end-time inputs outputs status error
    & {:keys [parent-observation-id]}]
-  {:id (random-uuid)
-   :timestamp (timestamp-str)
-   :type "span-create"
-   :body (cond-> {:id (make-observation-id node-id)
-                  :traceId (str trace-id)
-                  :name (or node-name (str node-type " node"))
-                  :startTime (millis->iso start-time)
-                  :endTime (millis->iso end-time)
-                  :input inputs
-                  :output outputs
-                  :metadata {:node-id (str node-id)
-                             :node-type (name node-type)
-                             :status (name status)}}
-           parent-observation-id (assoc :parentObservationId parent-observation-id)
-           error (assoc-in [:metadata :error] error))})
+  (let [;; Composite nodes need stable IDs so children can reference them
+        ;; Leaf nodes (condition, code) can have unique IDs since they have no children
+        obs-id (if (composite-node-types node-type)
+                 (make-observation-id node-id)
+                 (make-unique-observation-id node-id))]
+    {:id (random-uuid)
+     :timestamp (timestamp-str)
+     :type "span-create"
+     :body (cond-> {:id obs-id
+                    :traceId (str trace-id)
+                    :name (or node-name (str node-type " node"))
+                    :startTime (millis->iso start-time)
+                    :endTime (millis->iso end-time)
+                    :input inputs
+                    :output outputs
+                    :metadata {:node-id (str node-id)
+                               :node-type (name node-type)
+                               :status (name status)}}
+             parent-observation-id (assoc :parentObservationId parent-observation-id)
+             error (assoc-in [:metadata :error] error))}))
 
 (defn generation-event
-  "Create a generation-create event for an AI node execution."
+  "Create a generation-create event for an AI node execution.
+   Always uses unique IDs since AI nodes are leaf nodes with no children."
   [trace-id node-id node-name model start-time end-time inputs outputs status error
    & {:keys [parent-observation-id]}]
   {:id (random-uuid)
    :timestamp (timestamp-str)
    :type "generation-create"
-   :body (cond-> {:id (make-observation-id node-id)
+   :body (cond-> {:id (make-unique-observation-id node-id)
                   :traceId (str trace-id)
                   :name (or node-name "AI Generation")
                   :startTime (millis->iso start-time)

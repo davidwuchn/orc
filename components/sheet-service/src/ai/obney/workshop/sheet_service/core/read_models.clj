@@ -34,6 +34,7 @@
     :sheet/node-retry-set
     :sheet/parallel-config-set
     :sheet/map-each-config-set
+    :sheet/llm-condition-config-set
     :sheet/node-execution-started
     :sheet/node-execution-completed})
 
@@ -128,6 +129,7 @@
                         :sequence "Sequence"
                         :fallback "Fallback"
                         :condition "Condition"
+                        :llm-condition "LLM Condition"
                         :parallel "Parallel"
                         :map-each "Map Each")
                 :parent-id parent-id
@@ -260,6 +262,13 @@
       (assoc-in [(:node-id event) :item-key] (:item-key event))
       (assoc-in [(:node-id event) :output-key] (:output-key event))
       (assoc-in [(:node-id event) :max-concurrency] (:max-concurrency event))))
+
+(defmethod nodes* :sheet/llm-condition-config-set
+  [state event]
+  (-> state
+      (assoc-in [(:node-id event) :instruction] (:instruction event))
+      (assoc-in [(:node-id event) :reads] (:reads event))
+      (assoc-in [(:node-id event) :model] (:model event))))
 
 (defmethod nodes* :sheet/node-execution-started
   [state event]

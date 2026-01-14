@@ -274,6 +274,59 @@
          :error (.getMessage e)
          :duration-ms (- (System/currentTimeMillis) start-time)}))))
 
+(defn execute-llm-condition
+  "Execute an LLM condition node - uses LLM to evaluate a yes/no question.
+
+   Args:
+     node - The llm-condition node map with :instruction, :reads, :model
+     blackboard - Map of key -> {:key, :schema, :value, :version}
+     provider - DSCloj provider keyword (e.g., :openrouter)
+     options - Optional DSCloj options map
+
+   Returns:
+     {:status :success/:failure
+      :result boolean?          - the LLM's yes/no answer
+      :error string?            - error message if failed
+      :duration-ms int}         - execution time"
+  [node blackboard provider & {:keys [options] :or {options {}}}]
+  (let [start-time (System/currentTimeMillis)
+        ;; Build inputs from reads
+        inputs (mapv (fn [key-name]
+                       (if-let [entry (get blackboard key-name)]
+                         (build-field key-name entry)
+                         {:name (keyword (sanitize-field-name key-name))
+                          :original-key key-name
+                          :spec :string
+                          :description (str "Input: " key-name)}))
+                     (:reads node))
+        ;; Build module with fixed boolean output
+        module {:inputs inputs
+                :outputs [{:name :result
+                           :spec :boolean
+                           :description "True if the condition is met, false otherwise"}]
+                :instructions (:instruction node)}
+        ;; Gather input values
+        input-values (into {}
+                           (for [key-name (:reads node)
+                                 :let [entry (get blackboard key-name)]
+                                 :when entry]
+                             [(keyword (sanitize-field-name key-name)) (:value entry)]))
+        ;; Add model to options if specified on node
+        options-with-model (if-let [model (:model node)]
+                             (assoc options :model model)
+                             options)]
+    (try
+      (let [result (dscloj/predict provider module input-values options-with-model)
+            bool-result (get result :result)
+            duration-ms (- (System/currentTimeMillis) start-time)]
+        {:status :success
+         :result (boolean bool-result)
+         :duration-ms duration-ms})
+      (catch Exception e
+        {:status :failure
+         :error (.getMessage e)
+         :duration-ms (- (System/currentTimeMillis) start-time)}))))
+
 ;; =============================================================================
 ;; Retry Logic
 ;; =============================================================================

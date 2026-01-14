@@ -177,6 +177,17 @@
                              :on-failure [::node-operation-failure]}}))
 
 (rf/reg-event-fx
+  ::create-leaf-with-executor
+  (fn [_ [_ api-client sheet-id parent-id index executor]]
+    {::sheet-fx/create-leaf-with-executor {:api-client api-client
+                                           :sheet-id sheet-id
+                                           :parent-id parent-id
+                                           :index index
+                                           :executor executor
+                                           :on-success [::node-command-success api-client sheet-id]
+                                           :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
   ::move-node
   (fn [_ [_ api-client sheet-id node-id new-parent-id index]]
     {::sheet-fx/move-node {:api-client api-client
@@ -304,6 +315,18 @@
                                      :max-concurrency max-concurrency
                                      :on-success [::node-command-success api-client sheet-id]
                                      :on-failure [::node-operation-failure]}}))
+
+(rf/reg-event-fx
+  ::set-llm-condition-config
+  (fn [_ [_ api-client sheet-id node-id instruction reads model]]
+    {::sheet-fx/set-llm-condition-config {:api-client api-client
+                                          :sheet-id sheet-id
+                                          :node-id node-id
+                                          :instruction instruction
+                                          :reads reads
+                                          :model model
+                                          :on-success [::node-command-success api-client sheet-id]
+                                          :on-failure [::node-operation-failure]}}))
 
 ;; =============================================================================
 ;; Blackboard Events

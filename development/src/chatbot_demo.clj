@@ -1,17 +1,20 @@
 (ns chatbot-demo
-  "Chatbot with conversational memory using the behavior tree DSL.
+  "Comprehensive DSL demo - demonstrates ALL behavior tree node types in one workflow.
 
-   Demonstrates tracing with multiple node types:
-   - Sequence (control node)
-   - Parallel (control node)
-   - Map-each (control node)
-   - AI nodes (leaf nodes with generation events)
-   - Code node (leaf node with span event)
+   Node types demonstrated:
+   - sequence (control node)
+   - parallel (control node)
+   - fallback (control node)
+   - map-each (control node with :from :as :into)
+   - condition (static check)
+   - llm-condition (LLM-based yes/no decision)
+   - llm (leaf node with generation)
+   - code (leaf node with custom function)
 
    Usage:
-     (def sheet-id (build-chatbot!))
-     (def session (create-session sheet-id :system-prompt \"You are helpful.\"))
-     (chat! session \"Hello!\")"
+     (def sheet-id (build-demo!))
+     (run-demo sheet-id \"Hello, this is a short message.\")
+     (run-demo sheet-id \"URGENT: The server is down and we need help immediately!\")"
   (:require [ai.obney.workshop.sheet-service.interface :as sheet]
             [repl-stuff :as rs]))
 
@@ -19,132 +22,168 @@
 ;; Code Executor Functions
 ;; =============================================================================
 
-(defn append-to-history
-  "Appends the current exchange to conversation history."
+(defn count-words
+  "Count words in text."
   [{:keys [inputs]}]
-  (let [history (or (get inputs "conversation-history") [])
-        user-msg (get inputs "user-message")
-        assistant-msg (get inputs "assistant-response")]
-    {"conversation-history"
-     (conj history
-           {:role :user :content user-msg}
-           {:role :assistant :content assistant-msg})}))
+  (let [text (get inputs "input-text" "")]
+    {"word-count" (count (clojure.string/split text #"\s+"))}))
 
 ;; =============================================================================
-;; Workflow Definition
+;; Unified Demo Workflow - All DSL Features
 ;; =============================================================================
 
-(def chatbot-workflow
-  (sheet/workflow "conversational-chatbot"
+(def demo-workflow
+  "Demonstrates ALL DSL node types in one workflow:
+   - SEQUENCE: orchestrates the main flow
+   - CODE: counts words in input
+   - FALLBACK + CONDITION: branches based on word count (>50 = summarize)
+   - PARALLEL: extracts keywords AND classifies theme concurrently
+   - MAP-EACH: classifies each keyword individually
+   - FALLBACK + LLM-CONDITION: detects urgency → urgent vs normal response
+   - LLM: multiple generation nodes throughout"
+  (sheet/workflow "comprehensive-demo"
     (sheet/blackboard
-      {:system-prompt :string
-       :conversation-history [:vector [:map
-                                       [:role [:enum :user :assistant]]
-                                       [:content :string]]]
-       :user-message :string
-       :sentiment [:enum "positive" "negative" "neutral"]
-       :intent [:enum "question" "statement" "greeting" "farewell" "other"]
-       ;; For map-each demo: extract and classify topics
-       :topics [:vector :string]
-       :current-topic :string
-       :topic-category [:enum "technical" "personal" "business" "general"]
-       :classified-topics [:vector [:map
-                                    [:topic-category :string]]]
-       :assistant-response :string})
+      {:input-text :string
+       :word-count :int
+       :summary :string
+       :text-theme [:enum "technical" "personal" "business" "creative" "general"]
+       :keywords [:vector :string]
+       :current-keyword :string
+       :keyword-type [:enum "noun" "verb" "adjective" "other"]
+       :analyzed-keywords [:vector [:map [:keyword-type :string]]]
+       :final-response :string})
 
+    ;; SEQUENCE: Main orchestration
     (sheet/sequence
-      ;; Step 1: Analyze user message in parallel
+
+      ;; Step 1: CODE - count words
+      (sheet/code "count-words"
+        :fn "chatbot-demo/count-words"
+        :reads ["input-text"]
+        :writes ["word-count"])
+
+      ;; Step 2: FALLBACK + CONDITION - branch based on text length
+      (sheet/fallback
+        ;; Try: If long text (>50 words), summarize it
+        (sheet/sequence
+          (sheet/condition "check-long"
+            :check {:key "word-count" :op :gt :value 50})
+          (sheet/llm "summarize"
+            :model "google/gemini-2.0-flash-001"
+            :instruction "Summarize this long text in 2-3 sentences."
+            :reads ["input-text"]
+            :writes ["summary"]))
+
+        ;; Else: Short text, just acknowledge
+        (sheet/llm "acknowledge-short"
+          :model "google/gemini-2.0-flash-001"
+          :instruction "This is a short text. Simply acknowledge what the user said in one sentence."
+          :reads ["input-text"]
+          :writes ["summary"]))
+
+      ;; Step 3: PARALLEL - extract keywords AND classify theme concurrently
       (sheet/parallel
-        (sheet/ai-node "analyze-sentiment"
+        (sheet/llm "extract-keywords"
           :model "google/gemini-2.0-flash-001"
-          :instruction "Classify the emotional tone of the user's message."
-          :reads ["user-message"]
-          :writes ["sentiment"])
+          :instruction "Extract 2-4 important keywords from the text."
+          :reads ["input-text"]
+          :writes ["keywords"])
 
-        (sheet/ai-node "classify-intent"
+        (sheet/llm "classify-theme"
           :model "google/gemini-2.0-flash-001"
-          :instruction "Classify the intent of the user's message."
-          :reads ["user-message"]
-          :writes ["intent"])
+          :instruction "Classify the overall theme of this text."
+          :reads ["input-text"]
+          :writes ["text-theme"]))
 
-        (sheet/ai-node "extract-topics"
+      ;; Step 4: MAP-EACH - classify each keyword
+      (sheet/map-each "analyze-keywords"
+        :from "keywords"
+        :as "current-keyword"
+        :into "analyzed-keywords"
+        (sheet/llm "classify-keyword"
           :model "google/gemini-2.0-flash-001"
-          :instruction "Extract 1-3 key topics or subjects mentioned in the user's message. Return as a list of short phrases."
-          :reads ["user-message"]
-          :writes ["topics"]))
+          :instruction "Classify this keyword as noun, verb, adjective, or other."
+          :reads ["current-keyword"]
+          :writes ["keyword-type"]))
 
-      ;; Step 2: Classify each topic using map-each
-      (sheet/map-each "classify-topics"
-        :source "topics"
-        :item "current-topic"
-        :output "classified-topics"
-        :concurrency 2
+      ;; Step 5: FALLBACK + LLM-CONDITION - urgent vs normal response
+      (sheet/fallback
+        ;; Try: If urgent, respond with high priority
+        (sheet/sequence
+          (sheet/llm-condition "is-urgent?"
+            :model "google/gemini-2.0-flash-001"
+            :instruction "Is this message urgent, time-sensitive, or requiring immediate attention?"
+            :reads ["input-text"])
+          (sheet/llm "urgent-response"
+            :model "google/gemini-2.0-flash-001"
+            :instruction "This is URGENT. Generate a high-priority response acknowledging urgency, using the summary, theme, and keywords for context."
+            :reads ["summary" "text-theme" "analyzed-keywords"]
+            :writes ["final-response"]))
 
-        (sheet/ai-node "classify-topic"
+        ;; Else: Normal response
+        (sheet/llm "normal-response"
           :model "google/gemini-2.0-flash-001"
-          :instruction "Classify this topic into a category."
-          :reads ["current-topic"]
-          :writes ["topic-category"]))
-
-      ;; Step 3: Generate response informed by analysis
-      (sheet/ai-node "respond"
-        :model "google/gemini-2.0-flash-001"
-        :instruction "Generate a conversational response. Adapt tone based on sentiment, intent, and the classified topics."
-        :reads ["system-prompt" "conversation-history" "user-message" "sentiment" "intent" "classified-topics"]
-        :writes ["assistant-response"])
-
-      ;; Step 4: Update history
-      (sheet/code-node "update-history"
-        :fn "chatbot-demo/append-to-history"
-        :reads ["conversation-history" "user-message" "assistant-response"]
-        :writes ["conversation-history"]))))
+          :instruction "Generate a helpful response based on the summary, theme, and analyzed keywords."
+          :reads ["summary" "text-theme" "analyzed-keywords"]
+          :writes ["final-response"])))))
 
 ;; =============================================================================
 ;; API
 ;; =============================================================================
 
-(defn build-chatbot!
-  "Build the chatbot workflow. Returns sheet-id (visible in UI)."
+(defn build-demo!
+  "Build the demo workflow. Returns sheet-id."
   []
-  (sheet/build-workflow!! rs/context chatbot-workflow))
+  (sheet/build-workflow!! rs/context demo-workflow))
 
-(defn create-session
-  "Create a chat session for a sheet-id."
-  [sheet-id & {:keys [system-prompt]
-               :or {system-prompt "You are a helpful assistant."}}]
-  {:sheet-id sheet-id
-   :system-prompt system-prompt
-   :history (atom [])})
-
-(defn chat!
-  "Send a message and get a response. Updates session history."
-  [session message]
-  (let [{:keys [sheet-id system-prompt history]} session
-        result (sheet/execute rs/context sheet-id
-                 {"user-message" message
-                  "system-prompt" system-prompt
-                  "conversation-history" @history})]
+(defn run-demo
+  "Run the demo with input text. Returns analysis results."
+  [sheet-id text]
+  (let [result (sheet/execute rs/context sheet-id {"input-text" text})]
     (if (= :success (:status result))
-      (let [outputs (:outputs result)]
-        (reset! history (get outputs "conversation-history"))
-        (get outputs "assistant-response"))
-      (throw (ex-info "Chat failed" {:error (:error result)})))))
-
-(defn get-history [session] @(:history session))
-(defn clear-history! [session] (reset! (:history session) []))
+      {:word-count (get-in result [:outputs "word-count"])
+       :summary (get-in result [:outputs "summary"])
+       :text-theme (get-in result [:outputs "text-theme"])
+       :keywords (get-in result [:outputs "keywords"])
+       :analyzed-keywords (get-in result [:outputs "analyzed-keywords"])
+       :response (get-in result [:outputs "final-response"])}
+      (throw (ex-info "Demo failed" {:error (:error result)})))))
 
 (comment
-  
-  (def sheet-id (build-chatbot!))
-  
-  (def session (create-session sheet-id))
+  ;; ==========================================================================
+  ;; Demo - All DSL Features in One Workflow
+  ;; ==========================================================================
+  (def sheet-id (build-demo!))
 
-  (chat! session "Analyze this: Thanks, Lucas! I'm looking forward to working with everyone here and will be in touch soon about January meeting availability.
+  ;; Short, non-urgent text
+  ;; - CODE counts words (<50)
+  ;; - CONDITION fails → FALLBACK to acknowledge-short
+  ;; - PARALLEL extracts keywords + theme
+  ;; - MAP-EACH classifies keywords
+  ;; - LLM-CONDITION returns false → FALLBACK to normal-response
+  (run-demo sheet-id "Hello, this is a short message about programming.")
 
-Warmly,
-Elin")
+  ;; Short, urgent text
+  ;; - CODE counts words (<50)
+  ;; - CONDITION fails → FALLBACK to acknowledge-short
+  ;; - PARALLEL extracts keywords + theme
+  ;; - MAP-EACH classifies keywords
+  ;; - LLM-CONDITION returns true → urgent-response
+  (run-demo sheet-id "URGENT: Server is down! Need immediate help!")
+
+  ;; Long, non-urgent text (>50 words)
+  ;; - CODE counts words (>50)
+  ;; - CONDITION passes → summarize
+  ;; - PARALLEL extracts keywords + theme
+  ;; - MAP-EACH classifies keywords
+  ;; - LLM-CONDITION returns false → FALLBACK to normal-response
+  (run-demo sheet-id
+    "This is a much longer piece of text that contains more than fifty words.
+     It discusses various topics including technology, programming, and software development.
+     We need to implement the new feature by Friday, test it thoroughly, and deploy to production.
+     The team should also review the documentation and update the API endpoints.
+     Additionally, please schedule a meeting with the stakeholders to discuss progress.")
   
-  
-  
-  
+  1
+
   "")

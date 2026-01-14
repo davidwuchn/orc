@@ -196,6 +196,16 @@
    :retry {:max-attempts max-attempts
            :backoff-ms backoff-ms}})
 
+(defn make-set-node-check-command
+  "Create a set-node-check command."
+  [sheet-id node-id check]
+  {:command/name :sheet/set-node-check
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :node-id node-id
+   :check check})
+
 (defn make-set-parallel-config-command
   "Create a set-parallel-config command."
   [sheet-id node-id & {:keys [success-policy failure-policy]}]
@@ -219,6 +229,18 @@
            :item-key item-key
            :output-key output-key}
     max-concurrency (assoc :max-concurrency max-concurrency)))
+
+(defn make-set-llm-condition-config-command
+  "Create a set-llm-condition-config command."
+  [sheet-id node-id instruction reads & {:keys [model]}]
+  (cond-> {:command/name :sheet/set-llm-condition-config
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id
+           :instruction instruction
+           :reads (vec reads)}
+    model (assoc :model model)))
 
 ;; =============================================================================
 ;; Factory Functions - Blackboard Commands

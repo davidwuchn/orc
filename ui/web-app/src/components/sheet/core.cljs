@@ -49,6 +49,7 @@
     :sequence "S"
     :fallback "F"
     :condition "?"
+    :llm-condition "?"
     :parallel "P"
     :map-each "M"
     "?"))
@@ -59,6 +60,7 @@
     :sequence "bg-purple-100 border-purple-300"
     :fallback "bg-orange-100 border-orange-300"
     :condition "bg-yellow-100 border-yellow-300"
+    :llm-condition "bg-amber-100 border-amber-300"
     :parallel "bg-green-100 border-green-300"
     :map-each "bg-teal-100 border-teal-300"
     "bg-gray-100"))
@@ -755,6 +757,11 @@
                            (let [num-children (count (:children-ids node))]
                              (rf/dispatch [::sheet-events/create-node api-client sheet-id child-type (:id node) num-children])))
 
+        handle-add-leaf-with-executor (fn [executor]
+                                        (let [num-children (count (:children-ids node))]
+                                          (rf/dispatch [::sheet-events/create-leaf-with-executor
+                                                        api-client sheet-id (:id node) num-children executor])))
+
         handle-delete (fn []
                         (rf/dispatch [::sheet-events/delete-node api-client sheet-id (:id node)]))
 
@@ -782,7 +789,12 @@
                                                     api-client sheet-id (:id node)
                                                     source-key item-key output-key
                                                     (when (seq max-concurrency)
-                                                      (js/parseInt max-concurrency))]))]
+                                                      (js/parseInt max-concurrency))]))
+
+        handle-save-llm-condition-config (fn []
+                                           (rf/dispatch [::sheet-events/set-llm-condition-config
+                                                         api-client sheet-id (:id node)
+                                                         instruction-value reads-value model-value]))]
 
     (if node
       ($ :div {:class "w-80 border-l bg-white h-full overflow-auto"}
@@ -977,6 +989,48 @@
                                    :disabled (empty? check-key)}
                     "Save Check")))
 
+            ;; LLM Condition-specific: Configuration
+            (when (= :llm-condition (:type node))
+              ($ :div {:class "space-y-3"}
+                 ($ label/Label "LLM Condition Configuration")
+
+                 ;; Model selector
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Model (OpenRouter)")
+                    ($ input/Input {:value model-value
+                                    :on-change #(set-model-value! (.. % -target -value))
+                                    :placeholder "e.g., google/gemini-2.5-flash"}))
+
+                 ;; Instruction
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Question (yes/no)")
+                    ($ textarea/Textarea {:value instruction-value
+                                          :on-change #(set-instruction-value! (.. % -target -value))
+                                          :rows 3
+                                          :placeholder "Is the user's message urgent?"}))
+
+                 ;; Reads
+                 ($ :div {:class "space-y-1"}
+                    ($ :span {:class "text-xs text-gray-500"} "Reads (context)")
+                    ($ :div {:class "flex flex-wrap gap-1"}
+                       (for [k reads-value]
+                         ($ badge/Badge {:key k :variant "secondary" :class "cursor-pointer"
+                                         :on-click #(set-reads-value! (vec (remove #{k} reads-value)))}
+                            (str k " x")))
+                       ($ select/Select {:value ""
+                                         :onValueChange #(when (seq %)
+                                                           (set-reads-value! (conj reads-value %)))}
+                          ($ select/SelectTrigger {:class "w-20 h-6 text-xs"}
+                             ($ select/SelectValue {:placeholder "+"}))
+                          ($ select/SelectContent
+                             (for [k blackboard-keys]
+                               (when-not (some #{k} reads-value)
+                                 ($ select/SelectItem {:key k :value k} k)))))))
+
+                 ($ button/Button {:size "sm" :on-click handle-save-llm-condition-config
+                                   :disabled (empty? instruction-value)}
+                    "Save Configuration")))
+
             ;; Parallel-specific: Policy configuration
             (when (= :parallel (:type node))
               ($ :div {:class "space-y-3"}
@@ -1051,27 +1105,47 @@
 
             ;; Add child (for composite nodes)
             (when (#{:sequence :fallback :parallel :map-each} (:type node))
-              ($ :div {:class "space-y-2"}
+              ($ :div {:class "space-y-3"}
                  ($ label/Label "Add Child")
-                 ($ :div {:class "flex gap-2 flex-wrap"}
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :leaf)}
-                       "+ Leaf")
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :condition)}
-                       "+ Cond")
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :sequence)}
-                       "+ Seq")
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :fallback)}
-                       "+ Fall")
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :parallel)}
-                       "+ Para")
-                    ($ button/Button {:size "sm" :variant "outline"
-                                      :on-click #(handle-add-child :map-each)}
-                       "+ Map"))))
+
+                 ;; Actions
+                 ($ :div {:class "space-y-1"}
+                    ($ :p {:class "text-xs text-gray-500 font-medium uppercase tracking-wide"} "Actions")
+                    ($ :div {:class "grid grid-cols-2 gap-1"}
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-leaf-with-executor :ai)}
+                          "LLM")
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-leaf-with-executor :code)}
+                          "Code")))
+
+                 ;; Control Flow
+                 ($ :div {:class "space-y-1"}
+                    ($ :p {:class "text-xs text-gray-500 font-medium uppercase tracking-wide"} "Control Flow")
+                    ($ :div {:class "grid grid-cols-2 gap-1"}
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :sequence)}
+                          "Sequence")
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :parallel)}
+                          "Parallel")
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :fallback)}
+                          "Fallback")
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :map-each)}
+                          "Map Each")))
+
+                 ;; Conditions
+                 ($ :div {:class "space-y-1"}
+                    ($ :p {:class "text-xs text-gray-500 font-medium uppercase tracking-wide"} "Conditions")
+                    ($ :div {:class "grid grid-cols-2 gap-1"}
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :condition)}
+                          "Condition")
+                       ($ button/Button {:size "sm" :variant "outline"
+                                         :on-click #(handle-add-child :llm-condition)}
+                          "LLM Condition")))))
 
             ($ separator/Separator)
 

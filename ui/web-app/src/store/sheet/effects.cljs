@@ -93,6 +93,34 @@
             (rf/dispatch (conj on-success response))))))))
 
 (rf/reg-fx
+  ::create-leaf-with-executor
+  (fn [{:keys [api-client sheet-id parent-id index executor on-success on-failure]}]
+    (when api-client
+      (go
+        ;; Step 1: Create the leaf node
+        (let [create-response (<! (api/command api-client
+                                               (cond-> {:command/name :sheet/create-node
+                                                        :sheet-id sheet-id
+                                                        :type :leaf}
+                                                 parent-id (assoc :parent-id parent-id)
+                                                 index (assoc :index index))))]
+          (if (anomaly? create-response)
+            (rf/dispatch (conj on-failure create-response))
+            ;; Step 2: Extract node-id and set executor
+            (let [node-id (get-in create-response [:command-result :events 0 :event/body :node-id])]
+              (if node-id
+                (let [executor-response (<! (api/command api-client
+                                                         {:command/name :sheet/set-node-executor
+                                                          :sheet-id sheet-id
+                                                          :node-id node-id
+                                                          :executor executor}))]
+                  (if (anomaly? executor-response)
+                    (rf/dispatch (conj on-failure executor-response))
+                    (rf/dispatch (conj on-success executor-response))))
+                ;; Fallback: just succeed with create response
+                (rf/dispatch (conj on-success create-response))))))))))
+
+(rf/reg-fx
   ::move-node
   (fn [{:keys [api-client sheet-id node-id new-parent-id index on-success on-failure]}]
     (when api-client
@@ -264,6 +292,22 @@
                                                  :item-key item-key
                                                  :output-key output-key}
                                           max-concurrency (assoc :max-concurrency max-concurrency))))]
+          (if (anomaly? response)
+            (rf/dispatch (conj on-failure response))
+            (rf/dispatch (conj on-success response))))))))
+
+(rf/reg-fx
+  ::set-llm-condition-config
+  (fn [{:keys [api-client sheet-id node-id instruction reads model on-success on-failure]}]
+    (when api-client
+      (go
+        (let [response (<! (api/command api-client
+                                        (cond-> {:command/name :sheet/set-llm-condition-config
+                                                 :sheet-id sheet-id
+                                                 :node-id node-id
+                                                 :instruction instruction
+                                                 :reads reads}
+                                          model (assoc :model model))))]
           (if (anomaly? response)
             (rf/dispatch (conj on-failure response))
             (rf/dispatch (conj on-success response))))))))

@@ -90,9 +90,10 @@
 ;; =============================================================================
 
 ;; Node builders
-(def ai-node dsl/ai-node)
-(def code-node dsl/code-node)
+(def llm dsl/llm)
+(def code dsl/code)
 (def condition dsl/condition)
+(def llm-condition dsl/llm-condition)
 (def sequence dsl/sequence)
 (def fallback dsl/fallback)
 (def parallel dsl/parallel)

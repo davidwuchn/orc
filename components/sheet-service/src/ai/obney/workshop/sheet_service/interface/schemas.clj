@@ -14,7 +14,7 @@
 
 (def node-type
   "Behavior tree node types"
-  [:enum :leaf :sequence :fallback :condition :parallel :map-each])
+  [:enum :leaf :sequence :fallback :condition :llm-condition :parallel :map-each])
 
 (def executor-type
   "Executor types for leaf nodes"
@@ -254,6 +254,14 @@
     [:output-key :string]
     [:max-concurrency {:optional true} :int]]
 
+   :sheet/set-llm-condition-config
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:instruction :string]
+    [:reads [:vector :string]]
+    [:model {:optional true} :string]]
+
    ;; -------------------------------------------------------------------------
    ;; Blackboard Commands
    ;; -------------------------------------------------------------------------
@@ -458,6 +466,17 @@
     [:previous-item-key {:optional true} :string]
     [:previous-output-key {:optional true} :string]
     [:previous-max-concurrency {:optional true} :int]]
+
+   :sheet/llm-condition-config-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:instruction :string]
+    [:reads [:vector :string]]
+    [:model {:optional true} :string]
+    [:previous-instruction {:optional true} :string]
+    [:previous-reads {:optional true} [:vector :string]]
+    [:previous-model {:optional true} :string]]
 
    ;; -------------------------------------------------------------------------
    ;; Blackboard Events

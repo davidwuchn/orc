@@ -12,23 +12,23 @@
           :recommendations [:vector :map]})
 
        (sequence
-         (code-node \"fetch-programs\"
+         (code \"fetch-programs\"
            :fn \"myapp.fns/fetch-programs\"
            :reads [\"student-profile\"]
            :writes [\"programs\"])
 
          (map-each \"score-programs\"
-           :source \"programs\"
-           :item \"current-program\"
-           :output \"scored-programs\"
-           :concurrency 5
+           :from \"programs\"
+           :as \"current-program\"
+           :into \"scored-programs\"
+           :parallel 5
            (parallel
-             (ai-node \"academic\"
+             (llm \"academic\"
                :model \"google/gemini-2.5-flash\"
                :instruction \"Score academic fit 0-100\"
                :reads [\"current-program\" \"student-profile\"]
                :writes [\"academic-score\"])
-             (ai-node \"career\"
+             (llm \"career\"
                :model \"google/gemini-2.5-flash\"
                :instruction \"Score career alignment 0-100\"
                :reads [\"current-program\" \"student-profile\"]
@@ -49,12 +49,12 @@
 ;; Node Builders (Data Structures)
 ;; =============================================================================
 
-(defn ai-node
-  "Define an AI executor leaf node.
+(defn llm
+  "Define an LLM executor leaf node.
 
    Options:
      :model - OpenRouter model ID (e.g., \"google/gemini-2.5-flash\")
-     :instruction - Prompt for the AI
+     :instruction - Prompt for the LLM
      :reads - Vector of blackboard keys to read
      :writes - Vector of blackboard keys to write
      :retry - {:max-attempts n :backoff-ms [100 500]}"
@@ -68,7 +68,7 @@
    :writes (vec writes)
    :retry retry})
 
-(defn code-node
+(defn code
   "Define a code executor leaf node.
 
    Options:
@@ -96,6 +96,20 @@
    :name name
    :check check
    :on-fail (or on-fail :failure)})
+
+(defn llm-condition
+  "Define an LLM condition node - uses LLM to evaluate true/false.
+
+   Options:
+     :model - OpenRouter model ID (e.g., \"google/gemini-2.5-flash\")
+     :instruction - Prompt describing what to evaluate (should be a yes/no question)
+     :reads - Vector of blackboard keys to read as context"
+  [name & {:keys [model instruction reads]}]
+  {:node-type :llm-condition
+   :name name
+   :model model
+   :instruction instruction
+   :reads (vec reads)})
 
 (defn sequence
   "Define a sequence node (runs children in order, fails on first failure)."
@@ -129,10 +143,10 @@
   "Define a map-each node (iterates over a list).
 
    Options:
-     :source - Blackboard key containing the source list
-     :item - Blackboard key for the current item
-     :output - Blackboard key for the results list
-     :concurrency - Max parallel executions (default 1 = sequential)"
+     :from - Blackboard key containing the source list
+     :as - Blackboard key for the current item
+     :into - Blackboard key for the results list
+     :parallel - Max parallel executions (default 1 = sequential)"
   [name & args]
   (let [[opts children] (if (keyword? (first args))
                           ;; Parse keyword args
@@ -143,10 +157,10 @@
                           [{} args])]
     {:node-type :map-each
      :name name
-     :source-key (:source opts)
-     :item-key (:item opts)
-     :output-key (:output opts)
-     :max-concurrency (:concurrency opts)
+     :source-key (:from opts)
+     :item-key (:as opts)
+     :output-key (:into opts)
+     :max-concurrency (:parallel opts)
      :children (vec children)}))
 
 ;; =============================================================================
@@ -225,10 +239,17 @@
               (:max-attempts retry) (:backoff-ms retry)))))
 
       :condition
+      (when-let [check (:check node)]
+        (h/run-and-apply! ctx
+          (h/make-set-node-check-command sheet-id node-id check)))
+
+      :llm-condition
       (do
-        ;; Condition nodes store check in node data - would need a command for this
-        ;; For now, skip condition configuration
-        nil)
+        ;; Set llm-condition config
+        (h/run-and-apply! ctx
+          (h/make-set-llm-condition-config-command sheet-id node-id
+            (:instruction node) (:reads node)
+            :model (:model node))))
 
       :parallel
       (do
@@ -350,6 +371,12 @@
           (merge (cond-> {}
                    (:check node) (assoc :check (:check node))
                    (:on-fail node) (assoc :on-fail (:on-fail node))))
+          ;; LLM-condition-specific
+          (= :llm-condition (:type node))
+          (merge (cond-> {}
+                   (:instruction node) (assoc :instruction (:instruction node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (:model node) (assoc :model (:model node))))
           ;; Parallel-specific
           (= :parallel (:type node))
           (merge {:success-policy (or (:success-policy node) :all)
@@ -429,7 +456,16 @@
               (:max-attempts retry) (:backoff-ms retry)))))
 
       :condition
-      nil ;; TODO: add set-check command when implemented
+      (when-let [check (:check node)]
+        (h/run-and-apply! ctx
+          (h/make-set-node-check-command sheet-id node-id check)))
+
+      :llm-condition
+      (when (:instruction node)
+        (h/run-and-apply! ctx
+          (h/make-set-llm-condition-config-command sheet-id node-id
+            (:instruction node) (vec (:reads node))
+            :model (:model node))))
 
       :parallel
       (do

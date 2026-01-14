@@ -458,6 +458,42 @@
                   (:output-key node) (assoc :previous-output-key (:output-key node))
                   (:max-concurrency node) (assoc :previous-max-concurrency (:max-concurrency node)))})]})))
 
+(defcommand :sheet set-llm-condition-config
+  "Set configuration for an llm-condition node."
+  [{{:keys [sheet-id node-id instruction reads model]} :command
+    :keys [event-store]}]
+  (let [node (rm/get-node event-store sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key event-store sheet-id)
+        all-keys (set (keys blackboard))
+        unknown-reads (remove all-keys reads)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :llm-condition (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only llm-condition nodes can have llm-condition configuration"}
+
+      (seq unknown-reads)
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Unknown blackboard keys in reads: " (vec unknown-reads))}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/llm-condition-config-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :instruction instruction
+                         :reads (vec reads)}
+                  model (assoc :model model)
+                  (:instruction node) (assoc :previous-instruction (:instruction node))
+                  (seq (:reads node)) (assoc :previous-reads (:reads node))
+                  (:model node) (assoc :previous-model (:model node)))})]})))
+
 ;; =============================================================================
 ;; Blackboard Commands
 ;; =============================================================================

@@ -310,6 +310,36 @@
               (let [cond-result (execute-condition-sync node blackboard)]
                 (assoc cond-result :blackboard blackboard))
 
+              :llm-condition
+              (let [provider (:dscloj-provider context)
+                    inputs (gather-inputs node blackboard)
+                    start-time (System/currentTimeMillis)
+                    llm-result (if provider
+                                 (executor/execute-llm-condition node blackboard provider
+                                                                 :context context)
+                                 {:status :failure :error "No DSCloj provider configured"})
+                    end-time (System/currentTimeMillis)
+                    passed? (and (= :success (:status llm-result))
+                                 (:result llm-result))]
+                ;; Trace the LLM condition execution
+                (when trace-ctx
+                  (tracing/trace-node! trace-ctx
+                                       {:node-id node-id
+                                        :node-name (:name node)
+                                        :node-type :llm-condition
+                                        :executor :ai
+                                        :model (:model node)
+                                        :start-time start-time
+                                        :end-time end-time
+                                        :inputs inputs
+                                        :outputs {:result (:result llm-result)}
+                                        :status (if passed? :success :failure)
+                                        :error (:error llm-result)
+                                        :parent-observation-id parent-obs-id}))
+                {:status (if passed? :success :failure)
+                 :blackboard blackboard
+                 :error (:error llm-result)})
+
               :sequence
               (execute-sequence-sync node nodes-by-id blackboard context node-id)
 
@@ -325,8 +355,8 @@
               ;; Unknown type
               {:status :failure :error (str "Unknown node type: " (:type node)) :blackboard blackboard})
             end-time (System/currentTimeMillis)]
-        ;; Trace composite nodes (non-leaf)
-        (when (and trace-ctx (not= :leaf (:type node)))
+        ;; Trace composite nodes (non-leaf, non-llm-condition which traces itself)
+        (when (and trace-ctx (not (#{:leaf :llm-condition} (:type node))))
           (tracing/trace-node! trace-ctx
                                {:node-id node-id
                                 :node-name (:name node)

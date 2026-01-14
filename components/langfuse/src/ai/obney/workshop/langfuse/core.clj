@@ -20,7 +20,7 @@
                 (str host "/api/public/ingestion")
                 {:basic-auth [public-key secret-key]
                  :content-type :json
-                 :form-params {:batch events}
+                 :body (json/write-str {:batch events})
                  :throw-exceptions false})]
       (if (< (:status resp) 300)
         {:success true :body (:body resp)}
