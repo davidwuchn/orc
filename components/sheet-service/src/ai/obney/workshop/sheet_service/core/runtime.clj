@@ -79,7 +79,7 @@
 
 (defn- execute-sequence-sync
   "Execute a sequence node synchronously."
-  [node nodes-by-id blackboard context]
+  [node nodes-by-id blackboard context parent-node-id]
   (let [children-ids (:children-ids node)]
     (if (empty? children-ids)
       {:status :success :blackboard blackboard}
@@ -88,7 +88,7 @@
         (if (empty? remaining)
           {:status :success :blackboard current-bb}
           (let [child-id (first remaining)
-                result (execute-node-sync child-id nodes-by-id current-bb context)]
+                result (execute-node-sync child-id nodes-by-id current-bb context parent-node-id)]
             (case (:status result)
               :success (recur (rest remaining) (:blackboard result))
               :failure result
@@ -97,7 +97,7 @@
 
 (defn- execute-fallback-sync
   "Execute a fallback node synchronously."
-  [node nodes-by-id blackboard context]
+  [node nodes-by-id blackboard context parent-node-id]
   (let [children-ids (:children-ids node)]
     (if (empty? children-ids)
       {:status :failure :blackboard blackboard}
@@ -106,7 +106,7 @@
         (if (empty? remaining)
           {:status :failure :blackboard current-bb}
           (let [child-id (first remaining)
-                result (execute-node-sync child-id nodes-by-id current-bb context)]
+                result (execute-node-sync child-id nodes-by-id current-bb context parent-node-id)]
             (case (:status result)
               :success result
               :failure (recur (rest remaining) (:blackboard result))
@@ -133,7 +133,7 @@
 
 (defn- execute-parallel-sync
   "Execute a parallel node synchronously using futures for concurrency."
-  [node nodes-by-id blackboard context]
+  [node nodes-by-id blackboard context parent-node-id]
   (let [children-ids (:children-ids node)
         success-policy (or (:success-policy node) :all)
         failure-policy (or (:failure-policy node) :any)]
@@ -142,7 +142,7 @@
       ;; Execute all children in parallel using futures
       (let [futures (mapv (fn [child-id]
                             (future
-                              (execute-node-sync child-id nodes-by-id blackboard context)))
+                              (execute-node-sync child-id nodes-by-id blackboard context parent-node-id)))
                           children-ids)
             results (mapv deref futures)
             success-count (count (filter #(= :success (:status %)) results))
@@ -175,7 +175,7 @@
 
 (defn- execute-map-each-sync
   "Execute a map-each node synchronously."
-  [node nodes-by-id blackboard context]
+  [node nodes-by-id blackboard context parent-node-id]
   (let [source-key (:source-key node)
         item-key (:item-key node)
         output-key (:output-key node)
@@ -212,7 +212,7 @@
                            (let [item-bb (-> blackboard
                                              (assoc-in [item-key :value] item)
                                              (update-in [item-key :version] (fnil inc 0)))
-                                 result (execute-node-sync child-id nodes-by-id item-bb context)]
+                                 result (execute-node-sync child-id nodes-by-id item-bb context parent-node-id)]
                              (if (= :success (:status result))
                                ;; Collect all values written during subtree execution
                                ;; and merge them into the item
@@ -261,10 +261,12 @@
 (defn- execute-node-sync
   "Execute a single node synchronously.
    Returns {:status :success/:failure/:running :blackboard updated-bb :error ... :trace-data ...}"
-  [node-id nodes-by-id blackboard context]
+  [node-id nodes-by-id blackboard context & [parent-node-id]]
   (let [node (get nodes-by-id node-id)
         trace-ctx (:trace-ctx context)
-        start-time (System/currentTimeMillis)]
+        start-time (System/currentTimeMillis)
+        ;; Parent observation ID for Langfuse nesting
+        parent-obs-id (when parent-node-id (tracing/node-observation-id parent-node-id))]
     (if-not node
       {:status :failure :error (str "Node not found: " node-id) :blackboard blackboard}
       (let [result
@@ -290,7 +292,8 @@
                                         :inputs inputs
                                         :outputs (:outputs leaf-result)
                                         :status (:status leaf-result)
-                                        :error (:error leaf-result)}))
+                                        :error (:error leaf-result)
+                                        :parent-observation-id parent-obs-id}))
                 (if (= :success (:status leaf-result))
                   ;; Write outputs to blackboard
                   (let [new-bb (reduce (fn [bb [k v]]
@@ -309,16 +312,16 @@
                 (assoc cond-result :blackboard blackboard))
 
               :sequence
-              (execute-sequence-sync node nodes-by-id blackboard context)
+              (execute-sequence-sync node nodes-by-id blackboard context node-id)
 
               :fallback
-              (execute-fallback-sync node nodes-by-id blackboard context)
+              (execute-fallback-sync node nodes-by-id blackboard context node-id)
 
               :parallel
-              (execute-parallel-sync node nodes-by-id blackboard context)
+              (execute-parallel-sync node nodes-by-id blackboard context node-id)
 
               :map-each
-              (execute-map-each-sync node nodes-by-id blackboard context)
+              (execute-map-each-sync node nodes-by-id blackboard context node-id)
 
               ;; Unknown type
               {:status :failure :error (str "Unknown node type: " (:type node)) :blackboard blackboard})
@@ -336,7 +339,8 @@
                                 :inputs nil
                                 :outputs nil
                                 :status (:status result)
-                                :error (:error result)}))
+                                :error (:error result)
+                                :parent-observation-id parent-obs-id}))
         result))))
 
 ;; =============================================================================
@@ -373,10 +377,13 @@
   (let [start-time (System/currentTimeMillis)
         event-store (:event-store context)
 
+        ;; Use explicit langfuse-client, or fall back to one from context
+        effective-langfuse-client (or langfuse-client (:langfuse-client context))
+
         ;; Create trace context if tracing enabled
-        trace-ctx (when (or trace? langfuse-client)
-                    (if langfuse-client
-                      (tracing/create-trace-context langfuse-client)
+        trace-ctx (when (or trace? effective-langfuse-client)
+                    (if effective-langfuse-client
+                      (tracing/create-trace-context effective-langfuse-client)
                       (tracing/create-local-trace)))
 
         ;; Load sheet structure

@@ -1,6 +1,12 @@
 (ns chatbot-demo
   "Chatbot with conversational memory using the behavior tree DSL.
 
+   Demonstrates tracing with multiple node types:
+   - Sequence (control node)
+   - Parallel (control node)
+   - AI nodes (leaf nodes with generation events)
+   - Code node (leaf node with span event)
+
    Usage:
      (def sheet-id (build-chatbot!))
      (def session (create-session sheet-id :system-prompt \"You are helpful.\"))
@@ -9,7 +15,7 @@
             [repl-stuff :as rs]))
 
 ;; =============================================================================
-;; Code Executor Function
+;; Code Executor Functions
 ;; =============================================================================
 
 (defn append-to-history
@@ -35,15 +41,33 @@
                                        [:role [:enum :user :assistant]]
                                        [:content :string]]]
        :user-message :string
+       :sentiment :string  ;; positive, negative, or neutral
+       :intent :string     ;; question, statement, greeting, farewell, or other
        :assistant-response :string})
 
     (sheet/sequence
+      ;; Step 1: Analyze user message in parallel
+      (sheet/parallel
+        (sheet/ai-node "analyze-sentiment"
+          :model "google/gemini-2.0-flash-001"
+          :instruction "Classify the emotional tone of the user's message."
+          :reads ["user-message"]
+          :writes ["sentiment"])
+
+        (sheet/ai-node "classify-intent"
+          :model "google/gemini-2.0-flash-001"
+          :instruction "Classify the intent of the user's message."
+          :reads ["user-message"]
+          :writes ["intent"]))
+
+      ;; Step 2: Generate response informed by analysis
       (sheet/ai-node "respond"
         :model "google/gemini-2.0-flash-001"
-        :instruction "Generate a conversational response as the assistant."
-        :reads ["system-prompt" "conversation-history" "user-message"]
+        :instruction "Generate a conversational response. Adapt tone based on sentiment and intent."
+        :reads ["system-prompt" "conversation-history" "user-message" "sentiment" "intent"]
         :writes ["assistant-response"])
 
+      ;; Step 3: Update history
       (sheet/code-node "update-history"
         :fn "chatbot-demo/append-to-history"
         :reads ["conversation-history" "user-message" "assistant-response"]
@@ -89,7 +113,10 @@
   
   (def session (create-session sheet-id))
 
-  (chat! session "What did I just ask you?")
+  (chat! session "Analyze this: Thanks, Lucas! I'm looking forward to working with everyone here and will be in touch soon about January meeting availability.
+
+Warmly,
+Elin")
   
   
   

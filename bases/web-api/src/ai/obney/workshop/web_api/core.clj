@@ -13,6 +13,7 @@
             [ai.obney.workshop.jwt.interface :as jwt]
             [ai.obney.workshop.email-ses.interface :as email-ses]
             [ai.obney.workshop.crypto-kms.interface :as crypto-kms]
+            [ai.obney.workshop.langfuse.interface :as langfuse]
 
             ;; Service interfaces (loading these registers commands/queries via side effects)
             [ai.obney.workshop.user-service.interface :as user-service]
@@ -84,7 +85,8 @@
               ;; DSCloj provider for behavior tree leaf execution
               ;; Set :dscloj-provider env var to enable (e.g., "openrouter", "anthropic")
               :dscloj-provider (when-let [p (:dscloj-provider env)]
-                                 (keyword p))}
+                                 (keyword p))
+              :langfuse-client (ig/ref ::langfuse-client)}
 
    ::routes {:context (ig/ref ::context)}
 
@@ -96,7 +98,9 @@
 
    ::dspy {}
 
-   ::dscloj {}})
+   ::dscloj {}
+
+   ::langfuse-client {}})
 
 ;; -------------- ;;
 ;; Integrant Keys ;;
@@ -146,6 +150,16 @@
 (defmethod ig/init-key ::dscloj [_ _]
   (require '[dscloj.core :as dscloj])
   ((resolve 'dscloj/quick-setup!)))
+
+;; Langfuse client for tracing behavior tree executions
+(defmethod ig/init-key ::langfuse-client [_ _]
+  (let [client (langfuse/create-client
+                {:host (:langfuse/host env)
+                 :public-key (:langfuse/public-key env)
+                 :secret-key (:langfuse/secret-key env)})]
+    (when (:public-key client)
+      (u/log ::langfuse-tracing-enabled :host (:host client))
+      client)))
 
 (defmethod ig/init-key ::event-store [_ config]
   (es/start config))
