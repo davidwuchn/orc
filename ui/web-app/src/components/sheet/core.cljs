@@ -436,7 +436,7 @@
                                "bg-blue-100 text-blue-700 font-medium"
                                "bg-gray-100 text-gray-600 hover:bg-gray-200"))
                  :on-click #(on-change opt)}
-                (pr-str opt)))))
+                (str opt)))))
 
       ;; Maybe type (optional)
       (and (vector? schema) (= :maybe (first schema)))

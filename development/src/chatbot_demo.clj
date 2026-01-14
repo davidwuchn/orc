@@ -41,8 +41,8 @@
                                        [:role [:enum :user :assistant]]
                                        [:content :string]]]
        :user-message :string
-       :sentiment :string  ;; positive, negative, or neutral
-       :intent :string     ;; question, statement, greeting, farewell, or other
+       :sentiment [:enum "positive" "negative" "neutral"]
+       :intent [:enum "question" "statement" "greeting" "farewell" "other"]
        :assistant-response :string})
 
     (sheet/sequence
@@ -117,6 +117,7 @@
 
 Warmly,
 Elin")
+  
   
   
   

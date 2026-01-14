@@ -60,7 +60,7 @@
         (str "list of " (malli-schema->description (first args)))
 
         :enum
-        (str "one of: " (clojure.string/join ", " (map pr-str args)))
+        (str "one of: " (clojure.string/join ", " (map str args)))
 
         :maybe
         (str (malli-schema->description (first args)) " (optional)")

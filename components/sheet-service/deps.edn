@@ -1,5 +1,5 @@
 {:paths ["src" "resources"]
  :deps {io.github.ObneyAI/DSCloj {:git/url "https://github.com/ObneyAI/DSCloj"
-                                   :git/sha "dd3fe0df17f88b564eea999a749a3534380d80e3"}}
+                                  :git/sha "4ce50356403f128b679e6413569e514b57f38b50"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {}}}}
