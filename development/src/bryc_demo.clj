@@ -44,7 +44,11 @@
             [repl-stuff :as rs]
             [cheshire.core :as json]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [clojure.set :as set])
+  (:import [ai.djl.repository.zoo Criteria ZooModel]
+           [ai.djl.inference Predictor]
+           [ai.djl.huggingface.translator TextEmbeddingTranslatorFactory]))
 
 ;; =============================================================================
 ;; Data Loading Functions
@@ -58,6 +62,14 @@
       0.0
       (Double/parseDouble s))
     (catch Exception _ 0.0)))
+
+(defn parse-embedding
+  "Parse a JSON embedding string to a vector of doubles."
+  [s]
+  (when (and s (not (str/blank? s)) (not= s "null") (not= s "NA"))
+    (try
+      (vec (json/parse-string s))
+      (catch Exception _ nil))))
 
 (defn parse-csv-line
   "Parse a single CSV line, handling quoted fields with commas."
@@ -100,16 +112,23 @@
                    :institution (get m "institution-name")
                    :sector (get m "sector")
                    :award-level (get m "award_level")
+                   :award-level-name (get m "award_level_name")
                    :cip-code (get m "cip-code")
                    :tuition (parse-double-safe (get m "in-state-tuition"))
                    :earnings-y1 (parse-double-safe (get m "earnings_y1_median"))
                    :earnings-y5 (parse-double-safe (get m "earnings_y5_median"))
+                   :starting-income (parse-double-safe (get m "starting-income-annual"))
                    :acceptance-rate (parse-double-safe (get m "acceptance_rate"))
                    :act-25th (parse-double-safe (get m "act_composite_25th"))
                    :act-75th (parse-double-safe (get m "act_composite_75th"))
                    :address (get m "address")
                    :city (get m "city")
-                   :online-availability (get m "online-availability")})))
+                   :hbcu (= "Yes" (get m "historically-black-college-university"))
+                   :online-availability (get m "online-availability")
+                   :distance-from-baton-rouge-miles (parse-double-safe (get m "distance_from_baton_rouge_miles"))
+                   ;; Embeddings for semantic search (384 dimensions each)
+                   :primary-embedding (parse-embedding (get m "primary_embedding"))
+                   :institution-embedding (parse-embedding (get m "institution_embedding"))})))
          vec)))
 
 ;; Delay to load programs only once
@@ -122,6 +141,265 @@
     (json/parse-string (slurp path) true)))
 
 ;; Available students: reagan, aja, claude, maya, dylan, john, maddi, asha
+
+;; =============================================================================
+;; Semantic Search Functions (DJL-based, no Python needed)
+;; =============================================================================
+
+(defonce ^:private embedding-model-atom (atom nil))
+
+(defn- load-embedding-model!
+  "Load the DJL embedding model. Returns the model or throws on failure."
+  []
+  (println "[DJL] Loading embedding model (sentence-transformers/all-MiniLM-L6-v2)...")
+  (let [criteria (-> (Criteria/builder)
+                     (.setTypes String (Class/forName "[F"))
+                     (.optModelUrls "djl://ai.djl.huggingface.pytorch/sentence-transformers/all-MiniLM-L6-v2")
+                     (.optEngine "PyTorch")
+                     (.optTranslatorFactory (TextEmbeddingTranslatorFactory.))
+                     (.build))
+        model (.loadModel criteria)]
+    (println "[DJL] Embedding model loaded successfully.")
+    model))
+
+(defn get-embedding-model
+  "Get the embedding model, loading it if necessary. Thread-safe."
+  []
+  (if-let [model @embedding-model-atom]
+    model
+    (locking embedding-model-atom
+      (if-let [model @embedding-model-atom]
+        model
+        (let [model (load-embedding-model!)]
+          (reset! embedding-model-atom model)
+          model)))))
+
+(defn reset-embedding-model!
+  "Reset the embedding model (useful for REPL development).
+   Closes the existing model if present."
+  []
+  (locking embedding-model-atom
+    (when-let [model @embedding-model-atom]
+      (println "[DJL] Closing existing embedding model...")
+      (try
+        (.close model)
+        (catch Exception e
+          (println "[DJL] Warning: Error closing model:" (.getMessage e)))))
+    (reset! embedding-model-atom nil)
+    (println "[DJL] Embedding model reset. Will reload on next use.")))
+
+;; Vector Math Functions
+(defn dot-product
+  "Compute dot product of two vectors."
+  [a b]
+  (reduce + (map * a b)))
+
+(defn magnitude
+  "Compute magnitude (L2 norm) of a vector."
+  [v]
+  (Math/sqrt (reduce + (map #(* % %) v))))
+
+(defn cosine-similarity
+  "Compute cosine similarity between two vectors. Returns 0.0 if either vector has zero magnitude."
+  [a b]
+  (let [dot (dot-product a b)
+        mag-a (magnitude a)
+        mag-b (magnitude b)]
+    (if (or (zero? mag-a) (zero? mag-b))
+      0.0
+      (/ dot (* mag-a mag-b)))))
+
+;; Query Embedding Generation
+(defn get-query-embedding
+  "Generate a 384-dimension embedding for a single query text using DJL.
+   Creates a fresh predictor per call (predictors are not thread-safe).
+   Returns a Clojure vector of doubles, or nil on failure."
+  [text]
+  (try
+    (let [model (get-embedding-model)]
+      (with-open [predictor (.newPredictor model)]
+        (let [result (vec (.predict predictor text))]
+          (when (not= 384 (count result))
+            (println "[DJL] Warning: Expected 384 dimensions, got" (count result)))
+          result)))
+    (catch Exception e
+      (println "[DJL] Error generating embedding for text:" (subs text 0 (min 50 (count text))))
+      (println "[DJL] Exception:" (.getMessage e))
+      nil)))
+
+(defn get-query-embeddings-batch
+  "Generate 384-dimension embeddings for multiple texts.
+   Returns a vector of embedding vectors (nils filtered out)."
+  [texts]
+  (when (seq texts)
+    (println "[DJL] Generating embeddings for" (count texts) "keywords:" (vec texts))
+    (let [embeddings (mapv get-query-embedding texts)
+          valid-count (count (remove nil? embeddings))]
+      (println "[DJL] Generated" valid-count "/" (count texts) "embeddings successfully.")
+      embeddings)))
+
+;; Simple Porter-style Stemmer
+(defn simple-stem
+  "Simple stemmer that handles common English suffixes.
+   Reduces words to approximate root forms for matching."
+  [word]
+  (-> word
+      str/lower-case
+      (str/replace #"ing$" "")
+      (str/replace #"ed$" "")
+      (str/replace #"s$" "")
+      (str/replace #"tion$" "t")
+      (str/replace #"ment$" "")))
+
+;; Semantic Search
+(defn semantic-search
+  "Search programs using embedding similarity.
+   Returns top-k programs sorted by cosine similarity.
+   Combines title and institution similarities (institution weighted at 0.7).
+   Returns empty vector if query-embedding is nil."
+  [{:keys [query-embedding programs top-k]
+    :or {top-k 30}}]
+  (if (nil? query-embedding)
+    (do
+      (println "[semantic-search] Skipping - nil query embedding")
+      [])
+    (->> programs
+         (filter :primary-embedding)
+         (map (fn [prog]
+                (let [title-sim (cosine-similarity query-embedding (:primary-embedding prog))
+                      inst-sim (when (:institution-embedding prog)
+                                 (* 0.7 (cosine-similarity query-embedding (:institution-embedding prog))))
+                      combined (max title-sim (or inst-sim 0))]
+                  (assoc prog :semantic-score combined))))
+         (sort-by :semantic-score >)
+         (take top-k)
+         vec)))
+
+;; Keyword Search with Stemming
+(defn keyword-search
+  "Fuzzy keyword matching using stemming.
+   Scores programs by number of keyword stem matches in title + institution."
+  [{:keys [keywords programs top-k]
+    :or {top-k 20}}]
+  (let [stemmed-keywords (set (map simple-stem keywords))]
+    (->> programs
+         (map (fn [prog]
+                (let [text (str/lower-case (str (:program-title prog) " " (:institution prog)))
+                      words (str/split text #"\s+")
+                      stemmed (set (map simple-stem words))
+                      matches (count (set/intersection stemmed stemmed-keywords))]
+                  (assoc prog :keyword-score (* matches 2.0)))))  ;; Scale to 0-10 range
+         (filter #(pos? (:keyword-score %)))
+         (sort-by :keyword-score >)
+         (take top-k)
+         vec)))
+
+;; Helper Functions
+(defn extract-keywords
+  "Extract keywords from search strategies."
+  [strategies]
+  (->> strategies
+       (mapcat (fn [s]
+                 (cond
+                   (map? s) (or (:keywords s) [(:keyword s)])
+                   (string? s) [s]
+                   :else [])))
+       (remove nil?)
+       (map str/lower-case)
+       set))
+
+(defn merge-search-results
+  "Merge semantic and keyword results, keeping highest scores per program."
+  [semantic-results keyword-results]
+  (let [all-results (concat semantic-results keyword-results)
+        grouped (group-by :program-id all-results)]
+    (->> grouped
+         vals
+         (map (fn [progs]
+                (reduce (fn [best p]
+                          (-> best
+                              (update :semantic-score #(max (or % 0) (or (:semantic-score p) 0)))
+                              (update :keyword-score #(max (or % 0) (or (:keyword-score p) 0)))))
+                        (first progs)
+                        (rest progs))))
+         vec)))
+
+(defn apprenticeship-salary-boost
+  "Calculate salary boost for apprenticeships (0 to 0.5 based on starting salary).
+   Recognizes the value of earning salary vs paying tuition."
+  [starting-salary]
+  (if (and starting-salary (> starting-salary 20000))
+    (min (* (/ (- starting-salary 20000) 30000) 0.5) 0.5)
+    0.0))
+
+;; Preference Boosting
+(defn apply-preference-boosting
+  "Boost scores based on student preferences (color profile, HBCU, etc.)."
+  [{:keys [programs preference-weights]}]
+  (let [color-profile (get preference-weights "color-profile" (get preference-weights :color-profile))
+        degree-prefs (get color-profile "degree-level-preferences" (get color-profile :degree-level-preferences))
+        hbcu-weight (get preference-weights "hbcu-weight" (get preference-weights :hbcu-weight 0))]
+    (map (fn [prog]
+           (let [;; Degree level preference boost
+                 degree-boost (if-let [weight (get degree-prefs (:award-level-name prog))]
+                                (* weight 2.5)
+                                0.0)
+                 ;; HBCU preference boost
+                 hbcu-boost (if (and (pos? (or hbcu-weight 0)) (:hbcu prog))
+                              (* hbcu-weight 1.3)
+                              0.0)]
+             (assoc prog :preference-score (+ degree-boost hbcu-boost))))
+         programs)))
+
+;; Hybrid Scoring
+(defn calculate-final-scores
+  "Calculate final scores: 40% keyword + 30% semantic + 30% preference.
+   Includes apprenticeship enhancements and degree level multiplier.
+   Matches Python implementation 1:1."
+  [programs preference-weights]
+  (let [color-profile (get preference-weights "color-profile" (get preference-weights :color-profile))
+        degree-prefs (get color-profile "degree-level-preferences" (get color-profile :degree-level-preferences {}))
+        ;; Use Bachelor's as baseline (most common pathway)
+        baseline-weight (get degree-prefs "Bachelor's degree" 0.7)]
+    (map (fn [prog]
+           (let [keyword-score (or (:keyword-score prog) 0.0)
+                 semantic-scaled (* (or (:semantic-score prog) 0.0) 10.0)  ;; Scale 0-1 to 0-10
+                 preference-score (or (:preference-score prog) 0.0)
+                 ;; Weighted combination
+                 base-score (+ (* keyword-score 0.4)
+                              (* semantic-scaled 0.3)
+                              (* preference-score 0.3))
+                 ;; Apprenticeship enhancements
+                 is-apprenticeship? (= (:sector prog) "Apprenticeship")
+                 starting-salary (:starting-income prog)
+                 distance (:distance-from-baton-rouge-miles prog)
+
+                 ;; Salary boost + zero debt bonus for apprenticeships
+                 apprenticeship-boost (if is-apprenticeship?
+                                        (+ 0.3  ;; Zero debt bonus
+                                           (apprenticeship-salary-boost starting-salary))
+                                        0.0)
+
+                 ;; Distance penalty for apprenticeships (require daily commuting)
+                 distance-penalty (if (and is-apprenticeship? distance (> distance 20))
+                                    (let [base-penalty (* (/ (- distance 20) 30.0) 0.1)
+                                          ;; Lower salaries hurt more from commuting costs
+                                          salary-modifier (if (and starting-salary (< starting-salary 40000)) 1.5 1.0)]
+                                      (* base-penalty salary-modifier))
+                                    0.0)
+
+                 score-after-apprenticeship (+ base-score apprenticeship-boost (- distance-penalty))
+
+                 ;; Degree level multiplier (Purple students boost Associate's, Green boost Bachelor's)
+                 award-level (:award-level-name prog)
+                 degree-weight (get degree-prefs award-level 0.5)
+                 multiplier (if (pos? baseline-weight)
+                              (/ degree-weight baseline-weight)
+                              1.0)
+
+                 final-score (* score-after-apprenticeship multiplier)]
+             (assoc prog :final-score final-score)))
+         programs)))
 
 ;; =============================================================================
 ;; TOPS Coverage Tables (2025-26)
@@ -764,43 +1042,66 @@
 ;; =============================================================================
 
 (defn search-programs
-  "Phase 2: Search programs using keyword matching from search strategies.
-   Returns 35-50 candidate programs."
+  "Phase 2: Hybrid search using semantic embeddings + keyword matching.
+   Combines: 40% keyword score + 30% semantic score + 30% preference boost.
+   Returns 35-50 candidate programs sorted by final score."
   [{:keys [inputs]}]
+  (println "[search-programs] Starting hybrid search...")
   (let [strategies (get inputs "search-strategies" [])
-        programs (get inputs "programs-data" [])
+        _ (println "[search-programs] Strategies:" (count strategies) "found")
+        programs @programs-data  ;; Reference directly - avoid passing 600k+ floats through blackboard
+        _ (println "[search-programs] Programs loaded:" (count programs))
+        analysis (get inputs "student-analysis" {})
+        _ (println "[search-programs] Analysis keys:" (keys analysis))
+        preference-weights (get inputs "preference-weights" {})
 
-        ;; Extract keywords from strategies - handle both vector and map formats
-        keywords (->> strategies
-                      (mapcat (fn [s]
-                                (cond
-                                  (map? s) (or (:keywords s) [(:keyword s)])
-                                  (string? s) [s]
-                                  :else [])))
-                      (remove nil?)
-                      (map str/lower-case)
-                      set)
+        ;; Extract keywords from strategies
+        base-keywords (extract-keywords strategies)
 
         ;; Also add career interests from student analysis
-        analysis (get inputs "student-analysis" {})
         career-interests (get analysis "career-interests"
                               (get analysis :career-interests []))
-        all-keywords (into keywords (map str/lower-case career-interests))
+        all-keywords (into base-keywords (map str/lower-case career-interests))
+        keywords-vec (vec all-keywords)
 
-        ;; Score each program by keyword matches
-        scored (->> programs
-                    (map (fn [prog]
-                           (let [text (str/lower-case
-                                        (str (:program-title prog) " "
-                                             (:institution prog) " "
-                                             (:sector prog)))
-                                 matches (count (filter #(str/includes? text %) all-keywords))]
-                             (assoc prog :match-score matches))))
-                    (filter #(pos? (:match-score %)))
-                    (sort-by :match-score >)
-                    (take 50)
-                    vec)]
-    {"candidate-programs" scored}))
+        ;; Generate query embeddings in a single batch call (avoids GIL issues)
+        query-embeddings (get-query-embeddings-batch keywords-vec)
+
+        ;; Run semantic search for each keyword embedding
+        semantic-results (->> query-embeddings
+                              (mapcat #(semantic-search {:query-embedding %
+                                                          :programs programs
+                                                          :top-k 30}))
+                              vec)
+
+        ;; Run keyword search with stemming
+        keyword-results (keyword-search {:keywords all-keywords
+                                          :programs programs
+                                          :top-k 30})
+
+        _ (println "[search-programs] Semantic results:" (count semantic-results))
+        _ (println "[search-programs] Keyword results:" (count keyword-results))
+
+        ;; Merge results, keeping highest scores per program
+        merged (merge-search-results semantic-results keyword-results)
+        _ (println "[search-programs] Merged results:" (count merged))
+
+        ;; Apply preference boosting based on student preferences
+        boosted (apply-preference-boosting {:programs merged
+                                             :preference-weights preference-weights})
+
+        ;; Calculate final hybrid scores (includes degree level multiplier)
+        scored (calculate-final-scores boosted preference-weights)
+
+        ;; Return top 50 candidates sorted by final score
+        ;; Strip embeddings - they're only needed for search, not downstream
+        candidates (->> scored
+                        (sort-by :final-score >)
+                        (take 50)
+                        (mapv #(dissoc % :primary-embedding :institution-embedding
+                                        :semantic-score :keyword-score :preference-score)))]
+    (println "[search-programs] Returning" (count candidates) "candidates")
+    {"candidate-programs" candidates}))
 
 (defn optimize-portfolio
   "Phase 3: Select diverse programs for scoring.
@@ -812,7 +1113,7 @@
 
         ;; Just take top N programs for simplicity
         portfolio (->> candidates
-                       (sort-by :match-score >)
+                       (sort-by :final-score >)
                        (take portfolio-size)
                        (map-indexed (fn [i prog]
                                       (assoc prog :tier (if (zero? i) "primary" "adjacent"))))
@@ -821,23 +1122,52 @@
 
 (defn compute-composite-score
   "Phase 4: Weighted combination of all scores.
-   Weights: academic 20%, career 30%, preference 20%, financial 15%, outcome 15%"
+   Weights: academic 20%, career 30%, preference 20%, financial 15%, outcome 15%
+   When pathway score is available (color profile exists), adds pathway 15% as extra boost.
+   Matches Python: without pathway sums to 1.0, with pathway sums to 1.15."
   [{:keys [inputs]}]
   (let [academic (parse-double-safe (get inputs "academic-score" "0.5"))
         career (parse-double-safe (get inputs "career-score" "0.5"))
         preference (parse-double-safe (get inputs "preference-score" "0.5"))
         financial (parse-double-safe (get inputs "financial-score" "0.5"))
         outcome (parse-double-safe (get inputs "outcome-score" "0.5"))
-        pathway (parse-double-safe (get inputs "pathway-score" "0.5"))
-        composite (+ (* 0.20 academic)
-                     (* 0.30 career)
-                     (* 0.20 preference)
-                     (* 0.15 financial)
-                     (* 0.15 outcome))]
+        pathway-str (get inputs "pathway-score")
+        ;; Base composite (5 dimensions, sums to 1.0)
+        base-composite (+ (* 0.20 academic)
+                          (* 0.30 career)
+                          (* 0.20 preference)
+                          (* 0.15 financial)
+                          (* 0.15 outcome))
+        ;; Add pathway as extra boost when available (like Python)
+        composite (if pathway-str
+                    (+ base-composite (* 0.15 (parse-double-safe pathway-str)))
+                    base-composite)]
     {"composite-score" composite}))
 
+(defn- flatten-personalization
+  "Flatten personalization fields to top-level, matching Python output structure."
+  [program]
+  (let [personalization (or (:personalization program)
+                            (get program "personalization")
+                            {})]
+    (-> program
+        (assoc :personalized-overview (or (:overview personalization)
+                                          (get personalization "overview")))
+        (assoc :program-specific-bullets (or (:why-bullets personalization)
+                                             (get personalization "why-bullets")
+                                             []))
+        (assoc :key-differentiators (or (:key-differentiators personalization)
+                                        (get personalization "key-differentiators")
+                                        []))
+        (assoc :best-for (or (:best-for personalization)
+                             (get personalization "best-for")))
+        (assoc :outcome-bullet (or (:outcome-bullet personalization)
+                                   (get personalization "outcome-bullet")))
+        (dissoc :personalization "personalization"))))
+
 (defn group-by-institution
-  "Phase 6: Group programs by institution, calculate admissions likelihood based on ACT."
+  "Phase 6: Group programs by institution, calculate admissions likelihood based on ACT.
+   Flattens personalization fields to top-level to match Python output structure."
   [{:keys [inputs]}]
   (let [programs (get inputs "personalized-programs" [])
         analysis (get inputs "student-analysis" {})
@@ -846,7 +1176,10 @@
                         (get-in analysis ["hard-requirements" "act-score"])
                         20)
 
-        grouped (->> programs
+        ;; Flatten personalization on each program first
+        flattened-programs (mapv flatten-personalization programs)
+
+        grouped (->> flattened-programs
                      (filter :institution)  ;; Filter out programs with nil institution
                      (group-by :institution)
                      (map (fn [[inst progs]]
@@ -894,7 +1227,6 @@
     (sheet/blackboard
       {;; Inputs (from Clojure data)
        :student-profile [:map-of :keyword :any]
-       :programs-data [:vector [:map-of :keyword :any]]
        :scholarships-data [:vector [:map-of :keyword :any]]
 
        ;; LLM: student-analysis (string keys from JSON)
@@ -959,7 +1291,7 @@
       ;; ========================================
 
       (sheet/llm "analyze-student-comprehensive"
-        :model "google/gemini-2.0-flash-001"
+        :model "google/gemini-2.5-flash"
         :instruction "Analyze this high school student profile comprehensively. Extract:
 - hard-requirements: Non-negotiable needs based on their goals and preferences
 - career-interests: Ranked career interests from their career-fields and open-response
@@ -979,7 +1311,7 @@ Be specific based on their GPA, ACT score, TOPS award, color-profile, and stated
         :writes ["color-profile-data"])
 
       (sheet/llm "generate-search-strategies-comprehensive"
-        :model "google/gemini-2.0-flash-001"
+        :model "google/gemini-2.5-flash"
         :instruction "Generate 5-8 keyword search strategies to find matching college programs for this student.
 Based on their career interests, goals, and preferences, create search queries.
 
@@ -1004,7 +1336,7 @@ Example strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'he
 
           (sheet/code "search-programs"
             :fn "bryc-demo/search-programs"
-            :reads ["student-analysis" "search-strategies" "programs-data"]
+            :reads ["student-analysis" "search-strategies"]
             :writes ["candidate-programs"])
 
           (sheet/code "optimize-portfolio"
@@ -1021,7 +1353,7 @@ Example strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'he
             (sheet/sequence
               (sheet/parallel
                 (sheet/llm "score-academic"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score how well this student's academic profile (GPA, ACT) matches this program's requirements.
 Consider the program's typical ACT range and sector (4-Year vs 2-Year).
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
@@ -1029,21 +1361,21 @@ Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :writes ["academic-score"])
 
                 (sheet/llm "score-career"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program aligns with the student's stated career interests.
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :reads ["current-program" "student-analysis"]
                   :writes ["career-score"])
 
                 (sheet/llm "score-preference"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program matches the student's preferences (location, institution type).
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :reads ["current-program" "student-analysis"]
                   :writes ["preference-score"])
 
                 (sheet/llm "score-financial"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score the financial fit considering the student's TOPS award and program tuition.
 TOPS Opportunity covers tuition at public 4-year schools. TOPS Tech covers 2-year programs.
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
@@ -1051,14 +1383,14 @@ Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :writes ["financial-score"])
 
                 (sheet/llm "score-outcome"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score the program's outcome potential based on earnings data and sector reputation.
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :reads ["current-program" "student-analysis"]
                   :writes ["outcome-score"])
 
                 (sheet/llm "score-pathway"
-                  :model "google/gemini-2.0-flash-001"
+                  :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program fits into the student's career trajectory and long-term goals.
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :reads ["current-program" "student-analysis"]
@@ -1077,12 +1409,17 @@ Return ONLY a single decimal number between 0.0 and 1.0. No other text."
             :parallel 10
 
             (sheet/llm "personalize"
-              :model "google/gemini-2.0-flash-001"
+              :model "openai/gpt-5-mini"
               :instruction "Generate personalized recommendation content for this program:
 - overview: 2-3 sentences explaining why this program fits this specific student
 - why-bullets: 3-4 specific reasons this program is a good match
 - key-differentiators: 2-3 unique aspects of this program
 - best-for: One sentence describing the ideal student for this program
+- outcome-bullet: If earnings data available (earnings-y1, earnings-y5, or starting-income), generate ONE sentence comparing to Louisiana benchmarks:
+  * LA cost of living: $48,425/year
+  * LA median salary: $52,547/year
+  * Example: 'Graduates earn $45,000 in year one (93% of LA cost of living), growing to $58,000 by year five (10% above LA median)'
+  * If no earnings data, set to null
 
 Make it personal - reference the student's specific goals, interests, and circumstances."
               :reads ["current-program" "student-analysis" "student-profile"]
@@ -1100,7 +1437,7 @@ Make it personal - reference the student's specific goals, interests, and circum
             :parallel 10
 
             (sheet/llm "institution-summary"
-              :model "google/gemini-2.0-flash-001"
+              :model "google/gemini-2.5-flash"
               :instruction "Generate an institution summary for the student:
 - financial-bullets: 2 points about financial aid, TOPS coverage, and affordability
 - why-fits-bullets: 2-3 points about why this institution fits the student
@@ -1117,7 +1454,7 @@ Consider the student's TOPS award, preferences, and the institution's programs."
 
           ;; Phase 1: Extract student eligibility (LLM)
           (sheet/llm "extract-student-eligibility"
-            :model "google/gemini-2.0-flash-001"
+            :model "google/gemini-2.5-flash"
             :instruction "Extract the student's scholarship eligibility criteria from their profile:
 - gpa: The student's GPA
 - act-score: The student's ACT score (if available)
@@ -1156,7 +1493,7 @@ Consider the student's TOPS award, preferences, and the institution's programs."
             :parallel 10
 
             (sheet/llm "verify-and-personalize-scholarship"
-              :model "google/gemini-2.0-flash-001"
+              :model "google/gemini-2.5-flash"
               :instruction "Verify this scholarship's fit for the student and generate personalized content.
 
 IMPORTANT: Check if the scholarship name contains demographic indicators (e.g., 'Women's', 'African American').
@@ -1248,10 +1585,8 @@ Provide:
    - Color profile insights"
   [context sheet-id student-name]
   (let [student (load-student-json student-name)
-        programs @programs-data
         result (sheet/execute context sheet-id
                  {"student-profile" student
-                  "programs-data" programs
                   "scholarships-data" sample-scholarships})]
     (if (= :success (:status result))
       {:status :success
@@ -1271,10 +1606,8 @@ Provide:
 (defn run-demo-with-profile
   "Run the comprehensive demo with a custom student profile map."
   [context sheet-id student-profile]
-  (let [programs @programs-data
-        result (sheet/execute context sheet-id
+  (let [result (sheet/execute context sheet-id
                  {"student-profile" student-profile
-                  "programs-data" programs
                   "scholarships-data" sample-scholarships})]
     (if (= :success (:status result))
       {:status :success
@@ -1305,6 +1638,8 @@ Provide:
   ;; Should see healthcare/nursing programs prioritized
   (run-demo rs/context sheet-id "reagan")
 
+  1
+
   ;; Aja: 4.0 GPA, 16 ACT, skilled trades, TOPS Tech
   ;; Should see 2-year technical programs
   (run-demo rs/context sheet-id "aja")
@@ -1325,7 +1660,6 @@ Provide:
   (let [students ["reagan" "aja" "claude" "maya" "dylan" "john" "maddi" "asha"]
         inputs-list (mapv (fn [name]
                             {"student-profile" (load-student-json name)
-                             "programs-data" @programs-data
                              "scholarships-data" sample-scholarships})
                           students)]
     (h/run-and-apply! rs/context

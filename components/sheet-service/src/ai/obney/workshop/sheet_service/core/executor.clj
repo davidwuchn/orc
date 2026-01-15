@@ -16,6 +16,7 @@
    - Blackboard values → DSCloj input values
    - DSCloj output values → Blackboard writes"
   (:require [dscloj.core :as dscloj]
+            [litellm.router :as litellm-router]
             [clojure.string :as str]))
 
 ;; =============================================================================
@@ -231,6 +232,29 @@
 ;; AI Execution
 ;; =============================================================================
 
+(defn- get-provider-with-model
+  "Get or create a provider config with the specified model.
+
+   litellm-clj's router ignores :model in request options when using a registered
+   provider keyword. To work around this, when a model override is specified,
+   we dynamically register a model-specific provider if it doesn't exist.
+
+   Returns the provider keyword to use (either original or model-specific)."
+  [provider model-override]
+  (if (and model-override (keyword? provider))
+    ;; Create a model-specific provider name
+    (let [model-provider-name (keyword (str (name provider) "/" model-override))
+          existing (litellm-router/get-config model-provider-name)]
+      (when-not existing
+        ;; Register the model-specific provider
+        (let [base-config (litellm-router/get-config provider)]
+          (when base-config
+            (litellm-router/register! model-provider-name
+                                      (assoc base-config :model model-override)))))
+      model-provider-name)
+    ;; No override needed, use provider as-is
+    provider))
+
 (defn execute-ai
   "Execute a leaf node using DSCloj AI.
 
@@ -244,7 +268,9 @@
      {:status :success/:failure
       :outputs {string-key value} - outputs to write to blackboard
       :error string?             - error message if failed
-      :duration-ms int}          - execution time"
+      :duration-ms int           - execution time
+      :usage {:prompt_tokens N :completion_tokens N :total_tokens N} - token usage (when available)
+      :model string?}            - model used (when available)"
   [node blackboard provider & {:keys [options] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
         module (build-module node blackboard)
@@ -252,23 +278,27 @@
         output-key-mapping (:output-key-mapping module)
         ;; Remove the mapping from module before passing to DSCloj
         dscloj-module (dissoc module :output-key-mapping)
-        ;; Add model to options if specified on node
-        options-with-model (if-let [model (:model node)]
-                             (assoc options :model model)
-                             options)]
+        ;; Build effective provider config with model override if specified
+        effective-provider (get-provider-with-model provider (:model node))
+        ;; Request metadata for usage tracking
+        dscloj-options (assoc options :with-metadata? true)]
     (try
-      (let [result (dscloj/predict provider dscloj-module inputs options-with-model)
+      (let [result (dscloj/predict effective-provider dscloj-module inputs dscloj-options)
+            ;; Result now has {:outputs {...} :usage {...} :model "..."}
+            raw-outputs (:outputs result)
             ;; Convert sanitized keys back to original blackboard keys
             outputs (reduce-kv (fn [acc k v]
                                  (let [sanitized-name (name k)
                                        original-key (get output-key-mapping sanitized-name sanitized-name)]
                                    (assoc acc original-key v)))
                                {}
-                               result)
+                               raw-outputs)
             duration-ms (- (System/currentTimeMillis) start-time)]
         {:status :success
          :outputs outputs
-         :duration-ms duration-ms})
+         :duration-ms duration-ms
+         :usage (:usage result)
+         :model (:model result)})
       (catch Exception e
         {:status :failure
          :error (.getMessage e)
@@ -287,7 +317,9 @@
      {:status :success/:failure
       :result boolean?          - the LLM's yes/no answer
       :error string?            - error message if failed
-      :duration-ms int}         - execution time"
+      :duration-ms int          - execution time
+      :usage {:prompt_tokens N :completion_tokens N :total_tokens N} - token usage (when available)
+      :model string?}           - model used (when available)"
   [node blackboard provider & {:keys [options] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
         ;; Build inputs from reads
@@ -311,17 +343,20 @@
                                  :let [entry (get blackboard key-name)]
                                  :when entry]
                              [(keyword (sanitize-field-name key-name)) (:value entry)]))
-        ;; Add model to options if specified on node
-        options-with-model (if-let [model (:model node)]
-                             (assoc options :model model)
-                             options)]
+        ;; Build effective provider config with model override if specified
+        effective-provider (get-provider-with-model provider (:model node))
+        ;; Request metadata for usage tracking
+        dscloj-options (assoc options :with-metadata? true)]
     (try
-      (let [result (dscloj/predict provider module input-values options-with-model)
-            bool-result (get result :result)
+      (let [response (dscloj/predict effective-provider module input-values dscloj-options)
+            ;; Response now has {:outputs {...} :usage {...} :model "..."}
+            bool-result (get-in response [:outputs :result])
             duration-ms (- (System/currentTimeMillis) start-time)]
         {:status :success
          :result (boolean bool-result)
-         :duration-ms duration-ms})
+         :duration-ms duration-ms
+         :usage (:usage response)
+         :model (:model response)})
       (catch Exception e
         {:status :failure
          :error (.getMessage e)

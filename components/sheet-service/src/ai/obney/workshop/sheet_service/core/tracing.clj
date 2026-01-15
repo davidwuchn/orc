@@ -91,24 +91,40 @@
 
 (defn generation-event
   "Create a generation-create event for an AI node execution.
-   Always uses unique IDs since AI nodes are leaf nodes with no children."
+   Always uses unique IDs since AI nodes are leaf nodes with no children.
+
+   Langfuse usage format:
+   - :promptTokens - Number of tokens in the prompt
+   - :completionTokens - Number of tokens in the completion
+   - :totalTokens - Total tokens used"
   [trace-id node-id node-name model start-time end-time inputs outputs status error
-   & {:keys [parent-observation-id]}]
-  {:id (random-uuid)
-   :timestamp (timestamp-str)
-   :type "generation-create"
-   :body (cond-> {:id (make-unique-observation-id node-id)
-                  :traceId (str trace-id)
-                  :name (or node-name "AI Generation")
-                  :startTime (millis->iso start-time)
-                  :endTime (millis->iso end-time)
-                  :input inputs
-                  :output outputs
-                  :model model
-                  :metadata {:node-id (str node-id)
-                             :status (name status)}}
-           parent-observation-id (assoc :parentObservationId parent-observation-id)
-           error (assoc-in [:metadata :error] error))})
+   & {:keys [parent-observation-id usage]}]
+  (let [;; Convert usage keys to camelCase for Langfuse
+        ;; Handle both kebab-case (from litellm-clj) and snake_case
+        langfuse-usage (when usage
+                         (let [prompt (or (:prompt-tokens usage) (:prompt_tokens usage))
+                               completion (or (:completion-tokens usage) (:completion_tokens usage))
+                               total (or (:total-tokens usage) (:total_tokens usage))]
+                           (cond-> {}
+                             prompt (assoc :promptTokens prompt)
+                             completion (assoc :completionTokens completion)
+                             total (assoc :totalTokens total))))]
+    {:id (random-uuid)
+     :timestamp (timestamp-str)
+     :type "generation-create"
+     :body (cond-> {:id (make-unique-observation-id node-id)
+                    :traceId (str trace-id)
+                    :name (or node-name "AI Generation")
+                    :startTime (millis->iso start-time)
+                    :endTime (millis->iso end-time)
+                    :input inputs
+                    :output outputs
+                    :model model
+                    :metadata {:node-id (str node-id)
+                               :status (name status)}}
+             parent-observation-id (assoc :parentObservationId parent-observation-id)
+             (seq langfuse-usage) (assoc :usage langfuse-usage)
+             error (assoc-in [:metadata :error] error))}))
 
 ;; =============================================================================
 ;; Trace Context
@@ -200,11 +216,12 @@
   "Record a node execution span."
   [trace-ctx {:keys [node-id node-name node-type executor model
                      start-time end-time inputs outputs status error
-                     parent-observation-id]}]
+                     parent-observation-id usage]}]
   (let [event (if (= :ai executor)
                 (generation-event (:trace-id trace-ctx) node-id node-name model
                                   start-time end-time inputs outputs status error
-                                  :parent-observation-id parent-observation-id)
+                                  :parent-observation-id parent-observation-id
+                                  :usage usage)
                 (span-event (:trace-id trace-ctx) node-id node-name node-type
                             start-time end-time inputs outputs status error
                             :parent-observation-id parent-observation-id))]

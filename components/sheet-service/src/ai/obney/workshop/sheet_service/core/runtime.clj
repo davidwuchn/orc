@@ -34,7 +34,7 @@
 
 (defn- execute-leaf-sync
   "Execute a leaf node synchronously.
-   Returns {:status :success/:failure :outputs {...} :error ... :duration-ms ...}"
+   Returns {:status :success/:failure :outputs {...} :error ... :duration-ms ... :usage {...}}"
   [node blackboard context]
   (let [executor-type (or (:executor node) :ai)
         provider (:dscloj-provider context)
@@ -53,7 +53,8 @@
            :start-time start-time
            :end-time end-time
            :executor executor-type
-           :model (:model node))))
+           ;; Prefer model from result (actual model used) over node config
+           :model (or (:model result) (:model node)))))
 
 (defn- execute-condition-sync
   "Execute a condition node synchronously."
@@ -326,7 +327,8 @@
                                         :outputs (:outputs leaf-result)
                                         :status (:status leaf-result)
                                         :error (:error leaf-result)
-                                        :parent-observation-id parent-obs-id}))
+                                        :parent-observation-id parent-obs-id
+                                        :usage (:usage leaf-result)}))
                 ;; Record to internal trace (always)
                 (when internal-trace
                   (tracing/record-node-trace! internal-trace
@@ -396,14 +398,15 @@
                                         :node-name node-name
                                         :node-type :llm-condition
                                         :executor :ai
-                                        :model (:model node)
+                                        :model (or (:model llm-result) (:model node))
                                         :start-time llm-start-time
                                         :end-time llm-end-time
                                         :inputs inputs
                                         :outputs {:result (:result llm-result)}
                                         :status final-status
                                         :error (:error llm-result)
-                                        :parent-observation-id parent-obs-id}))
+                                        :parent-observation-id parent-obs-id
+                                        :usage (:usage llm-result)}))
                 ;; Record to internal trace
                 (when internal-trace
                   (tracing/record-node-trace! internal-trace
