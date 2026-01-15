@@ -63,6 +63,15 @@
       (Double/parseDouble s))
     (catch Exception _ 0.0)))
 
+(defn parse-int-safe
+  "Safely parse an integer, returning nil on failure.
+   Handles decimal strings like '17.0' by parsing as double first."
+  [s]
+  (try
+    (when (and s (not (str/blank? s)) (not= "NA" s) (not= "null" s))
+      (int (Double/parseDouble (str/trim s))))
+    (catch Exception _ nil)))
+
 (defn parse-embedding
   "Parse a JSON embedding string to a vector of doubles."
   [s]
@@ -111,10 +120,10 @@
                    :program-title (get m "program-title")
                    :institution (get m "institution-name")
                    :sector (get m "sector")
-                   :award-level (get m "award_level")
+                   :award-level (parse-int-safe (get m "award_level"))
                    :award-level-name (get m "award_level_name")
                    :cip-code (get m "cip-code")
-                   :tuition (parse-double-safe (get m "in-state-tuition"))
+                   :in-state-tuition (parse-double-safe (get m "in-state-tuition"))
                    :earnings-y1 (parse-double-safe (get m "earnings_y1_median"))
                    :earnings-y5 (parse-double-safe (get m "earnings_y5_median"))
                    :starting-income (parse-double-safe (get m "starting-income-annual"))
@@ -126,6 +135,12 @@
                    :hbcu (= "Yes" (get m "historically-black-college-university"))
                    :online-availability (get m "online-availability")
                    :distance-from-baton-rouge-miles (parse-double-safe (get m "distance_from_baton_rouge_miles"))
+                   ;; Apprenticeship filters
+                   :high-school-eligible (= "True" (get m "high_school_eligible"))
+                   :inferred-requires-credentials (= "True" (get m "inferred_requires_credentials"))
+                   ;; Financial data
+                   :room-board-annual (parse-double-safe (get m "room_board_on_campus_annual"))
+                   :books-annual (parse-double-safe (get m "books_supplies_annual"))
                    ;; Embeddings for semantic search (384 dimensions each)
                    :primary-embedding (parse-embedding (get m "primary_embedding"))
                    :institution-embedding (parse-embedding (get m "institution_embedding"))})))
@@ -141,6 +156,185 @@
     (json/parse-string (slurp path) true)))
 
 ;; Available students: reagan, aja, claude, maya, dylan, john, maddi, asha
+
+;; =============================================================================
+;; Program Filters (Gap 1 & 2: Graduate & Apprenticeship filters)
+;; =============================================================================
+
+(def graduate-award-levels
+  "Award levels requiring existing degrees - filter out for HS students.
+   Per IPEDS award level codes."
+  #{6   ;; Postbaccalaureate certificate (requires Bachelor's)
+    7   ;; Master's degree
+    8   ;; Post-master's certificate
+    17  ;; Doctor's degree - research/scholarship
+    18  ;; Doctor's degree - professional practice
+    19}) ;; Doctor's degree - other
+
+(defn filter-graduate-programs
+  "Remove graduate-level programs from candidates.
+   High school students cannot apply to these."
+  [programs]
+  (remove #(graduate-award-levels (:award-level %)) programs))
+
+(defn filter-apprenticeships
+  "Remove apprenticeships requiring credentials HS students don't have.
+   Filters out apprenticeships requiring:
+   - Professional licenses (RN, LPN, journeyman)
+   - College degrees
+   - 2+ years work experience"
+  [programs]
+  (remove (fn [prog]
+            (and (= "Apprenticeship" (:sector prog))
+                 (or (false? (:high-school-eligible prog))
+                     (true? (:inferred-requires-credentials prog)))))
+          programs))
+
+(defn filter-programs-for-hs-students
+  "Apply all filters for high school student eligibility."
+  [programs]
+  (-> programs
+      filter-graduate-programs
+      filter-apprenticeships))
+
+;; =============================================================================
+;; TOPS & Financial Calculations (Gap 4 & 5)
+;; =============================================================================
+
+(def tops-coverage-tables
+  "TOPS award coverage amounts by award level and institution type.
+   Values are annual amounts in dollars."
+  {:tops-opportunity {:public-4-year 5100 :public-2-year 3086 :private 5100}
+   :tops-performance {:public-4-year 5600 :public-2-year 3086 :private 5600}
+   :tops-honors {:public-4-year 6100 :public-2-year 3086 :private 6100}
+   :tops-tech {:public-2-year 2000 :technical 2000}})
+
+(def max-pell-grant
+  "Maximum annual Pell Grant for 2024-2025."
+  7395)
+
+(defn calculate-tops-coverage
+  "Calculate annual TOPS coverage for a program based on student's award and sector."
+  [tops-award sector]
+  (when tops-award
+    (let [award-key (keyword (str/replace (str tops-award) #"^:" ""))
+          sector-key (cond
+                       (str/includes? (str sector) "4-year") :public-4-year
+                       (str/includes? (str sector) "2-year") :public-2-year
+                       (= sector "Private") :private
+                       (= sector "Technical") :technical
+                       :else nil)]
+      (get-in tops-coverage-tables [award-key sector-key] 0))))
+
+(defn calculate-financial-breakdown
+  "Calculate full financial breakdown for a program.
+   TOPS is applied FIRST (Louisiana law), then Pell Grant.
+   Returns map with all financial components."
+  [program student-tops-award is-pell-eligible]
+  (let [raw-tuition (or (:in-state-tuition program) 0)
+        tops-coverage (or (calculate-tops-coverage student-tops-award (:sector program)) 0)
+        after-tops (max 0 (- raw-tuition tops-coverage))
+        pell-available (if is-pell-eligible max-pell-grant 0)
+        pell-applied (min pell-available after-tops)
+        net-tuition (max 0 (- after-tops pell-applied))
+        excess-pell (max 0 (- pell-available after-tops))
+        books (or (:books-annual program) 1200)
+        books-after-excess (max 0 (- books excess-pell))
+        room-board (or (:room-board-annual program) 0)]
+    {:raw-tuition-annual raw-tuition
+     :tops-coverage-annual tops-coverage
+     :pell-applied-annual pell-applied
+     :net-tuition-annual net-tuition
+     :excess-pell-annual excess-pell
+     :books-annual books
+     :books-after-excess-pell books-after-excess
+     :room-board-annual room-board
+     ;; Commute scenario (living at home)
+     :commute-cost-annual (+ net-tuition books-after-excess)
+     ;; On-campus scenario
+     :live-on-campus-cost-annual (+ net-tuition room-board books-after-excess)}))
+
+;; =============================================================================
+;; Admissions Likelihood (Gap 7)
+;; =============================================================================
+
+(defn calculate-admissions-likelihood
+  "Determine Safety/Target/Reach based on student ACT vs institution percentiles.
+   Returns {:likelihood 'strong-match'|'match'|'reach', :probability 0.0-1.0}"
+  [student-act act-25th act-75th acceptance-rate]
+  (let [probability (cond
+                      ;; Above 75th percentile = very likely
+                      (and act-75th (pos? act-75th) (>= student-act act-75th))
+                      (min 1.0 (+ 0.85 (* (or acceptance-rate 0.5) 0.15)))
+
+                      ;; Between 25th and 75th = good chance
+                      (and act-25th (pos? act-25th) (>= student-act act-25th))
+                      (+ 0.5 (* (or acceptance-rate 0.5) 0.3))
+
+                      ;; Below 25th = reach (but acceptance rate matters)
+                      (and act-25th (pos? act-25th))
+                      (* (or acceptance-rate 0.3) 0.6)
+
+                      ;; No ACT data = use acceptance rate only
+                      :else
+                      (or acceptance-rate 0.5))]
+    {:likelihood (cond
+                   (>= probability 0.75) "strong-match"
+                   (>= probability 0.45) "match"
+                   :else "reach")
+     :probability probability}))
+
+;; =============================================================================
+;; CIP Code Clustering (Gap 3)
+;; =============================================================================
+
+(def cip-field-names
+  "Human-readable names for common CIP 4-digit codes."
+  {"11.01" "Computer Science"
+   "11.08" "Computer Information Systems"
+   "12.04" "Cosmetology & Nail Technology"
+   "12.05" "Culinary Arts"
+   "13.01" "Education"
+   "14.01" "Engineering"
+   "15.01" "Engineering Technology"
+   "22.01" "Law"
+   "43.01" "Criminal Justice & Law Enforcement"
+   "43.02" "Corrections & Law Enforcement"
+   "45.01" "Social Sciences"
+   "51.01" "Health Professions"
+   "51.38" "Registered Nursing"
+   "51.39" "Practical Nursing"
+   "52.01" "Business Administration"
+   "52.02" "Business Management"})
+
+(defn get-cip-4digit
+  "Extract 4-digit CIP code prefix (XX.YY format) from full CIP code."
+  [cip-code]
+  (when (and cip-code (string? cip-code) (str/includes? cip-code "."))
+    (let [[a b] (str/split cip-code #"\.")]
+      (when (and a b (>= (count b) 2))
+        (str a "." (subs b 0 2))))))
+
+(defn cluster-programs-by-cip
+  "Group programs by 4-digit CIP code into career pathway clusters.
+   Returns map of cluster-id -> {:name, :programs, :size, :avg-score}"
+  [candidates]
+  (let [clusters (group-by #(or (get-cip-4digit (:cip-code %)) "unknown") candidates)]
+    (->> clusters
+         (map (fn [[cip-4 progs]]
+                (let [cluster-name (or (get cip-field-names cip-4)
+                                       (str "Career Pathway " cip-4))
+                      scores (keep :final-score progs)
+                      avg-score (if (seq scores)
+                                  (/ (reduce + scores) (count scores))
+                                  0.0)]
+                  [(str "cip_" (str/replace cip-4 "." "_"))
+                   {:name cluster-name
+                    :cip-prefix cip-4
+                    :programs progs
+                    :size (count progs)
+                    :avg-score avg-score}])))
+         (into {}))))
 
 ;; =============================================================================
 ;; Semantic Search Functions (DJL-based, no Python needed)
@@ -840,7 +1034,9 @@
         student-analysis (get inputs "student-analysis" {})
         student-profile (get inputs "student-profile" {})
 
-        career-interests (or (get student-analysis "career-interests")
+        career-interests (or (get student-analysis "careerInterests")
+                             (get student-analysis :careerInterests)
+                             (get student-analysis "career-interests")
                              (get student-analysis :career-interests)
                              (:career-fields student-profile)
                              (get student-profile "career-fields")
@@ -969,7 +1165,7 @@
   "Get appropriate cost framing based on certificate duration."
   [program]
   (let [award-level (str/lower-case (or (:award-level program) ""))
-        tuition (:tuition program)]
+        tuition (:in-state-tuition program)]
     (cond
       (str/includes? award-level "less than 1")
       {:label "Total program cost"
@@ -1012,7 +1208,7 @@
         student-profile (get inputs "student-profile" {})
         tops-award (parse-tops-award (or (:tops-award student-profile)
                                          (get student-profile "tops-award")))
-        tuition (or (:tuition program) 0)
+        tuition (or (:in-state-tuition program) 0)
         coverage (get-tops-coverage tops-award (:sector program) (:institution program))
         effective (calculate-effective-cost tuition coverage max-pell-grant)]
     {"enriched-program" (merge program
@@ -1049,8 +1245,12 @@
   (println "[search-programs] Starting hybrid search...")
   (let [strategies (get inputs "search-strategies" [])
         _ (println "[search-programs] Strategies:" (count strategies) "found")
-        programs @programs-data  ;; Reference directly - avoid passing 600k+ floats through blackboard
-        _ (println "[search-programs] Programs loaded:" (count programs))
+        all-programs @programs-data  ;; Reference directly - avoid passing 600k+ floats through blackboard
+        _ (println "[search-programs] Total programs in database:" (count all-programs))
+        ;; Filter out graduate programs and inaccessible apprenticeships (Gaps 1 & 2)
+        programs (filter-programs-for-hs-students all-programs)
+        _ (println "[search-programs] Programs after HS filters:" (count programs)
+                   "(filtered" (- (count all-programs) (count programs)) "graduate/credential programs)")
         analysis (get inputs "student-analysis" {})
         _ (println "[search-programs] Analysis keys:" (keys analysis))
         preference-weights (get inputs "preference-weights" {})
@@ -1058,9 +1258,12 @@
         ;; Extract keywords from strategies
         base-keywords (extract-keywords strategies)
 
-        ;; Also add career interests from student analysis
-        career-interests (get analysis "career-interests"
-                              (get analysis :career-interests []))
+        ;; Also add career interests from student analysis (check camelCase and kebab-case)
+        career-interests (or (get analysis "careerInterests")
+                             (get analysis :careerInterests)
+                             (get analysis "career-interests")
+                             (get analysis :career-interests)
+                             [])
         all-keywords (into base-keywords (map str/lower-case career-interests))
         keywords-vec (vec all-keywords)
 
@@ -1165,16 +1368,44 @@
                                    (get personalization "outcome-bullet")))
         (dissoc :personalization "personalization"))))
 
+(defn- calculate-institution-cost-ranges
+  "Calculate min/max costs across all programs at an institution."
+  [programs student-tops-award is-pell-eligible]
+  (when (seq programs)
+    (let [breakdowns (map #(calculate-financial-breakdown % student-tops-award is-pell-eligible) programs)
+          tuitions (keep :raw-tuition-annual breakdowns)
+          net-tuitions (keep :net-tuition-annual breakdowns)
+          excess-pells (keep :excess-pell-annual breakdowns)]
+      {:tuition-range {:min (when (seq tuitions) (apply min tuitions))
+                       :max (when (seq tuitions) (apply max tuitions))}
+       :net-tuition-range {:min (when (seq net-tuitions) (apply min net-tuitions))
+                           :max (when (seq net-tuitions) (apply max net-tuitions))}
+       :excess-pell-range {:min (when (seq excess-pells) (apply min excess-pells))
+                           :max (when (seq excess-pells) (apply max excess-pells))}})))
+
 (defn group-by-institution
   "Phase 6: Group programs by institution, calculate admissions likelihood based on ACT.
-   Flattens personalization fields to top-level to match Python output structure."
+   Flattens personalization fields to top-level to match Python output structure.
+   Includes financial cost ranges per institution (Gap 10)."
   [{:keys [inputs]}]
   (let [programs (get inputs "personalized-programs" [])
         analysis (get inputs "student-analysis" {})
-        student-act (or (get analysis "act-score")
+        student-profile (get inputs "student-profile" {})
+        student-act (or (get analysis "actScore")
+                        (get analysis :actScore)
+                        (get analysis "act-score")
                         (get analysis :act-score)
-                        (get-in analysis ["hard-requirements" "act-score"])
+                        (get-in analysis ["hardRequirements" "actScore"])
                         20)
+        tops-award (or (get analysis "topsAward")
+                       (get analysis :topsAward)
+                       (get analysis "tops-award")
+                       (get analysis :tops-award)
+                       (get student-profile :tops-award)
+                       (get student-profile "tops-award"))
+        is-pell-eligible (or (get student-profile :pell-eligible)
+                             (get student-profile "pell-eligible")
+                             true)  ;; Default to eligible
 
         ;; Flatten personalization on each program first
         flattened-programs (mapv flatten-personalization programs)
@@ -1183,17 +1414,27 @@
                      (filter :institution)  ;; Filter out programs with nil institution
                      (group-by :institution)
                      (map (fn [[inst progs]]
-                            (let [avg-act-25 (let [acts (keep :act-25th progs)]
-                                              (if (seq acts)
-                                                (/ (reduce + acts) (count acts))
-                                                20))
-                                  likelihood (cond
-                                               (>= student-act (+ avg-act-25 3)) "strong-match"
-                                               (>= student-act avg-act-25) "match"
-                                               :else "reach")]
+                            (let [;; Get first program's ACT data for institution
+                                  first-prog (first progs)
+                                  act-25th (:act-25th first-prog)
+                                  act-75th (:act-75th first-prog)
+                                  acceptance-rate (:acceptance-rate first-prog)
+
+                                  ;; Calculate admissions likelihood using proper function (Gap 7)
+                                  {:keys [likelihood probability]}
+                                  (calculate-admissions-likelihood student-act act-25th act-75th acceptance-rate)
+
+                                  ;; Calculate institution cost ranges (Gap 10)
+                                  cost-ranges (calculate-institution-cost-ranges progs tops-award is-pell-eligible)
+
+                                  ;; Get HBCU status from first program
+                                  is-hbcu (:hbcu first-prog)]
                               {:institution inst
                                :programs (vec progs)
                                :admissions-likelihood likelihood
+                               :admissions-probability probability
+                               :is-hbcu is-hbcu
+                               :cost-ranges cost-ranges
                                :program-count (count progs)})))
                      (sort-by :program-count >)
                      vec)]
@@ -1292,14 +1533,30 @@
 
       (sheet/llm "analyze-student-comprehensive"
         :model "google/gemini-2.5-flash"
-        :instruction "Analyze this high school student profile comprehensively. Extract:
-- hard-requirements: Non-negotiable needs based on their goals and preferences
-- career-interests: Ranked career interests from their career-fields and open-response
-- preference-weights: location-preference, size-preference, cost-sensitivity (each 0.0-1.0)
-- student-narrative: 2-3 sentence summary of who this student is
-- act-score: The student's ACT score
-- gpa: The student's GPA
-- tops-award: The student's TOPS award type (e.g., 'tops-opportunity')
+        :instruction "Analyze this high school student profile comprehensively. Return a JSON object with these fields (use camelCase, no hyphens):
+
+REQUIRED FIELDS:
+- hardRequirements: Non-negotiable needs based on their goals and preferences
+- careerInterests: Ranked list of career interests from career-fields and open-response
+- preferenceWeights: Object with locationPreference, sizePreference, costSensitivity, hbcuPreference, onlinePreference (each 0.0-1.0)
+- studentNarrative: 2-3 sentence summary of who this student is
+- actScore: The student's ACT score (number)
+- gpa: The student's GPA (number)
+- topsAward: The student's TOPS award type (e.g., 'tops-opportunity', 'tops-tech', or 'none')
+
+IMPLICIT NEEDS (inferred from profile signals):
+- implicitNeeds: List of unstated needs, inferred from:
+  * first-gen = true -> 'first-generation support services'
+  * low involvement-score (<2) -> 'flexible scheduling', 'evening/weekend options'
+  * mentions children in open-response -> 'childcare services', 'family-friendly scheduling'
+  * financial-stress signals -> 'strong financial aid', 'work-study opportunities'
+  * mentions work in open-response -> 'online options', 'part-time enrollment'
+
+ACADEMIC CONTEXT:
+- academicContext: Object with:
+  * readinessLevel: 'low' (ACT<17), 'moderate' (ACT 17-23), or 'high' (ACT 24+)
+  * likelySuccessSectors: List of sectors where student is likely to succeed (e.g., ['2-year', '4-year with support', 'apprenticeships'])
+  * concerns: List of academic concerns (e.g., ['ACT below typical 4-year threshold', 'May need developmental courses'])
 
 Be specific based on their GPA, ACT score, TOPS award, color-profile, and stated interests."
         :reads ["student-profile"]
@@ -1376,8 +1633,25 @@ Return ONLY a single decimal number between 0.0 and 1.0. No other text."
 
                 (sheet/llm "score-financial"
                   :model "google/gemini-2.5-flash"
-                  :instruction "Score the financial fit considering the student's TOPS award and program tuition.
-TOPS Opportunity covers tuition at public 4-year schools. TOPS Tech covers 2-year programs.
+                  :instruction "Score the financial fit for this student considering:
+
+TOPS COVERAGE (Louisiana law: TOPS applied FIRST, then Pell):
+- TOPS Opportunity: $5,100/year for 4-year public, $3,086/year for 2-year
+- TOPS Performance: $5,600/year for 4-year public
+- TOPS Honors: $6,100/year for 4-year public
+- TOPS Tech: $2,000/year for technical programs
+
+PELL GRANT: Max $7,395/year for eligible students
+- If Pell exceeds remaining tuition after TOPS, student gets EXCESS PELL as refund
+
+SCORING GUIDE:
+- 1.0: Net tuition $0 + excess Pell (fully covered with money left over)
+- 0.8-0.9: Net tuition $0-$2,000/year
+- 0.6-0.7: Net tuition $2,000-$5,000/year
+- 0.4-0.5: Net tuition $5,000-$10,000/year
+- 0.2-0.3: Net tuition $10,000-$20,000/year
+- 0.0-0.1: Net tuition $20,000+/year
+
 Return ONLY a single decimal number between 0.0 and 1.0. No other text."
                   :reads ["current-program" "student-analysis" "student-profile"]
                   :writes ["financial-score"])
@@ -1410,12 +1684,40 @@ Return ONLY a single decimal number between 0.0 and 1.0. No other text."
 
             (sheet/llm "personalize"
               :model "openai/gpt-5-mini"
-              :instruction "Generate personalized recommendation content for this program:
+              :instruction "Generate personalized recommendation content for this program.
+
+CHECK THE PROGRAM SECTOR TO USE THE RIGHT FORMAT:
+
+=== IF SECTOR = 'Apprenticeship' ===
+- overview: 1-2 sentences emphasizing EARN WHILE LEARNING (salary during training, zero debt)
+- why-bullets: 2-3 bullets focused on:
+  * Salary progression (starting-income → average salary)
+  * Skills and certifications gained
+  * Zero tuition/debt benefit
+  * Employer connections and job placement
+- key-differentiators: How this apprenticeship differs from college options
+- best-for: Who should choose earn-while-learn over traditional college
+- outcome-bullet: Compare starting-income to LA benchmarks ($48,425 COL, $52,547 median)
+  Example: 'Earn $35,000 from day one while training, with zero debt - that's 72% of LA cost of living before even completing the program'
+
+=== IF AWARD-LEVEL-NAME contains 'Certificate' ===
+- overview: 1-2 sentences emphasizing QUICK PATH to employment (program length)
+- why-bullets: 2-3 bullets focused on:
+  * Fast completion time (< 1 year or 1-2 years)
+  * Industry certifications earned
+  * Job-ready skills
+  * Stackable credential potential (can lead to Associate's/Bachelor's)
+- financial-note: For '<1 year' certificates, annual tuition = TOTAL program cost
+- key-differentiators: Speed advantage vs longer programs
+- best-for: Students who want quick entry to workforce
+- outcome-bullet: Compare Y1 earnings to LA benchmarks
+
+=== FOR ALL OTHER PROGRAMS (Bachelor's, Associate's) ===
 - overview: 2-3 sentences explaining why this program fits this specific student
 - why-bullets: 3-4 specific reasons this program is a good match
 - key-differentiators: 2-3 unique aspects of this program
 - best-for: One sentence describing the ideal student for this program
-- outcome-bullet: If earnings data available (earnings-y1, earnings-y5, or starting-income), generate ONE sentence comparing to Louisiana benchmarks:
+- outcome-bullet: If earnings data available (earnings-y1, earnings-y5):
   * LA cost of living: $48,425/year
   * LA median salary: $52,547/year
   * Example: 'Graduates earn $45,000 in year one (93% of LA cost of living), growing to $58,000 by year five (10% above LA median)'
@@ -1438,12 +1740,30 @@ Make it personal - reference the student's specific goals, interests, and circum
 
             (sheet/llm "institution-summary"
               :model "google/gemini-2.5-flash"
-              :instruction "Generate an institution summary for the student:
-- financial-bullets: 2 points about financial aid, TOPS coverage, and affordability
-- why-fits-bullets: 2-3 points about why this institution fits the student
-- is-hbcu: true if this is an HBCU (Historically Black College/University)
+              :instruction "Generate an institution summary for the student.
 
-Consider the student's TOPS award, preferences, and the institution's programs."
+USE THE COST-RANGES DATA PROVIDED (already calculated with TOPS+Pell applied):
+- tuition-range: Raw tuition min/max across programs
+- net-tuition-range: What student ACTUALLY pays after TOPS+Pell (min/max)
+- excess-pell-range: Potential Pell refund for books/living (min/max)
+
+GENERATE:
+- financial-bullets: EXACTLY 2 bullets using the cost ranges:
+  * Bullet 1 (Tuition): 'After your TOPS [award] and Pell Grant, your net tuition ranges from $X-$Y per year'
+    - If net-tuition is $0: 'Tuition should be essentially covered by your TOPS [award] and Pell Grant'
+    - ALWAYS mention TOPS first, then Pell (Louisiana law)
+  * Bullet 2 (Housing/Books): Room & board if available, plus books
+    - If excess-pell > 0: 'Your excess Pell Grant ($X-$Y) can help cover books and supplies'
+    - For 2-year schools: 'As a community college, on-campus housing is typically not available'
+
+- why-fits-bullets: 2-3 bullets about why this INSTITUTION (not programs) fits:
+  * ALLOWED: HBCU status, distance from Baton Rouge, sector (2-year/4-year), admissions likelihood based on ACT
+  * FORBIDDEN: Program-specific details (those are in program bullets)
+  * Use qualitative admission language: 'highly likely', 'strong match' - NOT percentages
+
+- is-hbcu: true if HBCU (check the is-hbcu field)
+
+CRITICAL: Never say '$0-$0 per year' - say 'essentially covered' instead."
               :reads ["current-institution" "student-analysis" "student-profile"]
               :writes ["institution-bullets"])))
 
