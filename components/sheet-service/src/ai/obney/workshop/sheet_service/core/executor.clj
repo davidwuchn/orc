@@ -255,6 +255,11 @@
     ;; No override needed, use provider as-is
     provider))
 
+(defn- outputs-have-nil?
+  "Check if any output values are nil."
+  [outputs]
+  (some nil? (vals outputs)))
+
 (defn execute-ai
   "Execute a leaf node using DSCloj AI.
 
@@ -262,7 +267,7 @@
      node - The leaf node map
      blackboard - Map of key -> {:key, :type, :value, :version}
      provider - DSCloj provider keyword (e.g., :openrouter, :anthropic)
-     options - Optional DSCloj options map (can include :model)
+     options - Optional DSCloj options map (can include :model, :max-retries, :retry-delay-ms)
 
    Returns:
      {:status :success/:failure
@@ -281,24 +286,36 @@
         ;; Build effective provider config with model override if specified
         effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking
-        dscloj-options (assoc options :with-metadata? true)]
+        dscloj-options (assoc options :with-metadata? true)
+        ;; Retry config - defaults to 1 retry with 500ms delay
+        max-retries (get options :max-retries 1)
+        retry-delay-ms (get options :retry-delay-ms 500)
+
+        ;; Single attempt function
+        try-once (fn []
+                   (let [result (dscloj/predict effective-provider dscloj-module inputs dscloj-options)
+                         raw-outputs (:outputs result)
+                         outputs (reduce-kv (fn [acc k v]
+                                              (let [sanitized-name (name k)
+                                                    original-key (get output-key-mapping sanitized-name sanitized-name)]
+                                                (assoc acc original-key v)))
+                                            {}
+                                            raw-outputs)]
+                     {:outputs outputs :usage (:usage result) :model (:model result)}))]
     (try
-      (let [result (dscloj/predict effective-provider dscloj-module inputs dscloj-options)
-            ;; Result now has {:outputs {...} :usage {...} :model "..."}
-            raw-outputs (:outputs result)
-            ;; Convert sanitized keys back to original blackboard keys
-            outputs (reduce-kv (fn [acc k v]
-                                 (let [sanitized-name (name k)
-                                       original-key (get output-key-mapping sanitized-name sanitized-name)]
-                                   (assoc acc original-key v)))
-                               {}
-                               raw-outputs)
-            duration-ms (- (System/currentTimeMillis) start-time)]
-        {:status :success
-         :outputs outputs
-         :duration-ms duration-ms
-         :usage (:usage result)
-         :model (:model result)})
+      (loop [attempt 0]
+        (let [{:keys [outputs usage model]} (try-once)]
+          (if (and (outputs-have-nil? outputs)
+                   (< attempt max-retries))
+            (do
+              (Thread/sleep retry-delay-ms)
+              (recur (inc attempt)))
+            ;; Return result (with or without nils)
+            {:status :success
+             :outputs outputs
+             :duration-ms (- (System/currentTimeMillis) start-time)
+             :usage usage
+             :model model})))
       (catch Exception e
         {:status :failure
          :error (.getMessage e)
