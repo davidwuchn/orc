@@ -1727,7 +1727,9 @@ CHECK THE PROGRAM SECTOR TO USE THE RIGHT FORMAT:
   * Example: 'Graduates earn $45,000 in year one (93% of LA cost of living), growing to $58,000 by year five (10% above LA median)'
   * If no earnings data, set to null
 
-Make it personal - reference the student's specific goals, interests, and circumstances."
+Make it personal - reference the student's specific goals, interests, and circumstances.
+
+IMPORTANT: Format your response with [[ ## personalization ## ]] followed by a JSON object."
               :reads ["current-program" "student-analysis" "student-profile"]
               :writes ["personalization"]))
 
@@ -1767,7 +1769,9 @@ GENERATE:
 
 - is-hbcu: true if HBCU (check the is-hbcu field)
 
-CRITICAL: Never say '$0-$0 per year' - say 'essentially covered' instead."
+CRITICAL: Never say '$0-$0 per year' - say 'essentially covered' instead.
+
+IMPORTANT: Format your response with [[ ## institution-bullets ## ]] followed by a JSON object."
               :reads ["current-institution" "student-analysis" "student-profile"]
               :writes ["institution-bullets"])))
 
@@ -1787,7 +1791,9 @@ CRITICAL: Never say '$0-$0 per year' - say 'essentially covered' instead."
 - ethnicity: e.g., 'African American', 'Hispanic', 'Caucasian', etc.
 - state-residency: 'Louisiana' (all BRYC students are LA residents)
 - career-fields: List of career interests from their profile
-- financial-need: true if the student appears to have financial need"
+- financial-need: true if the student appears to have financial need
+
+IMPORTANT: Format your response with [[ ## student-eligibility ## ]] followed by a JSON object."
             :reads ["student-profile"]
             :writes ["student-eligibility"])
 
@@ -1828,7 +1834,9 @@ Provide:
 - demographic-match: true if student matches any demographic requirements
 - explanation: 2-3 sentences explaining why this scholarship fits the student
 - application-tips: 1-2 specific tips for applying
-- priority: 'high', 'medium', or 'low' based on fit and deadline"
+- priority: 'high', 'medium', or 'low' based on fit and deadline
+
+IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] followed by a JSON object."
               :reads ["current-scholarship" "student-eligibility" "student-profile"]
               :writes ["scholarship-verification"]))))
 
