@@ -315,6 +315,110 @@
          {:traces (vec limited)
           :total (count filtered)}}))))
 
+(defn- instant->str
+  "Convert an Instant or OffsetDateTime to ISO string for Transit serialization."
+  [t]
+  (when t (str t)))
+
+(defn- serialize-node-trace
+  "Serialize a node trace for Transit, converting timestamps."
+  [nt]
+  (-> nt
+      (update :started-at instant->str)
+      (update :completed-at instant->str)))
+
+(defn- serialize-node-trace-summary
+  "Serialize a node trace summary (without inputs/outputs) for Transit."
+  [nt]
+  (-> nt
+      (dissoc :inputs :outputs)
+      (update :started-at instant->str)
+      (update :completed-at instant->str)))
+
+(defn- serialize-trace
+  "Serialize a full trace for Transit, converting all timestamps.
+   Uses summary node-traces (no inputs/outputs) to keep payload small."
+  [trace]
+  (when trace
+    (-> trace
+        (update :started-at instant->str)
+        (update :completed-at instant->str)
+        (update :node-traces #(mapv serialize-node-trace-summary %)))))
+
+(defquery :sheet runs-screen
+  "Fat query for the /runs screen.
+   Returns trace summaries for list + optionally full trace detail.
+
+   Query params:
+     :trace-id - Optional. If provided, includes full trace data for detail view.
+     :status - Optional. Filter list by status (:success, :failure, :timeout).
+     :limit - Optional. Max traces in list (default 100)."
+  [{{:keys [trace-id status limit]} :query
+    :keys [event-store]}]
+  (let [;; Get all traces for list (summaries only)
+        all-traces (rm/get-all-traces event-store)
+        sheets-map (rm/get-sheets-name-map event-store)
+
+        ;; Filter and transform to summaries
+        filtered (cond->> all-traces
+                   status (filter #(= status (:status %))))
+        sorted (sort-by :started-at #(compare %2 %1) filtered)
+        limited (take (or limit 100) sorted)
+        summaries (mapv (fn [t]
+                          {:trace-id (:trace-id t)
+                           :sheet-id (:sheet-id t)
+                           :sheet-name (get sheets-map (:sheet-id t) "Unknown")
+                           :status (:status t)
+                           :started-at (instant->str (:started-at t))
+                           :duration-ms (:duration-ms t)
+                           :node-count (count (:node-traces t))
+                           :version-number (:version-number t)})
+                        limited)
+
+        ;; Get full trace if requested
+        selected-trace (when trace-id
+                         (serialize-trace (rm/get-trace event-store trace-id)))]
+    {:query/result
+     {:traces summaries
+      :total (count filtered)
+      :selected-trace selected-trace}}))
+
+(defquery :sheet node-trace-detail
+  "Fetch inputs/outputs for a specific node trace on demand.
+
+   Query params:
+     :trace-id - The execution trace ID.
+     :node-id - The node ID within the trace."
+  [{{:keys [trace-id node-id]} :query
+    :keys [event-store]}]
+  (let [trace (rm/get-trace event-store trace-id)
+        node-trace (some #(when (= (:node-id %) node-id) %)
+                         (:node-traces trace))]
+    (if node-trace
+      {:query/result
+       {:node-id node-id
+        :inputs (:inputs node-trace)
+        :outputs (:outputs node-trace)}}
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Node trace not found: " node-id)})))
+
+(defquery :sheet run-detail-screen
+  "Fat query for the /runs/detail screen.
+   Returns full trace data for a single run.
+
+   Query params:
+     :trace-id - The execution trace ID."
+  [{{:keys [trace-id]} :query
+    :keys [event-store]}]
+  (let [trace (rm/get-trace event-store trace-id)
+        sheets-map (rm/get-sheets-name-map event-store)]
+    (if trace
+      {:query/result
+       {:trace (-> (serialize-trace trace)
+                   (assoc :sheet-name (get sheets-map (:sheet-id trace) "Unknown")))}}
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Trace not found: " trace-id)})))
+
 ;; =============================================================================
 ;; Structural Diff
 ;; =============================================================================

@@ -747,3 +747,14 @@
   [event-store sheet-id version-number]
   (->> (get-traces-for-sheet event-store sheet-id)
        (filter #(= version-number (:version-number %)))))
+
+(defn get-all-traces
+  "Get all execution traces across all sheets"
+  [event-store]
+  (let [events (event-store/read event-store {:types trace-events})]
+    (vals (traces {} events))))
+
+(defn get-sheets-name-map
+  "Get map of sheet-id -> sheet-name for denormalization"
+  [event-store]
+  (into {} (map (juxt :id :name) (get-sheets-all event-store))))

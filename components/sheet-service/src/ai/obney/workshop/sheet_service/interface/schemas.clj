@@ -814,6 +814,55 @@
     [:total :int]]
 
    ;; -------------------------------------------------------------------------
+   ;; Runs Screen Query (all traces across all sheets)
+   ;; -------------------------------------------------------------------------
+
+   :sheet/runs-screen
+   [:map
+    [:trace-id {:optional true} :uuid]
+    [:status {:optional true} [:enum :success :failure :timeout]]
+    [:limit {:optional true} :int]]
+
+   :sheet/runs-screen-result
+   [:map
+    [:traces [:vector ::execution-trace-summary]]
+    [:total :int]
+    [:selected-trace {:optional true} ::execution-trace]]
+
+   ;; Summary version of execution trace for list views
+   ::execution-trace-summary
+   [:map
+    [:trace-id :uuid]
+    [:sheet-id :uuid]
+    [:sheet-name :string]
+    [:status [:enum :success :failure :timeout]]
+    [:started-at :any]
+    [:duration-ms :int]
+    [:node-count :int]
+    [:version-number {:optional true} :int]]
+
+   ;; On-demand node trace detail (inputs/outputs)
+   :sheet/node-trace-detail
+   [:map
+    [:trace-id :uuid]
+    [:node-id :uuid]]
+
+   :sheet/node-trace-detail-result
+   [:map
+    [:node-id :uuid]
+    [:inputs {:optional true} :map]
+    [:outputs {:optional true} :map]]
+
+   ;; Run Detail Screen Query (single trace with full data)
+   :sheet/run-detail-screen
+   [:map
+    [:trace-id :uuid]]
+
+   :sheet/run-detail-screen-result
+   [:map
+    [:trace ::execution-trace]]
+
+   ;; -------------------------------------------------------------------------
    ;; Structural Diff Query
    ;; -------------------------------------------------------------------------
 

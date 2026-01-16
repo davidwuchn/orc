@@ -8,13 +8,16 @@
             [components.context.interface :as context]
             [store.auth.subs :as auth-subs]
             [components.home.interface :as home]
-            [components.sheet.interface :as sheet]))
+            [components.sheet.interface :as sheet]
+            [components.runs.interface :as runs]))
 
 (def routes
   [["/" {:name :root :redirect "/home"}]
    ["/home" {:name :home :view home/main :protected? true}]
    ["/sheets" {:name :sheets :view sheet/main :protected? true}]
    ["/sheet" {:name :sheet :view sheet/main :protected? true}]
+   ["/runs" {:name :runs :view runs/runs-list-page :protected? true}]
+   ["/runs/detail" {:name :run-detail :view runs/run-detail-page :protected? true}]
    ["/auth"
     ["" {:name :auth :view auth/main}]
     ["/*path" {:name :auth-sub :view auth/main}]]])
@@ -22,9 +25,25 @@
 (defonce router (rf/router routes))
 (defonce match (atom nil))
 
+(defn- parse-query-params
+  "Parse query string into a map."
+  [query-string]
+  (when (and query-string (not (str/blank? query-string)))
+    (let [qs (if (str/starts-with? query-string "?")
+               (subs query-string 1)
+               query-string)]
+      (into {}
+            (for [pair (str/split qs #"&")
+                  :let [[k v] (str/split pair #"=" 2)]
+                  :when (not (str/blank? k))]
+              [k (js/decodeURIComponent (or v ""))])))))
+
 (defonce history
-  (pushy/pushy 
-    #(reset! match %)
+  (pushy/pushy
+    (fn [route-match]
+      ;; Augment match with query params from current URL
+      (let [query-params (parse-query-params js/window.location.search)]
+        (reset! match (assoc route-match :query-params query-params))))
     #(rf/match-by-path router %)))
 
 (defui router-outlet []

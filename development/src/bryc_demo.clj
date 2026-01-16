@@ -1980,6 +1980,8 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
   ;; Should see technical and STEM programs
   (run-demo rs/context sheet-id "claude")
 
+  1
+
   ;; Maya: 3.3 GPA, 17 ACT, business, TOPS Tech
   ;; Should see business-related programs
   (run-demo rs/context sheet-id "maya")

@@ -15,7 +15,14 @@
            :dependency-graph {:nodes {} :edges #{}}
            :selected-cell-id nil
            :loading? false
-           :error nil}})
+           :error nil}
+   :runs {:list []          ;; List of trace summaries
+          :total 0
+          :loading? false
+          :error nil
+          :selected-trace nil
+          :selected-trace-id nil
+          :filters {:status nil}}})
 
 (rf/reg-event-db
  ::initialize
