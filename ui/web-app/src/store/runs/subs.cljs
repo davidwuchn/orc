@@ -83,23 +83,25 @@
 ;; =============================================================================
 
 (defn- compute-depths
-  "Compute depth for each node based on parent relationships."
+  "Compute depth for each node based on parent relationships.
+   Uses trace-instance-id for unique instance lookups."
   [node-traces]
-  (let [by-id (into {} (map (juxt :node-id identity) node-traces))]
+  ;; Build map by trace-instance-id (unique per execution)
+  (let [by-instance-id (into {} (map (juxt :trace-instance-id identity) node-traces))]
     (loop [result {}
-           to-process (map :node-id node-traces)]
+           to-process (map :trace-instance-id node-traces)]
       (if (empty? to-process)
         result
-        (let [node-id (first to-process)
-              node (get by-id node-id)]
-          (if-let [parent-id (:parent-id node)]
-            (if-let [parent-depth (get result parent-id)]
-              (recur (assoc result node-id (inc parent-depth))
+        (let [instance-id (first to-process)
+              node (get by-instance-id instance-id)]
+          (if-let [parent-instance-id (:parent-trace-instance-id node)]
+            (if-let [parent-depth (get result parent-instance-id)]
+              (recur (assoc result instance-id (inc parent-depth))
                      (rest to-process))
               ;; Parent not processed yet, defer this node
-              (recur result (concat (rest to-process) [node-id])))
+              (recur result (concat (rest to-process) [instance-id])))
             ;; Root node (no parent)
-            (recur (assoc result node-id 0)
+            (recur (assoc result instance-id 0)
                    (rest to-process))))))))
 
 (defn- parse-timestamp
@@ -121,27 +123,45 @@
       (- end-ms start-ms)
       0)))
 
+(defn- tree-order-sort
+  "Sort nodes in tree order: parents before children, siblings by start-ms.
+   Uses trace-instance-id for proper parent-child linking."
+  [nodes]
+  (let [by-parent (group-by :parent-trace-instance-id nodes)
+        walk (fn walk [parent-instance-id]
+               (let [children (get by-parent parent-instance-id [])
+                     sorted-children (sort-by :start-ms children)]
+                 (mapcat (fn [child]
+                           (cons child (walk (:trace-instance-id child))))
+                         sorted-children)))]
+    ;; Start from root nodes (parent-trace-instance-id = nil)
+    (vec (walk nil))))
+
 (defn transform-for-flame-graph
   "Transform node traces into flame graph compatible format."
   [trace]
   (when trace
     (let [trace-start (:started-at trace)
           node-traces (:node-traces trace)
-          depth-map (compute-depths node-traces)]
-      (mapv (fn [nt]
-              {:id (:node-id nt)
-               :name (:node-name nt)
-               :type (:node-type nt)
-               :status (:status nt)
-               :start-ms (ms-since trace-start (:started-at nt))
-               :end-ms (ms-since trace-start (:completed-at nt))
-               :duration (:duration-ms nt)
-               :depth (get depth-map (:node-id nt) 0)
-               :parent-id (:parent-id nt)
-               :inputs (:inputs nt)
-               :outputs (:outputs nt)
-               :error (:error nt)})
-            node-traces))))
+          depth-map (compute-depths node-traces)
+          transformed (mapv (fn [nt]
+                              {:id (:node-id nt)
+                               :trace-instance-id (:trace-instance-id nt)
+                               :parent-trace-instance-id (:parent-trace-instance-id nt)
+                               :name (:node-name nt)
+                               :type (:node-type nt)
+                               :status (:status nt)
+                               :start-ms (ms-since trace-start (:started-at nt))
+                               :end-ms (ms-since trace-start (:completed-at nt))
+                               :duration (:duration-ms nt)
+                               :depth (get depth-map (:trace-instance-id nt) 0)
+                               :parent-id (:parent-id nt)
+                               :inputs (:inputs nt)
+                               :outputs (:outputs nt)
+                               :error (:error nt)})
+                            node-traces)]
+      ;; Sort in tree order so children appear directly under parents
+      (tree-order-sort transformed))))
 
 (rf/reg-sub
   ::flame-graph-data

@@ -281,6 +281,8 @@
 
    path-ctx is a map with:
      :parent-id - UUID of parent node (nil for root)
+     :parent-trace-instance-id - UUID of parent's trace instance (nil for root)
+     :parent-langfuse-obs-id - Langfuse observation ID of parent (nil for root)
      :path - Vector of node names from root to this node's parent
      :child-index - Index of this node among its siblings (nil for root)"
   [node-id nodes-by-id blackboard context path-ctx]
@@ -289,18 +291,24 @@
         internal-trace (:internal-trace context)
         start-time (System/currentTimeMillis)
         started-at (time/now)
+        ;; Generate unique instance ID for this execution
+        trace-instance-id (random-uuid)
+        ;; Generate unique Langfuse observation ID for this execution
+        langfuse-obs-id (str "obs-" trace-instance-id)
         ;; Extract path context
         parent-id (:parent-id path-ctx)
+        parent-trace-instance-id (:parent-trace-instance-id path-ctx)
+        parent-obs-id (:parent-langfuse-obs-id path-ctx)
         current-path (or (:path path-ctx) [])
-        child-index (:child-index path-ctx)
-        ;; Parent observation ID for Langfuse nesting
-        parent-obs-id (when parent-id (tracing/node-observation-id parent-id))]
+        child-index (:child-index path-ctx)]
     (if-not node
       {:status :failure :error (str "Node not found: " node-id) :blackboard blackboard}
       (let [node-name (:name node)
             node-type (:type node)
-            ;; Path context for children
+            ;; Path context for children - includes this node's trace-instance-id as their parent
             child-path-ctx {:parent-id node-id
+                            :parent-trace-instance-id trace-instance-id
+                            :parent-langfuse-obs-id langfuse-obs-id
                             :path (conj current-path node-name)
                             :child-index 0}
             result
@@ -327,12 +335,15 @@
                                         :outputs (:outputs leaf-result)
                                         :status (:status leaf-result)
                                         :error (:error leaf-result)
+                                        :observation-id langfuse-obs-id
                                         :parent-observation-id parent-obs-id
                                         :usage (:usage leaf-result)}))
                 ;; Record to internal trace (always)
                 (when internal-trace
                   (tracing/record-node-trace! internal-trace
                                               {:node-id node-id
+                                               :trace-instance-id trace-instance-id
+                                               :parent-trace-instance-id parent-trace-instance-id
                                                :node-name node-name
                                                :node-type :leaf
                                                :parent-id parent-id
@@ -365,6 +376,8 @@
                 (when internal-trace
                   (tracing/record-node-trace! internal-trace
                                               {:node-id node-id
+                                               :trace-instance-id trace-instance-id
+                                               :parent-trace-instance-id parent-trace-instance-id
                                                :node-name node-name
                                                :node-type :condition
                                                :parent-id parent-id
@@ -405,12 +418,15 @@
                                         :outputs {:result (:result llm-result)}
                                         :status final-status
                                         :error (:error llm-result)
+                                        :observation-id langfuse-obs-id
                                         :parent-observation-id parent-obs-id
                                         :usage (:usage llm-result)}))
                 ;; Record to internal trace
                 (when internal-trace
                   (tracing/record-node-trace! internal-trace
                                               {:node-id node-id
+                                               :trace-instance-id trace-instance-id
+                                               :parent-trace-instance-id parent-trace-instance-id
                                                :node-name node-name
                                                :node-type :llm-condition
                                                :parent-id parent-id
@@ -456,11 +472,14 @@
                                 :outputs nil
                                 :status (:status result)
                                 :error (:error result)
+                                :observation-id langfuse-obs-id
                                 :parent-observation-id parent-obs-id}))
         ;; Record composite nodes to internal trace (always)
         (when (and internal-trace (not (#{:leaf :condition :llm-condition} (:type node))))
           (tracing/record-node-trace! internal-trace
                                       {:node-id node-id
+                                       :trace-instance-id trace-instance-id
+                                       :parent-trace-instance-id parent-trace-instance-id
                                        :node-name node-name
                                        :node-type node-type
                                        :parent-id parent-id
@@ -689,6 +708,8 @@
 
         ;; Root path context (no parent)
         root-path-ctx {:parent-id nil
+                       :parent-trace-instance-id nil
+                       :parent-langfuse-obs-id nil
                        :path []
                        :child-index nil}
 

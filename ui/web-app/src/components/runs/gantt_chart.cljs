@@ -136,13 +136,12 @@
 
         total-duration (or (:duration-ms trace) 1)
         row-height 28
-        label-width 200
+        label-width 300
 
-        ;; Sort by start time
-        sorted-data (sort-by :start-ms data)
+        ;; Data is already tree-order sorted by the subscription
 
         ;; Calculate chart dimensions
-        num-rows (count sorted-data)
+        num-rows (count data)
         chart-height (* num-rows row-height)]
 
     ($ :div {:class "h-full flex"}
@@ -163,15 +162,15 @@
                          :style {:width label-width}}
                    ;; Header spacer to match time axis height
                    ($ :div {:class "sticky top-0 h-6 bg-gray-50 border-b z-10"})
-                   (for [[idx node] (map-indexed vector sorted-data)]
+                   (for [[idx node] (map-indexed vector data)]
                      ($ :div {:key (str (:id node) "-" idx)
-                              :class (str "flex items-center px-2 text-xs truncate border-b cursor-pointer hover:bg-blue-50 "
+                              :class (str "flex items-center px-2 text-xs border-b cursor-pointer hover:bg-blue-50 "
                                           (when (= selected-node node) "bg-blue-100"))
                               :style {:height row-height}
                               :onClick #(handle-node-click node %)}
-                        ;; Indent based on depth
-                        ($ :span {:style {:width (* (:depth node) 12)}})
-                        ($ :span {:class "truncate"} (:name node)))))
+                        ;; Indent based on depth (20px per level)
+                        ($ :span {:class "shrink-0" :style {:width (* (:depth node) 20)}})
+                        ($ :span {:class "whitespace-nowrap"} (:name node)))))
 
                 ;; Right: Timeline bars
                 ($ :div {:class "flex-1 relative"}
@@ -194,16 +193,18 @@
                                  :style {:left (str pct "%")}}))
 
                       ;; Node bars
-                      (for [[idx node] (map-indexed vector sorted-data)]
+                      (for [[idx node] (map-indexed vector data)]
                         (let [{:keys [id status start-ms end-ms]} node
                               left-pct (* (/ start-ms total-duration) 100)
                               width-pct (* (/ (- end-ms start-ms) total-duration) 100)
+                              ;; Minimum 2% width so short nodes are visible
+                              display-width-pct (max width-pct 2)
                               top (* idx row-height)]
                           ($ :div {:key (str id "-" idx)
                                    :class (str "absolute flex items-center cursor-pointer "
                                                (when (= selected-node node) "z-10"))
                                    :style {:left (str left-pct "%")
-                                           :width (str (max width-pct 0.5) "%")
+                                           :width (str display-width-pct "%")
                                            :top top
                                            :height row-height
                                            :padding "2px 0"}

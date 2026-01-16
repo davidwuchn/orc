@@ -50,7 +50,7 @@
   (let [ctx (context/use-context)
         api-client (:api/client ctx)
         navigate! (:router/navigate! ctx)
-        trace-id-str (get query-params "trace-id")
+        trace-id-str (:trace-id query-params)
         trace-id (when trace-id-str (uuid trace-id-str))
         loading? (use-subscribe [::runs-subs/selected-trace-loading?])
         trace (use-subscribe [::runs-subs/selected-trace])]

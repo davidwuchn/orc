@@ -26,7 +26,7 @@
 (defonce match (atom nil))
 
 (defn- parse-query-params
-  "Parse query string into a map."
+  "Parse query string into a map with keyword keys."
   [query-string]
   (when (and query-string (not (str/blank? query-string)))
     (let [qs (if (str/starts-with? query-string "?")
@@ -36,7 +36,7 @@
             (for [pair (str/split qs #"&")
                   :let [[k v] (str/split pair #"=" 2)]
                   :when (not (str/blank? k))]
-              [k (js/decodeURIComponent (or v ""))])))))
+              [(keyword k) (js/decodeURIComponent (or v ""))])))))
 
 (defonce history
   (pushy/pushy

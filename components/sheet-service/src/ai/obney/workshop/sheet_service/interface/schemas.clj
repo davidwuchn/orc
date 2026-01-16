@@ -170,9 +170,11 @@
    ::node-trace
    [:map
     [:node-id :uuid]
+    [:trace-instance-id :uuid]                    ;; Unique ID for this execution instance
+    [:parent-trace-instance-id {:optional true} :uuid]  ;; Links to parent's trace-instance-id
     [:node-name :string]
     [:node-type node-type]
-    [:parent-id {:optional true} :uuid]           ;; Parent node in tree
+    [:parent-id {:optional true} :uuid]           ;; Parent node ID (for reference only)
     [:path [:vector :string]]                     ;; Path from root e.g. ["root" "fallback-1" "task-a"]
     [:child-index {:optional true} :int]          ;; Which child of parent (0-indexed)
     [:status [:enum :success :failure :running :skipped]]
