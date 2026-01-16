@@ -1533,7 +1533,7 @@
 
       (sheet/llm "analyze-student-comprehensive"
         :model "google/gemini-2.5-flash"
-        :instruction "Analyze this high school student profile comprehensively. Return a JSON object with these fields (use camelCase, no hyphens):
+        :instruction "Analyze this high school student profile comprehensively. Provide these fields (use camelCase):
 
 REQUIRED FIELDS:
 - hardRequirements: Non-negotiable needs based on their goals and preferences
@@ -1558,7 +1558,9 @@ ACADEMIC CONTEXT:
   * likelySuccessSectors: List of sectors where student is likely to succeed (e.g., ['2-year', '4-year with support', 'apprenticeships'])
   * concerns: List of academic concerns (e.g., ['ACT below typical 4-year threshold', 'May need developmental courses'])
 
-Be specific based on their GPA, ACT score, TOPS award, color-profile, and stated interests."
+Be specific based on their GPA, ACT score, TOPS award, color-profile, and stated interests.
+
+IMPORTANT: Format your response with [[ ## student-analysis ## ]] followed by a JSON object."
         :reads ["student-profile"]
         :writes ["student-analysis"])
 
@@ -1576,7 +1578,9 @@ For each strategy provide:
 - strategy: Short description of the search approach
 - keywords: 2-4 keywords to search for in program titles and descriptions
 
-Example strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'healthcare']"
+Example strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'healthcare']
+
+IMPORTANT: Format your response with [[ ## search-strategies ## ]] followed by a JSON array."
         :reads ["student-profile" "student-analysis"]
         :writes ["search-strategies"])
 
@@ -1613,21 +1617,21 @@ Example strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'he
                   :model "google/gemini-2.5-flash"
                   :instruction "Score how well this student's academic profile (GPA, ACT) matches this program's requirements.
 Consider the program's typical ACT range and sector (4-Year vs 2-Year).
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis"]
                   :writes ["academic-score"])
 
                 (sheet/llm "score-career"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program aligns with the student's stated career interests.
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis"]
                   :writes ["career-score"])
 
                 (sheet/llm "score-preference"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program matches the student's preferences (location, institution type).
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis"]
                   :writes ["preference-score"])
 
@@ -1652,21 +1656,21 @@ SCORING GUIDE:
 - 0.2-0.3: Net tuition $10,000-$20,000/year
 - 0.0-0.1: Net tuition $20,000+/year
 
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis" "student-profile"]
                   :writes ["financial-score"])
 
                 (sheet/llm "score-outcome"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score the program's outcome potential based on earnings data and sector reputation.
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis"]
                   :writes ["outcome-score"])
 
                 (sheet/llm "score-pathway"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score how well this program fits into the student's career trajectory and long-term goals.
-Return ONLY a single decimal number between 0.0 and 1.0. No other text."
+Provide a score as a decimal number between 0.0 and 1.0."
                   :reads ["current-program" "student-analysis"]
                   :writes ["pathway-score"]))
 
