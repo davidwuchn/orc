@@ -19,25 +19,41 @@
 ;; =============================================================================
 
 (defcommand :sheet create-sheet
-  "Create a new sheet."
-  [{{:keys [name]} :command
+  "Create a new sheet. Name must be unique.
+   If sheet-id is provided, uses that ID (for deterministic UUIDs).
+   Otherwise generates a random UUID."
+  [{{:keys [name sheet-id]} :command
     :keys [event-store]}]
-  (let [sheet-id (random-uuid)]
-    {:command-result/events
-     [(->event
-       {:type :sheet/sheet-created
-        :tags #{[:sheet sheet-id]}
-        :body {:sheet-id sheet-id
-               :name name}})]}))
+  (let [existing (rm/get-sheet-by-name event-store name)]
+    (if existing
+      {::anom/category ::anom/conflict
+       ::anom/message (str "Sheet with name '" name "' already exists")
+       :existing-sheet-id (:id existing)}
+      (let [new-sheet-id (or sheet-id (random-uuid))]
+        {:command-result/events
+         [(->event
+           {:type :sheet/sheet-created
+            :tags #{[:sheet new-sheet-id]}
+            :body {:sheet-id new-sheet-id
+                   :name name}})]}))))
 
 (defcommand :sheet rename-sheet
-  "Rename an existing sheet."
+  "Rename an existing sheet. New name must be unique."
   [{{:keys [sheet-id name]} :command
     :keys [event-store]}]
-  (let [sheet (rm/get-sheet event-store sheet-id)]
-    (if-not sheet
+  (let [sheet (rm/get-sheet event-store sheet-id)
+        existing (rm/get-sheet-by-name event-store name)]
+    (cond
+      (not sheet)
       {::anom/category ::anom/not-found
        ::anom/message "Sheet not found"}
+
+      (and existing (not= (:id existing) sheet-id))
+      {::anom/category ::anom/conflict
+       ::anom/message (str "Sheet with name '" name "' already exists")
+       :existing-sheet-id (:id existing)}
+
+      :else
       {:command-result/events
        [(->event
          {:type :sheet/sheet-renamed

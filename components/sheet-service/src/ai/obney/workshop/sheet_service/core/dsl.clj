@@ -11,7 +11,7 @@
           :programs [:vector :map]
           :recommendations [:vector :map]})
 
-       (sequence
+       (sequence \"main\"
          (code \"fetch-programs\"
            :fn \"myapp.fns/fetch-programs\"
            :reads [\"student-profile\"]
@@ -22,7 +22,7 @@
            :as \"current-program\"
            :into \"scored-programs\"
            :parallel 5
-           (parallel
+           (parallel \"scoring\"
              (llm \"academic\"
                :model \"google/gemini-2.5-flash\"
                :instruction \"Score academic fit 0-100\"
@@ -34,16 +34,85 @@
                :reads [\"current-program\" \"student-profile\"]
                :writes [\"career-score\"]))))))
 
-   ;; Build and execute
+   ;; Build and execute - idempotent, name is identity
    (def sheet-id (build-workflow! ctx my-workflow))
    (sheet/execute ctx sheet-id {\"student-profile\" {...}})
-   ```"
+
+   ;; Rebuild after changes - same sheet-id, nodes updated
+   (build-workflow! ctx modified-workflow)
+   ```
+
+   ## Identity Model
+
+   - Workflow name → deterministic sheet-id (UUID v5)
+   - Node name → deterministic node-id (UUID v5)
+   - All nodes must have unique names within a workflow
+   - Reordering nodes preserves their IDs
+   - Renaming a node = new identity"
   (:require [ai.obney.workshop.sheet-service.test-helpers :as h]
             [ai.obney.workshop.sheet-service.core.read-models :as rm]
             [ai.obney.grain.time.interface :as time]
             [clojure.java.io :as io]
             [clojure.pprint :as pprint]
-            [clojure.string]))
+            [clojure.string])
+  (:import [java.security MessageDigest]
+           [java.nio ByteBuffer]
+           [java.util UUID]))
+
+;; =============================================================================
+;; UUID v5 (Deterministic, Name-Based)
+;; =============================================================================
+
+(def ^:private ^UUID sheets-namespace
+  "Namespace UUID for generating sheet IDs from workflow names."
+  #uuid "a1b2c3d4-e5f6-4789-abcd-ef0123456789")
+
+(defn- uuid->bytes
+  "Convert a UUID to a 16-byte array."
+  [^UUID uuid]
+  (let [bb (ByteBuffer/allocate 16)]
+    (.putLong bb (.getMostSignificantBits uuid))
+    (.putLong bb (.getLeastSignificantBits uuid))
+    (.array bb)))
+
+(defn- bytes->uuid
+  "Convert a 16-byte array to a UUID with version 5 and variant bits set."
+  [^bytes b]
+  (let [bb (ByteBuffer/wrap b)]
+    ;; Set version 5 (name-based SHA-1)
+    (aset b 6 (unchecked-byte (bit-or (bit-and (aget b 6) 0x0f) 0x50)))
+    ;; Set variant (RFC 4122)
+    (aset b 8 (unchecked-byte (bit-or (bit-and (aget b 8) 0x3f) 0x80)))
+    (UUID. (.getLong (ByteBuffer/wrap b))
+           (.getLong (ByteBuffer/wrap b 8 8)))))
+
+(defn uuid-v5
+  "Generate a deterministic UUID v5 from a namespace UUID and a name string.
+   Same inputs always produce the same UUID."
+  [^UUID namespace-uuid ^String name]
+  (let [md (MessageDigest/getInstance "SHA-1")
+        namespace-bytes (uuid->bytes namespace-uuid)
+        name-bytes (.getBytes name "UTF-8")]
+    (.update md namespace-bytes)
+    (.update md name-bytes)
+    (let [hash (.digest md)
+          uuid-bytes (byte-array 16)]
+      (System/arraycopy hash 0 uuid-bytes 0 16)
+      (bytes->uuid uuid-bytes))))
+
+(defn sheet-id-for-name
+  "Generate a deterministic sheet-id from a workflow name."
+  [workflow-name]
+  (uuid-v5 sheets-namespace workflow-name))
+
+(defn node-id-for-name
+  "Generate a deterministic node-id from a sheet-id and node name."
+  [sheet-id node-name]
+  (uuid-v5 sheet-id node-name))
+
+;; =============================================================================
+;; Node Builders (Data Structures)
+;; =============================================================================
 
 ;; =============================================================================
 ;; Node Builders (Data Structures)
@@ -112,29 +181,38 @@
    :reads (vec reads)})
 
 (defn sequence
-  "Define a sequence node (runs children in order, fails on first failure)."
-  [& children]
+  "Define a sequence node (runs children in order, fails on first failure).
+
+   Name is required for stable identity across rebuilds."
+  [name & children]
   {:node-type :sequence
+   :name name
    :children (vec children)})
 
 (defn fallback
-  "Define a fallback node (runs children in order, succeeds on first success)."
-  [& children]
+  "Define a fallback node (runs children in order, succeeds on first success).
+
+   Name is required for stable identity across rebuilds."
+  [name & children]
   {:node-type :fallback
+   :name name
    :children (vec children)})
 
 (defn parallel
   "Define a parallel node (runs all children concurrently).
 
-   Options (as first arg if map):
+   Name is required for stable identity across rebuilds.
+
+   Options:
      :success-policy - :all (default), :any, :majority
      :failure-policy - :any (default), :all"
-  [& args]
+  [name & args]
   (let [[opts children] (if (and (map? (first args))
                                  (contains? (first args) :success-policy))
                           [(first args) (rest args)]
                           [{} args])]
     {:node-type :parallel
+     :name name
      :success-policy (or (:success-policy opts) :all)
      :failure-policy (or (:failure-policy opts) :any)
      :children (vec children)}))
@@ -202,19 +280,23 @@
 ;; =============================================================================
 
 (defn- build-node!
-  "Recursively build a node and its children. Returns the node-id."
+  "Recursively build a node and its children. Returns the node-id.
+   Node ID is deterministic based on sheet-id and node name (v5 UUID)."
   [ctx sheet-id node parent-id index]
   (let [node-type (:node-type node)
-        ;; Create the node
+        node-name (:name node)
+        ;; Calculate deterministic node-id from name
+        node-id (when node-name (node-id-for-name sheet-id node-name))
+        ;; Create the node with explicit ID
         create-result (h/run-and-apply! ctx
                         (h/make-create-node-command sheet-id node-type
+                          :node-id node-id
                           :parent-id parent-id
-                          :index index))
-        node-id (-> create-result :command-result/events first :node-id)]
+                          :index index))]
 
-    ;; Set name if provided
-    (when (:name node)
-      (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node-id (:name node))))
+    ;; Set name
+    (when node-name
+      (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node-id node-name)))
 
     ;; Configure based on node type
     (case node-type
@@ -277,44 +359,82 @@
 
     node-id))
 
+(defn- clear-sheet-content!
+  "Clear all nodes and blackboard keys from a sheet, preparing it for rebuild."
+  [ctx sheet-id]
+  (let [es (:event-store ctx)
+        ;; Get all nodes and delete them (deleting root cascades to children)
+        sheet (rm/get-sheet es sheet-id)
+        root-id (:root-node-id sheet)
+        ;; Get all blackboard keys
+        bb-keys (rm/get-blackboard-for-sheet es sheet-id)]
+
+    ;; Delete root node (cascades to children)
+    (when root-id
+      (h/run-and-apply! ctx (h/make-delete-node-command sheet-id root-id)))
+
+    ;; Delete all blackboard keys
+    (doseq [bb-entry bb-keys]
+      (h/run-and-apply! ctx (h/make-delete-key-command sheet-id (:key bb-entry))))))
+
+(defn- build-sheet-content!
+  "Build blackboard and node tree for a sheet from workflow definition."
+  [ctx sheet-id {:keys [blackboard-schema root-node]}]
+  ;; Declare blackboard keys
+  (doseq [[key-name schema] blackboard-schema]
+    (h/run-and-apply! ctx
+      (h/make-declare-key-command sheet-id (name key-name) schema)))
+
+  ;; Build the tree
+  (when root-node
+    (build-node! ctx sheet-id root-node nil 0)))
+
 (defn build-workflow!
-  "Build a workflow definition into an actual sheet.
+  "Idempotent workflow builder. Creates or updates a workflow by name.
+
+   - If a sheet with the same name exists, it is updated in place (same sheet-id)
+   - If not, a new sheet is created with a deterministic ID
+
+   The workflow name is the identity:
+   - Sheet ID is deterministic (v5 UUID from workflow name)
+   - Node IDs are deterministic (v5 UUID from sheet-id + node name)
+   - Running this multiple times with the same definition is idempotent
+   - Modifying the definition and re-running updates the existing sheet
 
    Args:
-     ctx - Test context with :event-store
+     ctx - Context with :event-store
      workflow-def - Workflow definition from (workflow ...)
 
-   Returns the sheet-id."
+   Returns the sheet-id (deterministic, based on workflow name)."
   [ctx workflow-def]
-  (let [{:keys [workflow-name blackboard-schema root-node]} workflow-def
+  (let [{:keys [workflow-name]} workflow-def
+        ;; Deterministic sheet-id from workflow name
+        sheet-id (sheet-id-for-name workflow-name)
+        existing (rm/get-sheet-by-name (:event-store ctx) workflow-name)]
 
-        ;; Create sheet
-        sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name workflow-name))
-        sheet-id (-> sheet-result :command-result/events first :sheet-id)]
+    (if existing
+      ;; Update existing sheet - clear and rebuild content
+      (do
+        (clear-sheet-content! ctx sheet-id)
+        (build-sheet-content! ctx sheet-id workflow-def)
+        sheet-id)
 
-    ;; Declare blackboard keys
-    (doseq [[key-name schema] blackboard-schema]
-      (h/run-and-apply! ctx
-        (h/make-declare-key-command sheet-id (name key-name) schema)))
-
-    ;; Build the tree
-    (build-node! ctx sheet-id root-node nil 0)
-
-    sheet-id))
+      ;; Create new sheet with deterministic ID
+      (do
+        (h/run-and-apply! ctx (h/make-create-sheet-command
+                                :name workflow-name
+                                :sheet-id sheet-id))
+        (build-sheet-content! ctx sheet-id workflow-def)
+        sheet-id))))
 
 (defn build-workflow!!
-  "Idempotent workflow builder. Creates or replaces a workflow by name.
+  "DEPRECATED: Use build-workflow! instead, which is now idempotent by default.
 
-   If a sheet with the same name exists, it is deleted first.
-   Returns the (possibly new) sheet-id.
-
-   Use double-bang (!!) to indicate destructive idempotent operation."
+   This function is kept for backwards compatibility but simply delegates
+   to build-workflow!."
+  {:deprecated "Use build-workflow! instead"}
   [ctx workflow-def]
-  (let [workflow-name (:workflow-name workflow-def)
-        existing (rm/get-sheet-by-name (:event-store ctx) workflow-name)]
-    (when existing
-      (h/run-and-apply! ctx (h/make-delete-sheet-command (:id existing))))
-    (build-workflow! ctx workflow-def)))
+  (build-workflow! ctx workflow-def))
 
 ;; =============================================================================
 ;; Convenience Functions
@@ -579,3 +699,370 @@
     (doseq [file files]
       (load-sheet! ctx (.getPath file)))
     (println "Loaded" (count files) "sheets from:" dir-path)))
+
+;; =============================================================================
+;; DSL Code Generation
+;; =============================================================================
+
+(declare node->dsl-form)
+
+(defn- escape-string
+  "Escape special characters in strings for Clojure source code."
+  [s]
+  (when s
+    (-> s
+        (clojure.string/replace "\\" "\\\\")
+        (clojure.string/replace "\"" "\\\"")
+        (clojure.string/replace "\n" "\\n")
+        (clojure.string/replace "\t" "\\t")
+        (clojure.string/replace "\r" "\\r"))))
+
+(defn- build-keyword-args
+  "Build keyword argument pairs from a map, filtering nil/empty values.
+   Returns a flat sequence of [:key value :key value ...] sorted by key name."
+  [opts-map]
+  (->> opts-map
+       (remove (fn [[_ v]] (or (nil? v)
+                               (and (coll? v) (empty? v)))))
+       (sort-by (comp name first))
+       (mapcat (fn [[k v]] [(keyword (name k)) v]))))
+
+(defn- leaf-node->form
+  "Convert a leaf node to llm or code DSL form."
+  [node]
+  (let [executor (:executor node)
+        name (:name node)]
+    (case executor
+      :ai (let [opts (build-keyword-args
+                       {:model (:model node)
+                        :instruction (:instruction node)
+                        :reads (:reads node)
+                        :writes (:writes node)
+                        :retry (:retry node)})]
+            (if (empty? opts)
+              (list 'llm name)
+              (apply list 'llm name opts)))
+
+      :code (let [opts (build-keyword-args
+                         {:fn (:fn node)
+                          :reads (:reads node)
+                          :writes (:writes node)
+                          :retry (:retry node)})]
+              (if (empty? opts)
+                (list 'code name)
+                (apply list 'code name opts)))
+
+      ;; Default fallback for unknown executors
+      (list 'llm name))))
+
+(defn- condition-node->form
+  "Convert a condition node to DSL form."
+  [node]
+  (let [check (:check node)
+        on-fail (:on-fail node)
+        ;; Only include on-fail if it's not the default :failure
+        opts (build-keyword-args
+               (cond-> {:check (when check (into (sorted-map) check))}
+                 (and on-fail (not= on-fail :failure))
+                 (assoc :on-fail on-fail)))]
+    (if (empty? opts)
+      (list 'condition (:name node))
+      (apply list 'condition (:name node) opts))))
+
+(defn- llm-condition-node->form
+  "Convert an llm-condition node to DSL form."
+  [node]
+  (let [opts (build-keyword-args
+               {:model (:model node)
+                :instruction (:instruction node)
+                :reads (:reads node)})]
+    (if (empty? opts)
+      (list 'llm-condition (:name node))
+      (apply list 'llm-condition (:name node) opts))))
+
+(defn- composite-node->form
+  "Convert a sequence or fallback node to DSL form."
+  [fn-sym node]
+  (let [name (:name node)
+        children (mapv node->dsl-form (:children node))]
+    (apply list fn-sym name children)))
+
+(defn- parallel-node->form
+  "Convert a parallel node to DSL form."
+  [node]
+  (let [name (:name node)
+        success-policy (:success-policy node)
+        failure-policy (:failure-policy node)
+        children (mapv node->dsl-form (:children node))
+        ;; Only include policies if they differ from defaults
+        opts (cond-> {}
+               (and success-policy (not= success-policy :all))
+               (assoc :success-policy success-policy)
+               (and failure-policy (not= failure-policy :any))
+               (assoc :failure-policy failure-policy))]
+    (if (empty? opts)
+      (apply list 'parallel name children)
+      (apply list 'parallel name opts children))))
+
+(defn- map-each-node->form
+  "Convert a map-each node to DSL form."
+  [node]
+  (let [name (:name node)
+        children (mapv node->dsl-form (:children node))
+        ;; Map from export fields to DSL keyword args
+        opts (build-keyword-args
+               {:from (:source-key node)
+                :as (:item-key node)
+                :into (:output-key node)
+                :parallel (:max-concurrency node)})]
+    (apply list 'map-each name (concat opts children))))
+
+(defn- node->dsl-form
+  "Convert an exported node to a DSL form (unevaluated Clojure code as data)."
+  [node]
+  (case (:type node)
+    :leaf (leaf-node->form node)
+    :condition (condition-node->form node)
+    :llm-condition (llm-condition-node->form node)
+    :sequence (composite-node->form 'sequence node)
+    :fallback (composite-node->form 'fallback node)
+    :parallel (parallel-node->form node)
+    :map-each (map-each-node->form node)
+    ;; Default: try as sequence
+    (composite-node->form 'sequence node)))
+
+(defn- blackboard->form
+  "Convert blackboard schema to DSL form."
+  [schema-map]
+  (when (and schema-map (seq schema-map))
+    (list 'blackboard (into (sorted-map) schema-map))))
+
+(defn- workflow->form
+  "Convert an exported sheet to a complete workflow DSL form."
+  [exported]
+  (let [name (get-in exported [:sheet :name])
+        bb-schema (:blackboard-schema exported)
+        root-node (:nodes exported)
+        parts (cond-> []
+                (seq bb-schema) (conj (blackboard->form bb-schema))
+                root-node (conj (node->dsl-form root-node)))]
+    (apply list 'workflow name parts)))
+
+;; =============================================================================
+;; Pretty Printing
+;; =============================================================================
+
+(defn- indent-str
+  "Generate indentation string for given level."
+  [level]
+  (apply str (repeat (* 2 level) " ")))
+
+(declare form->pretty-string)
+
+(defn- format-keyword-args
+  "Format keyword arguments with proper indentation for leaf nodes."
+  [args indent-level]
+  (let [indent (indent-str indent-level)
+        pairs (partition 2 args)]
+    (->> pairs
+         (map (fn [[k v]]
+                (str "\n" indent "  " k " "
+                     (cond
+                       ;; Multi-line long instructions
+                       (and (= k :instruction) (string? v) (> (count v) 50))
+                       (str "\"" (escape-string v) "\"")
+                       ;; String values
+                       (string? v)
+                       (str "\"" (escape-string v) "\"")
+                       ;; Other values
+                       :else
+                       (pr-str v)))))
+         (clojure.string/join))))
+
+(defn- leaf-form->pretty-string
+  "Pretty print a leaf node form (llm, code, condition, llm-condition)."
+  [form indent-level]
+  (let [indent (indent-str indent-level)
+        [fn-sym name & args] form]
+    (if (empty? args)
+      (str "(" fn-sym " \"" (escape-string name) "\")")
+      (str "(" fn-sym " \"" (escape-string name) "\""
+           (format-keyword-args args indent-level) ")"))))
+
+(defn- composite-form->pretty-string
+  "Pretty print a composite node form (sequence, fallback)."
+  [form indent-level]
+  (let [indent (indent-str indent-level)
+        child-indent (indent-str (inc indent-level))
+        [fn-sym name & children] form]
+    (if (empty? children)
+      (str "(" fn-sym " \"" (escape-string name) "\")")
+      (str "(" fn-sym " \"" (escape-string name) "\"\n"
+           (->> children
+                (map #(str child-indent (form->pretty-string % (inc indent-level))))
+                (clojure.string/join "\n"))
+           ")"))))
+
+(defn- parallel-form->pretty-string
+  "Pretty print a parallel node form."
+  [form indent-level]
+  (let [indent (indent-str indent-level)
+        child-indent (indent-str (inc indent-level))
+        [fn-sym name first-arg & rest-args] form
+        ;; Check if first arg after name is options map
+        [opts children] (if (map? first-arg)
+                          [first-arg rest-args]
+                          [nil (if first-arg (cons first-arg rest-args) [])])]
+    (if (and (nil? opts) (empty? children))
+      (str "(parallel \"" (escape-string name) "\")")
+      (str "(parallel \"" (escape-string name) "\""
+           (when opts (str " " (pr-str opts)))
+           (when (seq children)
+             (str "\n"
+                  (->> children
+                       (map #(str child-indent (form->pretty-string % (inc indent-level))))
+                       (clojure.string/join "\n"))))
+           ")"))))
+
+(defn- map-each-form->pretty-string
+  "Pretty print a map-each node form."
+  [form indent-level]
+  (let [indent (indent-str indent-level)
+        child-indent (indent-str (inc indent-level))
+        [fn-sym name & args] form
+        ;; Separate keyword args from children
+        [kw-args children] (loop [remaining args
+                                   kw-acc []
+                                   child-acc []]
+                             (if (empty? remaining)
+                               [kw-acc child-acc]
+                               (let [item (first remaining)]
+                                 (if (keyword? item)
+                                   (recur (drop 2 remaining)
+                                          (conj kw-acc item (second remaining))
+                                          child-acc)
+                                   (recur (rest remaining)
+                                          kw-acc
+                                          (conj child-acc item))))))]
+    (str "(map-each \"" (escape-string name) "\""
+         ;; Keyword args on same line
+         (->> (partition 2 kw-args)
+              (map (fn [[k v]]
+                     (str "\n" indent "  " k " "
+                          (if (string? v)
+                            (str "\"" (escape-string v) "\"")
+                            (pr-str v)))))
+              (clojure.string/join))
+         ;; Children indented
+         (when (seq children)
+           (str "\n"
+                (->> children
+                     (map #(str child-indent (form->pretty-string % (inc indent-level))))
+                     (clojure.string/join "\n"))))
+         ")")))
+
+(defn- blackboard-form->pretty-string
+  "Pretty print a blackboard form."
+  [form indent-level]
+  (let [[_ schema-map] form]
+    (str "(blackboard\n"
+         (indent-str (inc indent-level))
+         (pr-str schema-map) ")")))
+
+(defn- workflow-form->pretty-string
+  "Pretty print a complete workflow form."
+  [form]
+  (let [[_ name & parts] form
+        bb-form (first (filter #(and (list? %) (= 'blackboard (first %))) parts))
+        root-form (first (filter #(and (list? %) (not= 'blackboard (first %))) parts))]
+    (str "(workflow \"" (escape-string name) "\"\n"
+         (when bb-form
+           (str "  " (blackboard-form->pretty-string bb-form 1) "\n\n"))
+         (when root-form
+           (str "  " (form->pretty-string root-form 1)))
+         ")")))
+
+(defn- form->pretty-string
+  "Convert a DSL form to a pretty-printed string."
+  [form indent-level]
+  (cond
+    ;; Workflow - top level
+    (and (list? form) (= 'workflow (first form)))
+    (workflow-form->pretty-string form)
+
+    ;; Composite nodes
+    (and (list? form) (contains? #{'sequence 'fallback} (first form)))
+    (composite-form->pretty-string form indent-level)
+
+    ;; Parallel
+    (and (list? form) (= 'parallel (first form)))
+    (parallel-form->pretty-string form indent-level)
+
+    ;; Map-each
+    (and (list? form) (= 'map-each (first form)))
+    (map-each-form->pretty-string form indent-level)
+
+    ;; Leaf nodes
+    (and (list? form) (contains? #{'llm 'code 'condition 'llm-condition} (first form)))
+    (leaf-form->pretty-string form indent-level)
+
+    ;; Blackboard
+    (and (list? form) (= 'blackboard (first form)))
+    (blackboard-form->pretty-string form indent-level)
+
+    ;; Default - use pr-str
+    :else (pr-str form)))
+
+;; =============================================================================
+;; Public DSL Generation API
+;; =============================================================================
+
+(defn export-to-dsl
+  "Generate idiomatic Clojure DSL code from an exported sheet structure.
+
+   Returns a string containing valid Clojure code that, when evaluated with
+   the DSL namespace required, produces a workflow definition equivalent
+   to the original sheet.
+
+   Options:
+     :pretty? - Pretty-print with indentation (default true)
+
+   Example:
+     (export-to-dsl (export-sheet ctx sheet-id))
+     ;; => \"(workflow \\\"my-workflow\\\" ...)\"
+
+   Round-trip usage:
+     (let [exported (export-sheet ctx sheet-id)
+           dsl-code (export-to-dsl exported)
+           workflow-def (eval (read-string dsl-code))]
+       (build-workflow! ctx workflow-def))"
+  [exported & {:keys [pretty?] :or {pretty? true}}]
+  (let [form (workflow->form exported)]
+    (if pretty?
+      (form->pretty-string form 0)
+      (pr-str form))))
+
+(defn sheet->dsl
+  "Generate DSL code directly from a sheet-id.
+
+   Convenience function combining export-sheet and export-to-dsl.
+
+   Example:
+     (sheet->dsl ctx sheet-id)"
+  [ctx sheet-id & opts]
+  (let [exported (export-sheet ctx sheet-id)]
+    (apply export-to-dsl exported opts)))
+
+(defn save-sheet-as-dsl!
+  "Export a sheet to a .clj file containing DSL code.
+
+   The generated file can be loaded and evaluated to recreate the workflow.
+
+   Example:
+     (save-sheet-as-dsl! ctx sheet-id \"development/sheets/my-workflow.clj\")"
+  [ctx sheet-id filepath]
+  (let [dsl-code (sheet->dsl ctx sheet-id)]
+    (io/make-parents filepath)
+    (spit filepath dsl-code)
+    (println "Saved sheet as DSL to:" filepath)
+    filepath))

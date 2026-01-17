@@ -78,13 +78,15 @@
 ;; =============================================================================
 
 (defn make-create-sheet-command
-  "Create a create-sheet command with defaults."
-  [& {:keys [name]
+  "Create a create-sheet command with defaults.
+   If sheet-id is provided, uses that ID (for deterministic UUIDs)."
+  [& {:keys [name sheet-id]
       :or {name "Test Sheet"}}]
-  {:command/name :sheet/create-sheet
-   :command/id (random-uuid)
-   :command/timestamp (time/now)
-   :name name})
+  (cond-> {:command/name :sheet/create-sheet
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :name name}
+    sheet-id (assoc :sheet-id sheet-id)))
 
 (defn make-rename-sheet-command
   "Create a rename-sheet command."
