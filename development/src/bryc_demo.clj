@@ -1525,7 +1525,7 @@
        :hbcu-analysis [:map-of :keyword :any]
        :comprehensive-results [:map-of :keyword :any]})
 
-    (sheet/sequence
+    (sheet/sequence "main"
 
       ;; ========================================
       ;; PHASE 1: Student Understanding (Shared)
@@ -1588,12 +1588,12 @@ IMPORTANT: Format your response with [[ ## search-strategies ## ]] followed by a
       ;; PARALLEL TRACKS: Programs + Scholarships
       ;; ========================================
 
-      (sheet/parallel
+      (sheet/parallel "tracks"
 
         ;; ----------------------------------------
         ;; PROGRAMS TRACK
         ;; ----------------------------------------
-        (sheet/sequence
+        (sheet/sequence "programs-track"
 
           (sheet/code "search-programs"
             :fn "bryc-demo/search-programs"
@@ -1611,8 +1611,8 @@ IMPORTANT: Format your response with [[ ## search-strategies ## ]] followed by a
             :into "scored-programs"
             :parallel 10
 
-            (sheet/sequence
-              (sheet/parallel
+            (sheet/sequence "score-pipeline"
+              (sheet/parallel "multi-score"
                 (sheet/llm "score-academic"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score how well this student's academic profile (GPA, ACT) matches this program's requirements.
@@ -1778,7 +1778,7 @@ IMPORTANT: Format your response with [[ ## institution-bullets ## ]] followed by
         ;; ----------------------------------------
         ;; SCHOLARSHIPS TRACK (5 Phases)
         ;; ----------------------------------------
-        (sheet/sequence
+        (sheet/sequence "scholarships-track"
 
           ;; Phase 1: Extract student eligibility (LLM)
           (sheet/llm "extract-student-eligibility"
@@ -1947,6 +1947,26 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
       {:status :failed
        :error (:error result)})))
 
+(defn get-dsl-code
+  "Export the workflow from event store back to DSL code.
+   Returns a string of valid Clojure DSL code that can be evaluated
+   to recreate the workflow.
+
+   Options:
+     :pretty? - If true (default), format with indentation for readability
+     :ns      - Namespace prefix for DSL functions (e.g., \"sheet\" produces sheet/workflow)"
+  ([context sheet-id]
+   (get-dsl-code context sheet-id {:pretty? true}))
+  ([context sheet-id {:keys [pretty? ns] :or {pretty? true} :as _opts}]
+   (let [exported (sheet/export-sheet context sheet-id)]
+     (sheet/export-to-dsl exported :pretty? pretty? :ns ns))))
+
+(defn save-dsl-code!
+  "Export the workflow to a .clj file.
+   The generated file contains valid Clojure DSL code."
+  [context sheet-id filepath]
+  (sheet/save-sheet-as-dsl! context sheet-id filepath))
+
 ;; =============================================================================
 ;; REPL Usage
 ;; =============================================================================
@@ -1960,7 +1980,28 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
   ;; ==========================================================================
   ;; Build the workflow
   ;; ==========================================================================
-  (def sheet-id (build-demo! rs/context))
+  (def sheet-id #uuid "e420bfc5-4bb8-5ad6-b90b-df3b4877420e")
+
+  ;; ==========================================================================
+  ;; Export workflow to DSL code (bi-directional: Event Store -> DSL)
+  ;; ==========================================================================
+
+  ;; Get the current workflow as DSL code string (no namespace prefix)
+  (println (get-dsl-code rs/context sheet-id))
+
+  ;; Get DSL with namespace prefix (e.g., sheet/workflow, sheet/sequence, etc.)
+  (println (get-dsl-code rs/context sheet-id {:ns "sheet"}))
+
+  ;; Get raw (compact) DSL without pretty-printing
+  (get-dsl-code rs/context sheet-id {:pretty? false})
+
+  ;; Save to a file
+  (save-dsl-code! rs/context sheet-id "/tmp/bryc-workflow.clj")
+
+  ;; The exported DSL is valid Clojure - you can evaluate it to recreate the workflow:
+  ;; (def regenerated-workflow (eval (read-string (get-dsl-code rs/context sheet-id))))
+  ;; (def new-sheet-id (sheet/build-workflow!! rs/context regenerated-workflow))
+  ;; new-sheet-id will equal sheet-id (deterministic via UUID v5)
 
   ;; ==========================================================================
   ;; Run with different students
@@ -1997,7 +2038,7 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
                              "scholarships-data" sample-scholarships})
                           students)]
     (h/run-and-apply! rs/context
-      (h/make-batch-execute-command sheet-id inputs-list)))
+                      (h/make-batch-execute-command sheet-id inputs-list)))
 
   ;; ==========================================================================
   ;; GEPA Primitives - Versioning
@@ -2005,7 +2046,7 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
 
   ;; Publish current version
   (h/run-and-apply! rs/context
-    (h/make-publish-version-command sheet-id :description "Initial BRYC demo"))
+                    (h/make-publish-version-command sheet-id :description "Initial BRYC demo"))
 
   ;; Check version history
   (h/run-query rs/context (h/make-version-history-query sheet-id))
@@ -2074,8 +2115,8 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
 
   ;; Check if Reagan (African American Female) qualifies for scholarships
   (filter-scholarships-hard
-    {:inputs {"student-profile" (load-student-json "reagan")
-              "scholarships-data" sample-scholarships}})
+   {:inputs {"student-profile" (load-student-json "reagan")
+             "scholarships-data" sample-scholarships}})
 
   ;; ==========================================================================
   ;; HBCU Detection
@@ -2090,4 +2131,139 @@ IMPORTANT: Format your response with [[ ## scholarship-verification ## ]] follow
                            {:institution "LSU"}])
   ;; => {:hbcu-count 1, :total-count 2, :hbcu-percentage 0.5, :shows-hbcu-preference? true}
 
-  "")
+
+  (sheet/build-workflow!!
+   rs/context
+   (sheet/workflow "bryc-recommendations"
+                   (sheet/blackboard
+                    {:academic-score :string, :candidate-programs [:vector [:map-of :keyword :any]], :career-score :string, :categorized-scholarships [:map-of :keyword :any], :color-profile-data [:map-of :keyword :any], :composite-score :double, :comprehensive-results [:map-of :keyword :any], :current-institution [:map-of :keyword :any], :current-program [:map-of :keyword :any], :current-scholarship [:map-of :keyword :any], :eligible-scholarships [:vector [:map-of :keyword :any]], :final-program-recommendations [:vector [:map-of :keyword :any]], :financial-score :string, :grouped-institutions [:vector [:map-of :keyword :any]], :hbcu-analysis [:map-of :keyword :any], :institution-bullets [:map-of :keyword :any], :outcome-score :string, :pathway-score :string, :personalization [:map-of :keyword :any], :personalized-programs [:vector [:map-of :keyword :any]], :portfolio-programs [:vector [:map-of :keyword :any]], :preference-score :string, :rejected-scholarships [:vector [:map-of :keyword :any]], :scholarship-verification [:map-of :keyword :any], :scholarships-data [:vector [:map-of :keyword :any]], :scholarships-for-verification [:vector [:map-of :keyword :any]], :scored-programs [:vector [:map-of :keyword :any]], :scored-scholarships [:vector [:map-of :keyword :any]], :search-strategies [:vector [:map-of :keyword :any]], :student-analysis [:map-of :keyword :any], :student-eligibility [:map-of :keyword :any], :student-profile [:map-of :keyword :any], :verified-scholarships [:vector [:map-of :keyword :any]]})
+
+                   (sheet/sequence "main"
+                                   (sheet/llm "analyze-student-comprehensive"
+                                              :instruction "Analyze this high school student profile comprehensively. Provide these fields (use camelCase):\n\nREQUIRED FIELDS:\n- hardRequirements: Non-negotiable needs based on their goals and preferences\n- careerInterests: Ranked list of career interests from career-fields and open-response\n- preferenceWeights: Object with locationPreference, sizePreference, costSensitivity, hbcuPreference, onlinePreference (each 0.0-1.0)\n- studentNarrative: 2-3 sentence summary of who this student is\n- actScore: The student's ACT score (number)\n- gpa: The student's GPA (number)\n- topsAward: The student's TOPS award type (e.g., 'tops-opportunity', 'tops-tech', or 'none')\n\nIMPLICIT NEEDS (inferred from profile signals):\n- implicitNeeds: List of unstated needs, inferred from:\n  * first-gen = true -> 'first-generation support services'\n  * low involvement-score (<2) -> 'flexible scheduling', 'evening/weekend options'\n  * mentions children in open-response -> 'childcare services', 'family-friendly scheduling'\n  * financial-stress signals -> 'strong financial aid', 'work-study opportunities'\n  * mentions work in open-response -> 'online options', 'part-time enrollment'\n\nACADEMIC CONTEXT:\n- academicContext: Object with:\n  * readinessLevel: 'low' (ACT<17), 'moderate' (ACT 17-23), or 'high' (ACT 24+)\n  * likelySuccessSectors: List of sectors where student is likely to succeed (e.g., ['2-year', '4-year with support', 'apprenticeships'])\n  * concerns: List of academic concerns (e.g., ['ACT below typical 4-year threshold', 'May need developmental courses'])\n\nBe specific based on their GPA, ACT score, TOPS award, color-profile, and stated interests.\n\nIMPORTANT: Format your response with [[ ## student-analysis ## ]] followed by a JSON object."
+                                              :model "google/gemini-2.5-flash"
+                                              :reads ["student-profile"]
+                                              :writes ["student-analysis"])
+                                   (sheet/code "parse-student-color-profile"
+                                               :fn "bryc-demo/parse-color-profile-for-workflow"
+                                               :reads ["student-profile"]
+                                               :writes ["color-profile-data"])
+                                   (sheet/llm "generate-search-strategies-comprehensive"
+                                              :instruction "Generate 5-8 keyword search strategies to find matching college programs for this student.\nBased on their career interests, goals, and preferences, create search queries.\n\nFor each strategy provide:\n- strategy: Short description of the search approach\n- keywords: 2-4 keywords to search for in program titles and descriptions\n\nExample strategy: 'Direct nursing programs' with keywords ['nursing', 'BSN', 'healthcare']\n\nIMPORTANT: Format your response with [[ ## search-strategies ## ]] followed by a JSON array."
+                                              :model "google/gemini-2.5-flash"
+                                              :reads ["student-profile" "student-analysis"]
+                                              :writes ["search-strategies"])
+                                   (sheet/parallel "tracks"
+                                                   (sheet/sequence "programs-track"
+                                                                   (sheet/code "search-programs"
+                                                                               :fn "bryc-demo/search-programs"
+                                                                               :reads ["student-analysis" "search-strategies"]
+                                                                               :writes ["candidate-programs"])
+                                                                   (sheet/code "optimize-portfolio"
+                                                                               :fn "bryc-demo/optimize-portfolio"
+                                                                               :reads ["candidate-programs" "student-analysis"]
+                                                                               :writes ["portfolio-programs"])
+                                                                   (sheet/map-each "score-programs"
+                                                                                   :as "current-program"
+                                                                                   :from "portfolio-programs"
+                                                                                   :into "scored-programs"
+                                                                                   :parallel 10
+                                                                                   (sheet/sequence "score-pipeline"
+                                                                                                   (sheet/parallel "multi-score"
+                                                                                                                   (sheet/llm "score-academic"
+                                                                                                                              :instruction "Score how well this student's academic profile (GPA, ACT) matches this program's requirements.\nConsider the program's typical ACT range and sector (4-Year vs 2-Year).\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis"]
+                                                                                                                              :writes ["academic-score"])
+                                                                                                                   (sheet/llm "score-career"
+                                                                                                                              :instruction "Score how well this program aligns with the student's stated career interests.\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis"]
+                                                                                                                              :writes ["career-score"])
+                                                                                                                   (sheet/llm "score-preference"
+                                                                                                                              :instruction "Score how well this program matches the student's preferences (location, institution type).\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis"]
+                                                                                                                              :writes ["preference-score"])
+                                                                                                                   (sheet/llm "score-financial"
+                                                                                                                              :instruction "Score the financial fit for this student considering:\n\nTOPS COVERAGE (Louisiana law: TOPS applied FIRST, then Pell):\n- TOPS Opportunity: $5,100/year for 4-year public, $3,086/year for 2-year\n- TOPS Performance: $5,600/year for 4-year public\n- TOPS Honors: $6,100/year for 4-year public\n- TOPS Tech: $2,000/year for technical programs\n\nPELL GRANT: Max $7,395/year for eligible students\n- If Pell exceeds remaining tuition after TOPS, student gets EXCESS PELL as refund\n\nSCORING GUIDE:\n- 1.0: Net tuition $0 + excess Pell (fully covered with money left over)\n- 0.8-0.9: Net tuition $0-$2,000/year\n- 0.6-0.7: Net tuition $2,000-$5,000/year\n- 0.4-0.5: Net tuition $5,000-$10,000/year\n- 0.2-0.3: Net tuition $10,000-$20,000/year\n- 0.0-0.1: Net tuition $20,000+/year\n\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis" "student-profile"]
+                                                                                                                              :writes ["financial-score"])
+                                                                                                                   (sheet/llm "score-outcome"
+                                                                                                                              :instruction "Score the program's outcome potential based on earnings data and sector reputation.\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis"]
+                                                                                                                              :writes ["outcome-score"])
+                                                                                                                   (sheet/llm "score-pathway"
+                                                                                                                              :instruction "Score how well this program fits into the student's career trajectory and long-term goals.\nProvide a score as a decimal number between 0.0 and 1.0."
+                                                                                                                              :model "google/gemini-2.5-flash"
+                                                                                                                              :reads ["current-program" "student-analysis"]
+                                                                                                                              :writes ["pathway-score"]))
+                                                                                                   (sheet/code "compute-composite"
+                                                                                                               :fn "bryc-demo/compute-composite-score"
+                                                                                                               :reads ["academic-score" "career-score" "preference-score" "financial-score" "outcome-score" "pathway-score"]
+                                                                                                               :writes ["composite-score"])))
+                                                                   (sheet/map-each "personalize-programs"
+                                                                                   :as "current-program"
+                                                                                   :from "scored-programs"
+                                                                                   :into "personalized-programs"
+                                                                                   :parallel 10
+                                                                                   (sheet/llm "personalize"
+                                                                                              :instruction "Generate personalized recommendation content for this program.\n\nCHECK THE PROGRAM SECTOR TO USE THE RIGHT FORMAT:\n\n=== IF SECTOR = 'Apprenticeship' ===\n- overview: 1-2 sentences emphasizing EARN WHILE LEARNING (salary during training, zero debt)\n- why-bullets: 2-3 bullets focused on:\n  * Salary progression (starting-income → average salary)\n  * Skills and certifications gained\n  * Zero tuition/debt benefit\n  * Employer connections and job placement\n- key-differentiators: How this apprenticeship differs from college options\n- best-for: Who should choose earn-while-learn over traditional college\n- outcome-bullet: Compare starting-income to LA benchmarks ($48,425 COL, $52,547 median)\n  Example: 'Earn $35,000 from day one while training, with zero debt - that's 72% of LA cost of living before even completing the program'\n\n=== IF AWARD-LEVEL-NAME contains 'Certificate' ===\n- overview: 1-2 sentences emphasizing QUICK PATH to employment (program length)\n- why-bullets: 2-3 bullets focused on:\n  * Fast completion time (< 1 year or 1-2 years)\n  * Industry certifications earned\n  * Job-ready skills\n  * Stackable credential potential (can lead to Associate's/Bachelor's)\n- financial-note: For '<1 year' certificates, annual tuition = TOTAL program cost\n- key-differentiators: Speed advantage vs longer programs\n- best-for: Students who want quick entry to workforce\n- outcome-bullet: Compare Y1 earnings to LA benchmarks\n\n=== FOR ALL OTHER PROGRAMS (Bachelor's, Associate's) ===\n- overview: 2-3 sentences explaining why this program fits this specific student\n- why-bullets: 3-4 specific reasons this program is a good match\n- key-differentiators: 2-3 unique aspects of this program\n- best-for: One sentence describing the ideal student for this program\n- outcome-bullet: If earnings data available (earnings-y1, earnings-y5):\n  * LA cost of living: $48,425/year\n  * LA median salary: $52,547/year\n  * Example: 'Graduates earn $45,000 in year one (93% of LA cost of living), growing to $58,000 by year five (10% above LA median)'\n  * If no earnings data, set to null\n\nMake it personal - reference the student's specific goals, interests, and circumstances.\n\nIMPORTANT: Format your response with [[ ## personalization ## ]] followed by a JSON object."
+                                                                                              :model "openai/gpt-5-mini"
+                                                                                              :reads ["current-program" "student-analysis" "student-profile"]
+                                                                                              :writes ["personalization"]))
+                                                                   (sheet/code "group-institutions"
+                                                                               :fn "bryc-demo/group-by-institution"
+                                                                               :reads ["personalized-programs" "student-analysis"]
+                                                                               :writes ["grouped-institutions"])
+                                                                   (sheet/map-each "personalize-institutions"
+                                                                                   :as "current-institution"
+                                                                                   :from "grouped-institutions"
+                                                                                   :into "final-program-recommendations"
+                                                                                   :parallel 10
+                                                                                   (sheet/llm "institution-summary"
+                                                                                              :instruction "Generate an institution summary for the student.\n\nUSE THE COST-RANGES DATA PROVIDED (already calculated with TOPS+Pell applied):\n- tuition-range: Raw tuition min/max across programs\n- net-tuition-range: What student ACTUALLY pays after TOPS+Pell (min/max)\n- excess-pell-range: Potential Pell refund for books/living (min/max)\n\nGENERATE:\n- financial-bullets: EXACTLY 2 bullets using the cost ranges:\n  * Bullet 1 (Tuition): 'After your TOPS [award] and Pell Grant, your net tuition ranges from $X-$Y per year'\n    - If net-tuition is $0: 'Tuition should be essentially covered by your TOPS [award] and Pell Grant'\n    - ALWAYS mention TOPS first, then Pell (Louisiana law)\n  * Bullet 2 (Housing/Books): Room & board if available, plus books\n    - If excess-pell > 0: 'Your excess Pell Grant ($X-$Y) can help cover books and supplies'\n    - For 2-year schools: 'As a community college, on-campus housing is typically not available'\n\n- why-fits-bullets: 2-3 bullets about why this INSTITUTION (not programs) fits:\n  * ALLOWED: HBCU status, distance from Baton Rouge, sector (2-year/4-year), admissions likelihood based on ACT\n  * FORBIDDEN: Program-specific details (those are in program bullets)\n  * Use qualitative admission language: 'highly likely', 'strong match' - NOT percentages\n\n- is-hbcu: true if HBCU (check the is-hbcu field)\n\nCRITICAL: Never say '$0-$0 per year' - say 'essentially covered' instead.\n\nIMPORTANT: Format your response with [[ ## institution-bullets ## ]] followed by a JSON object."
+                                                                                              :model "google/gemini-2.5-flash"
+                                                                                              :reads ["current-institution" "student-analysis" "student-profile"]
+                                                                                              :writes ["institution-bullets"])))
+                                                   (sheet/sequence "scholarships-track"
+                                                                   (sheet/llm "extract-student-eligibility"
+                                                                              :instruction "Extract the student's scholarship eligibility criteria from their profile:\n- gpa: The student's GPA\n- act-score: The student's ACT score (if available)\n- citizenship: 'us_citizen', 'permanent_resident', or 'other'\n- gender: 'Male', 'Female', or 'Other'\n- ethnicity: e.g., 'African American', 'Hispanic', 'Caucasian', etc.\n- state-residency: 'Louisiana' (all BRYC students are LA residents)\n- career-fields: List of career interests from their profile\n- financial-need: true if the student appears to have financial need\n\nIMPORTANT: Format your response with [[ ## student-eligibility ## ]] followed by a JSON object."
+                                                                              :model "google/gemini-2.5-flash"
+                                                                              :reads ["student-profile"]
+                                                                              :writes ["student-eligibility"])
+                                                                   (sheet/code "filter-scholarships"
+                                                                               :fn "bryc-demo/filter-scholarships-hard"
+                                                                               :reads ["scholarships-data" "student-eligibility" "student-profile" "student-analysis"]
+                                                                               :writes ["eligible-scholarships" "rejected-scholarships"])
+                                                                   (sheet/code "score-scholarship-relevance"
+                                                                               :fn "bryc-demo/score-scholarship-relevance"
+                                                                               :reads ["eligible-scholarships" "student-analysis" "student-profile"]
+                                                                               :writes ["scored-scholarships"])
+                                                                   (sheet/code "categorize-scholarships"
+                                                                               :fn "bryc-demo/categorize-scholarships"
+                                                                               :reads ["scored-scholarships"]
+                                                                               :writes ["categorized-scholarships" "scholarships-for-verification"])
+                                                                   (sheet/map-each "verify-scholarships"
+                                                                                   :as "current-scholarship"
+                                                                                   :from "scholarships-for-verification"
+                                                                                   :into "verified-scholarships"
+                                                                                   :parallel 10
+                                                                                   (sheet/llm "verify-and-personalize-scholarship"
+                                                                                              :instruction "Verify this scholarship's fit for the student and generate personalized content.\n\nIMPORTANT: Check if the scholarship name contains demographic indicators (e.g., 'Women's', 'African American').\nIf so, verify the student matches that demographic.\n\nProvide:\n- verified: true if student is eligible after demographic check\n- demographic-match: true if student matches any demographic requirements\n- explanation: 2-3 sentences explaining why this scholarship fits the student\n- application-tips: 1-2 specific tips for applying\n- priority: 'high', 'medium', or 'low' based on fit and deadline\n\nIMPORTANT: Format your response with [[ ## scholarship-verification ## ]] followed by a JSON object."
+                                                                                              :model "google/gemini-2.5-flash"
+                                                                                              :reads ["current-scholarship" "student-eligibility" "student-profile"]
+                                                                                              :writes ["scholarship-verification"]))))
+                                   (sheet/code "analyze-hbcu-preference"
+                                               :fn "bryc-demo/analyze-hbcu-preference"
+                                               :reads ["final-program-recommendations"]
+                                               :writes ["hbcu-analysis"])
+                                   (sheet/code "combine-comprehensive-results"
+                                               :fn "bryc-demo/combine-comprehensive-results"
+                                               :reads ["final-program-recommendations" "verified-scholarships" "hbcu-analysis" "student-analysis" "color-profile-data" "categorized-scholarships"]
+                                               :writes ["comprehensive-results"]))))
+
+  ""
+  )

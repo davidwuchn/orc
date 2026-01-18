@@ -706,6 +706,16 @@
 
 (declare node->dsl-form)
 
+;; Dynamic var for optional namespace prefix on generated DSL symbols
+(def ^:dynamic *dsl-ns* nil)
+
+(defn- dsl-sym
+  "Create a DSL symbol, optionally prefixed with *dsl-ns*."
+  [sym-name]
+  (if *dsl-ns*
+    (symbol (str *dsl-ns*) (name sym-name))
+    (symbol (name sym-name))))
+
 (defn- escape-string
   "Escape special characters in strings for Clojure source code."
   [s]
@@ -740,8 +750,8 @@
                         :writes (:writes node)
                         :retry (:retry node)})]
             (if (empty? opts)
-              (list 'llm name)
-              (apply list 'llm name opts)))
+              (list (dsl-sym 'llm) name)
+              (apply list (dsl-sym 'llm) name opts)))
 
       :code (let [opts (build-keyword-args
                          {:fn (:fn node)
@@ -749,11 +759,11 @@
                           :writes (:writes node)
                           :retry (:retry node)})]
               (if (empty? opts)
-                (list 'code name)
-                (apply list 'code name opts)))
+                (list (dsl-sym 'code) name)
+                (apply list (dsl-sym 'code) name opts)))
 
       ;; Default fallback for unknown executors
-      (list 'llm name))))
+      (list (dsl-sym 'llm) name))))
 
 (defn- condition-node->form
   "Convert a condition node to DSL form."
@@ -766,8 +776,8 @@
                  (and on-fail (not= on-fail :failure))
                  (assoc :on-fail on-fail)))]
     (if (empty? opts)
-      (list 'condition (:name node))
-      (apply list 'condition (:name node) opts))))
+      (list (dsl-sym 'condition) (:name node))
+      (apply list (dsl-sym 'condition) (:name node) opts))))
 
 (defn- llm-condition-node->form
   "Convert an llm-condition node to DSL form."
@@ -777,15 +787,15 @@
                 :instruction (:instruction node)
                 :reads (:reads node)})]
     (if (empty? opts)
-      (list 'llm-condition (:name node))
-      (apply list 'llm-condition (:name node) opts))))
+      (list (dsl-sym 'llm-condition) (:name node))
+      (apply list (dsl-sym 'llm-condition) (:name node) opts))))
 
 (defn- composite-node->form
   "Convert a sequence or fallback node to DSL form."
   [fn-sym node]
   (let [name (:name node)
         children (mapv node->dsl-form (:children node))]
-    (apply list fn-sym name children)))
+    (apply list (dsl-sym fn-sym) name children)))
 
 (defn- parallel-node->form
   "Convert a parallel node to DSL form."
@@ -801,8 +811,8 @@
                (and failure-policy (not= failure-policy :any))
                (assoc :failure-policy failure-policy))]
     (if (empty? opts)
-      (apply list 'parallel name children)
-      (apply list 'parallel name opts children))))
+      (apply list (dsl-sym 'parallel) name children)
+      (apply list (dsl-sym 'parallel) name opts children))))
 
 (defn- map-each-node->form
   "Convert a map-each node to DSL form."
@@ -815,7 +825,7 @@
                 :as (:item-key node)
                 :into (:output-key node)
                 :parallel (:max-concurrency node)})]
-    (apply list 'map-each name (concat opts children))))
+    (apply list (dsl-sym 'map-each) name (concat opts children))))
 
 (defn- node->dsl-form
   "Convert an exported node to a DSL form (unevaluated Clojure code as data)."
@@ -835,7 +845,7 @@
   "Convert blackboard schema to DSL form."
   [schema-map]
   (when (and schema-map (seq schema-map))
-    (list 'blackboard (into (sorted-map) schema-map))))
+    (list (dsl-sym 'blackboard) (into (sorted-map) schema-map))))
 
 (defn- workflow->form
   "Convert an exported sheet to a complete workflow DSL form."
@@ -846,7 +856,7 @@
         parts (cond-> []
                 (seq bb-schema) (conj (blackboard->form bb-schema))
                 root-node (conj (node->dsl-form root-node)))]
-    (apply list 'workflow name parts)))
+    (apply list (dsl-sym 'workflow) name parts)))
 
 ;; =============================================================================
 ;; Pretty Printing
@@ -914,8 +924,8 @@
                           [first-arg rest-args]
                           [nil (if first-arg (cons first-arg rest-args) [])])]
     (if (and (nil? opts) (empty? children))
-      (str "(parallel \"" (escape-string name) "\")")
-      (str "(parallel \"" (escape-string name) "\""
+      (str "(" fn-sym " \"" (escape-string name) "\")")
+      (str "(" fn-sym " \"" (escape-string name) "\""
            (when opts (str " " (pr-str opts)))
            (when (seq children)
              (str "\n"
@@ -944,7 +954,7 @@
                                    (recur (rest remaining)
                                           kw-acc
                                           (conj child-acc item))))))]
-    (str "(map-each \"" (escape-string name) "\""
+    (str "(" fn-sym " \"" (escape-string name) "\""
          ;; Keyword args on same line
          (->> (partition 2 kw-args)
               (map (fn [[k v]]
@@ -964,54 +974,61 @@
 (defn- blackboard-form->pretty-string
   "Pretty print a blackboard form."
   [form indent-level]
-  (let [[_ schema-map] form]
-    (str "(blackboard\n"
+  (let [[fn-sym schema-map] form]
+    (str "(" fn-sym "\n"
          (indent-str (inc indent-level))
          (pr-str schema-map) ")")))
 
 (defn- workflow-form->pretty-string
   "Pretty print a complete workflow form."
   [form]
-  (let [[_ name & parts] form
-        bb-form (first (filter #(and (list? %) (= 'blackboard (first %))) parts))
-        root-form (first (filter #(and (list? %) (not= 'blackboard (first %))) parts))]
-    (str "(workflow \"" (escape-string name) "\"\n"
+  (let [[fn-sym wf-name & parts] form
+        bb-form (first (filter #(and (list? %) (= "blackboard" (name (first %)))) parts))
+        root-form (first (filter #(and (list? %) (not= "blackboard" (name (first %)))) parts))]
+    (str "(" fn-sym " \"" (escape-string wf-name) "\"\n"
          (when bb-form
            (str "  " (blackboard-form->pretty-string bb-form 1) "\n\n"))
          (when root-form
            (str "  " (form->pretty-string root-form 1)))
          ")")))
 
+(defn- sym-name=
+  "Compare symbol name, ignoring namespace prefix."
+  [sym name-str]
+  (= (name sym) name-str))
+
 (defn- form->pretty-string
   "Convert a DSL form to a pretty-printed string."
   [form indent-level]
-  (cond
-    ;; Workflow - top level
-    (and (list? form) (= 'workflow (first form)))
-    (workflow-form->pretty-string form)
+  (let [fn-sym (when (list? form) (first form))
+        fn-name (when fn-sym (name fn-sym))]
+    (cond
+      ;; Workflow - top level
+      (and fn-sym (= "workflow" fn-name))
+      (workflow-form->pretty-string form)
 
-    ;; Composite nodes
-    (and (list? form) (contains? #{'sequence 'fallback} (first form)))
-    (composite-form->pretty-string form indent-level)
+      ;; Composite nodes
+      (and fn-sym (contains? #{"sequence" "fallback"} fn-name))
+      (composite-form->pretty-string form indent-level)
 
-    ;; Parallel
-    (and (list? form) (= 'parallel (first form)))
-    (parallel-form->pretty-string form indent-level)
+      ;; Parallel
+      (and fn-sym (= "parallel" fn-name))
+      (parallel-form->pretty-string form indent-level)
 
-    ;; Map-each
-    (and (list? form) (= 'map-each (first form)))
-    (map-each-form->pretty-string form indent-level)
+      ;; Map-each
+      (and fn-sym (= "map-each" fn-name))
+      (map-each-form->pretty-string form indent-level)
 
-    ;; Leaf nodes
-    (and (list? form) (contains? #{'llm 'code 'condition 'llm-condition} (first form)))
-    (leaf-form->pretty-string form indent-level)
+      ;; Leaf nodes
+      (and fn-sym (contains? #{"llm" "code" "condition" "llm-condition"} fn-name))
+      (leaf-form->pretty-string form indent-level)
 
-    ;; Blackboard
-    (and (list? form) (= 'blackboard (first form)))
-    (blackboard-form->pretty-string form indent-level)
+      ;; Blackboard
+      (and fn-sym (= "blackboard" fn-name))
+      (blackboard-form->pretty-string form indent-level)
 
-    ;; Default - use pr-str
-    :else (pr-str form)))
+      ;; Default - use pr-str
+      :else (pr-str form))))
 
 ;; =============================================================================
 ;; Public DSL Generation API
@@ -1026,21 +1043,26 @@
 
    Options:
      :pretty? - Pretty-print with indentation (default true)
+     :ns      - Namespace prefix for DSL functions (e.g., \"sheet\" produces sheet/workflow)
 
    Example:
      (export-to-dsl (export-sheet ctx sheet-id))
      ;; => \"(workflow \\\"my-workflow\\\" ...)\"
+
+     (export-to-dsl (export-sheet ctx sheet-id) :ns \"sheet\")
+     ;; => \"(sheet/workflow \\\"my-workflow\\\" ...)\"
 
    Round-trip usage:
      (let [exported (export-sheet ctx sheet-id)
            dsl-code (export-to-dsl exported)
            workflow-def (eval (read-string dsl-code))]
        (build-workflow! ctx workflow-def))"
-  [exported & {:keys [pretty?] :or {pretty? true}}]
-  (let [form (workflow->form exported)]
-    (if pretty?
-      (form->pretty-string form 0)
-      (pr-str form))))
+  [exported & {:keys [pretty? ns] :or {pretty? true}}]
+  (binding [*dsl-ns* ns]
+    (let [form (workflow->form exported)]
+      (if pretty?
+        (form->pretty-string form 0)
+        (pr-str form)))))
 
 (defn sheet->dsl
   "Generate DSL code directly from a sheet-id.

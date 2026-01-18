@@ -126,6 +126,8 @@
 
 ;; Export/Import
 (def export-sheet dsl/export-sheet)
+(def export-to-dsl dsl/export-to-dsl)
+(def save-sheet-as-dsl! dsl/save-sheet-as-dsl!)
 (def import-sheet dsl/import-sheet)
 (def save-sheet! dsl/save-sheet!)
 (def load-sheet! dsl/load-sheet!)

@@ -54,7 +54,7 @@
        :final-response :string})
 
     ;; SEQUENCE: Main orchestration
-    (sheet/sequence
+    (sheet/sequence "main"
 
       ;; Step 1: CODE - count words
       (sheet/code "count-words"
@@ -63,9 +63,9 @@
         :writes ["word-count"])
 
       ;; Step 2: FALLBACK + CONDITION - branch based on text length
-      (sheet/fallback
+      (sheet/fallback "length-check"
         ;; Try: If long text (>50 words), summarize it
-        (sheet/sequence
+        (sheet/sequence "long-text-handler"
           (sheet/condition "check-long"
             :check {:key "word-count" :op :gt :value 50})
           (sheet/llm "summarize"
@@ -82,7 +82,7 @@
           :writes ["summary"]))
 
       ;; Step 3: PARALLEL - extract keywords AND classify theme concurrently
-      (sheet/parallel
+      (sheet/parallel "extract-parallel"
         (sheet/llm "extract-keywords"
           :model "google/gemini-2.0-flash-001"
           :instruction "Extract 2-4 important keywords from the text."
@@ -107,9 +107,9 @@
           :writes ["keyword-type"]))
 
       ;; Step 5: FALLBACK + LLM-CONDITION - urgent vs normal response
-      (sheet/fallback
+      (sheet/fallback "urgency-check"
         ;; Try: If urgent, respond with high priority
-        (sheet/sequence
+        (sheet/sequence "urgent-handler"
           (sheet/llm-condition "is-urgent?"
             :model "google/gemini-2.0-flash-001"
             :instruction "Is this message urgent, time-sensitive, or requiring immediate attention?"
