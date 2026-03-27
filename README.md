@@ -4,6 +4,8 @@
 
 ORC provides composable primitives for building, executing, optimizing, and evaluating LLM-powered workflows. It's designed as a library that consumers pull in as a git dependency.
 
+> **Early-stage software.** ORC is under active development. Expect sharp edges and breaking changes — APIs, event schemas, and conventions may shift between commits. Pin to a specific `:git/sha` and review the diff before updating.
+
 ## Quick Start
 
 Add to your `deps.edn`:
@@ -21,20 +23,20 @@ obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
 (def my-workflow
   (orc/workflow "summarizer"
     (orc/blackboard
-      {"input"   :string
-       "summary" :string})
-    (orc/sequence
+      {:input   :string
+       :summary :string})
+    (orc/sequence "main"
       (orc/llm "summarize"
-        {:instruction "Summarize the input text in 2 sentences."
-         :inputs ["input"]
-         :outputs ["summary"]}))))
+        :instruction "Summarize the input text in 2 sentences."
+        :reads [:input]
+        :writes [:summary]))))
 
 ;; Build it (creates events in the event store)
 (orc/build-workflow! ctx my-workflow)
 
 ;; Execute it
-(orc/execute ctx sheet-id {"input" "Long article text..."})
-;; => {:status :success, :outputs {"summary" "..."}, :duration-ms 1234}
+(orc/execute ctx sheet-id {:input "Long article text..."})
+;; => {:status :success, :outputs {:summary "..."}, :duration-ms 1234}
 ```
 
 ## Components
