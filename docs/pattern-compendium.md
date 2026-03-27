@@ -26,7 +26,7 @@ This compendium covers patterns and conventions, but the **Grain framework** is 
 2. **nREPL** — Use `/nrepl-connect` to connect to the running system. You can inspect state, evaluate queries, and debug live:
    ```clojure
    ;; Check what's in a read model:
-   (rmp/project @(resolve 'ai.obney.orc.web-api.core/app) :service/items)
+   (rmp/project @(resolve 'ai.obney.orc.orc-dev.core/app) :service/items)
 
    ;; Run a command manually:
    (cp/process-command (assoc context :command {...}))
@@ -494,7 +494,7 @@ When something doesn't work, use **nREPL** (`/nrepl-connect`) and **the server c
 
 ```clojure
 ;; Get the running system context:
-(def ctx (:ai.obney.orc.web-api.core/context @ai.obney.orc.web-api.core/app))
+(def ctx (:ai.obney.orc.orc-dev.core/context @ai.obney.orc.orc-dev.core/app))
 
 ;; Query a read model:
 (require '[ai.obney.grain.read-model-processor-v2.interface :as rmp])

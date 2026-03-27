@@ -5,118 +5,114 @@ description: Create scheduled background jobs that run on cron schedules
 
 # Grain Periodic Task Pattern
 
-Periodic tasks are scheduled background jobs that run on cron or interval schedules. They operate outside the request/response cycle and are used for maintenance, cleanup, reminders, and other time-based operations.
+Periodic tasks are scheduled background jobs that run on cron schedules. They use `defperiodic` to emit trigger events, and a corresponding `defprocessor` handles the actual work.
 
 See **Pattern Compendium section 1.4.1** for the authoritative reference.
 
-## Function Signature
+## Two-File Pattern
 
-```clojure
-(defn task-name
-  "Description of what this task does."
-  [context _time]
-  ;; context is the full system context (event-store, cache, tenant-id, etc.)
-  ;; _time is provided by the scheduler
-  ...)
-```
+Periodic tasks are split into two parts:
 
-## Task File (`core/periodic_tasks.clj`)
+1. **`periodic_tasks.clj`** -- `defperiodic` emits a lightweight trigger event per tenant on schedule
+2. **`todo_processors.clj`** -- `defprocessor` subscribes to the trigger event and does the real work
+
+The framework iterates over all tenants automatically. The `defperiodic` handler receives `[tenant-id time]` (NOT `[context time]`) and returns `{:result/events [...]}`. The framework appends the events per-tenant.
+
+## Periodic Task File (`core/periodic_tasks.clj`)
 
 ```clojure
 (ns ai.obney.orc.my-service.core.periodic-tasks
-  "Scheduled background jobs for my-service."
+  "Scheduled trigger events for my-service."
+  (:require [ai.obney.grain.event-store-v3.interface :refer [->event]]
+            [ai.obney.grain.periodic-task.interface :refer [defperiodic]]))
+
+(defperiodic :my-service send-reminders
+  {:schedule {:cron "0 * * * *" :timezone "America/Chicago"}}
+  "Emit reminder-check trigger for each tenant every hour."
+  [_tenant-id time]
+  {:result/events
+   [(->event {:type :my-service/reminder-check-triggered
+              :tags #{[:reminder-check (random-uuid)]}
+              :body {:triggered-at (str time)}})]})
+```
+
+The generated var name is `my-service-send-reminders`.
+
+## Corresponding Processor (`core/todo_processors.clj`)
+
+```clojure
+(ns ai.obney.orc.my-service.core.todo-processors
   (:require [ai.obney.orc.my-service.core.read-models :as rm]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.time.interface :as time]
+            [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [com.brunobonacci.mulog :as u]))
 
-(defn send-reminders
-  "Scan for items due soon and send reminder notifications."
-  [context _time]
+(defprocessor :my-service reminder-runner
+  {:topics #{:my-service/reminder-check-triggered}}
+  "Process pending reminders when trigger fires."
+  [context]
   (let [items (rm/get-pending-items context)]
-    (u/log ::send-reminders :count (count items))
+    (u/log ::reminder-runner :count (count items))
     (doseq [item items]
       (cp/process-command
        (assoc context :command {:command/id (random-uuid)
                                 :command/timestamp (time/now)
                                 :command/name :my-service/send-reminder
-                                :item-id (:id item)})))))
+                                :item-id (:id item)})))
+    {}))
+```
 
-(defn cleanup-expired
-  "Remove items that have been expired for more than 30 days."
-  [context _time]
-  (let [expired (rm/get-expired-items context)]
-    (u/log ::cleanup-expired :count (count expired))
-    (doseq [item expired]
+## Complete Example: Membership Billing
+
+```clojure
+;; periodic_tasks.clj
+(defperiodic :membership billing-check
+  {:schedule {:cron "0 6 * * *" :timezone "America/Chicago"}}
+  "Daily billing check trigger."
+  [_tenant-id time]
+  {:result/events [(->event {:type :membership/billing-check-triggered
+                             :tags #{[:billing-check (random-uuid)]}
+                             :body {:triggered-at (str time)}})]})
+
+;; todo_processors.clj
+(defprocessor :membership billing-runner
+  {:topics #{:membership/billing-check-triggered}}
+  "Process memberships due for billing."
+  [context]
+  (let [today (str (java.time.LocalDate/now))
+        due (rm/get-memberships-due-for-billing context today)]
+    (doseq [m due]
       (cp/process-command
        (assoc context :command {:command/id (random-uuid)
                                 :command/timestamp (time/now)
-                                :command/name :my-service/archive-item
-                                :item-id (:id item)})))))
+                                :command/name :membership/initiate-billing
+                                :membership-id (:membership-id m)})))
+    {}))
 ```
 
-## Task Registry
-
-Define the registry map that maps task keys to handler functions and schedules:
-
-```clojure
-(def periodic-tasks
-  {:my-service/send-reminders
-   {:handler-fn #'send-reminders
-    :schedule {:cron "0 * * * *" :timezone "America/Chicago"}}
-
-   :my-service/cleanup-expired
-   {:handler-fn #'cleanup-expired
-    :schedule {:cron "0 3 * * *" :timezone "America/Chicago"}}})
-```
-
-**Schedule formats:**
+## Schedule Formats
 
 | Format | Example | Description |
 |--------|---------|-------------|
 | Cron | `{:cron "0 * * * *" :timezone "America/Chicago"}` | Standard cron (minute hour day month weekday) |
-| Interval | `{:every 30 :duration :seconds}` | Fixed interval |
 
 Common cron patterns:
 - `"0 * * * *"` -- every hour on the hour
 - `"*/15 * * * *"` -- every 15 minutes
 - `"0 3 * * *"` -- daily at 3 AM
+- `"0 6 * * *"` -- daily at 6 AM
 - `"0 0 * * 1"` -- weekly on Monday at midnight
-
-**Always use var references (`#'fn`)** for REPL reloading support.
-
-## Multi-Tenant Iteration
-
-Periodic tasks run globally (not scoped to a tenant). When your task needs to process data per-tenant, iterate over active tenants:
-
-```clojure
-(defn tenant-maintenance
-  "Run maintenance for each active tenant."
-  [context _time]
-  (let [tenant-ids (get-active-tenant-ids context)]
-    (doseq [tid tenant-ids]
-      (let [ctx (assoc context :tenant-id tid)]
-        ;; Now ctx is scoped to this tenant
-        ;; Read models will return tenant-specific data
-        (let [items (rm/get-stale-items ctx)]
-          (doseq [item items]
-            (cp/process-command
-             (assoc ctx :command {:command/id (random-uuid)
-                                  :command/timestamp (time/now)
-                                  :command/name :my-service/refresh-item
-                                  :item-id (:id item)}))))))))
-```
 
 ## CAS for Idempotency
 
-When multiple instances might run the same task simultaneously, use CAS (Compare-And-Swap) to prevent duplicate work:
+When a trigger event must be processed at most once, use CAS inside the `defprocessor`:
 
 ```clojure
-(require '[ai.obney.grain.event-store-v3.interface :as es :refer [->event]])
-
-(defn send-daily-digest
+(defprocessor :my-service digest-sender
+  {:topics #{:my-service/digest-triggered}}
   "Send daily digest -- at most once per user per day."
-  [context _time]
+  [context]
   (let [users (rm/get-users-needing-digest context)]
     (doseq [user users]
       (es/append (:event-store context)
@@ -128,39 +124,35 @@ When multiple instances might run the same task simultaneously, use CAS (Compare
                   :cas {:types #{:my-service/digest-sent}
                         :tags #{[:user (:user-id user)]}
                         :predicate-fn (fn [existing]
-                                        (empty? (into [] existing)))}}))))
+                                        (empty? (into [] existing)))}}))
+    {}))
 ```
 
 The CAS predicate checks that no `:my-service/digest-sent` event exists for this user with these tags. If another instance already emitted one, the append silently fails.
 
-## Wiring
+## Auto-Registration and Wiring
 
-### 1. Re-export in interface.clj
+Both `defperiodic` and `defprocessor` register in global registries automatically. No manual registry maps are needed.
+
+**Interface.clj** only needs bare side-effect requires:
 
 ```clojure
 (ns ai.obney.orc.my-service.interface
-  (:require ...
-            [ai.obney.orc.my-service.core.periodic-tasks :as tasks]))
+  (:require [ai.obney.orc.my-service.core.commands]
+            [ai.obney.orc.my-service.core.queries]
+            [ai.obney.orc.my-service.core.todo-processors]   ;; bare require
+            [ai.obney.orc.my-service.core.periodic-tasks]    ;; bare require
+            [ai.obney.orc.my-service.core.read-models :as rm]))
 
-(def periodic-tasks tasks/periodic-tasks)
+;; No periodic-tasks or todo-processors re-export needed
+(def get-item rm/get-item)
 ```
 
-### 2. Initialize in web-api core
-
-Periodic tasks are typically started alongside the system. In `bases/web-api/src/.../core.clj`, import the interface and start the tasks as part of the Integrant system.
-
-The exact wiring depends on the periodic task infrastructure component. At minimum, you need the interface require (which loads the periodic-tasks namespace) and the task map available to the system initialization.
-
-```clojure
-;; In ns require:
-[ai.obney.orc.my-service.interface :as my-service]
-
-;; In system initialization -- the periodic task component reads from service interfaces:
-;; my-service/periodic-tasks is available for the scheduler to pick up
-```
+No manual wiring is needed. `pt/start-periodic-triggers!` discovers periodic tasks from the global registry. The control plane discovers todo processors the same way.
 
 ## Reference Files
 
-- `components/user-service/src/.../core/periodic_tasks.clj` -- Working example (example-periodic-task)
-- `components/user-service/src/.../interface.clj` -- How periodic tasks are re-exported
+- `components/membership-service/src/.../core/periodic_tasks.clj` -- Billing check trigger
+- `components/scheduling-service/src/.../core/periodic_tasks.clj` -- Scheduling triggers
+- `components/user-service/src/.../core/periodic_tasks.clj` -- User maintenance
 - `docs/pattern-compendium.md` section 1.4.1 -- Authoritative periodic task reference

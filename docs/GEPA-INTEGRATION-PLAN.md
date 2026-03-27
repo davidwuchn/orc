@@ -113,7 +113,7 @@ class GEPAAdapter:
                              │ HTTP
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                  Clojure Web API (Pedestal)                      │
+│                  Clojure API (HTTP or programmatic)              │
 │                                                                  │
 │  POST /api/sheet/execute                                         │
 │  POST /api/evaluation/evaluate                                   │
@@ -135,22 +135,22 @@ class GEPAAdapter:
 
 ### Step-by-Step Implementation
 
-#### Step 0.1: Add GEPA API Routes
-**File:** `bases/web-api/src/ai/obney/workshop/web_api/routes.clj`
+#### Step 0.1: Add GEPA API Endpoints
 
-New routes needed:
+Expose these operations programmatically (or via HTTP routes in a host application):
+
 ```clojure
 ;; Execute a workflow and return trace-id
-["/api/sheet/:sheet-id/execute" :post sheet/execute-handler]
+(sheet/execute ctx sheet-id inputs)
 
-;; Evaluate a trace using our judges
-["/api/evaluation/evaluate" :post evaluation/evaluate-handler]
+;; Evaluate a trace using judges
+(evaluation/evaluate ctx trace-id judges)
 
 ;; Query low-scoring evaluations for reflective dataset
-["/api/evaluation/low-scoring" :get evaluation/low-scoring-handler]
+(evaluation/low-scoring ctx {:threshold 0.7 :limit 50})
 
 ;; Query events by tag (for trace retrieval)
-["/api/events/by-tag" :get events/by-tag-handler]
+(es/read event-store {:tenant-id tid :tags #{[:trace trace-id]}})
 ```
 
 #### Step 0.2: Create Python Adapter
@@ -251,9 +251,7 @@ print(f"Improvement: {result.initial_score} → {result.final_score}")
 
 | File | Purpose |
 |------|---------|
-| `bases/web-api/.../routes.clj` | Add GEPA API routes |
-| `bases/web-api/.../handlers/evaluation.clj` | Evaluation endpoint handlers |
-| `bases/web-api/.../handlers/events.clj` | Event query handlers |
+| `components/orc-service/core/gepa.clj` | GEPA bridge (direct integration) |
 | `development/python/clojure_adapter.py` | Python GEPA adapter |
 | `development/python/gepa_verification.py` | Verification test script |
 | `development/python/requirements.txt` | Add gepa dependency |

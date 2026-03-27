@@ -78,7 +78,7 @@ The generated var name is `ns-processor-name` (e.g., `(defprocessor :crm ensure-
 ;; No todo-processors re-export needed
 ```
 
-No wiring in web-api `core.clj` is needed -- the control plane discovers processors from the global registry.
+No manual wiring is needed -- the control plane discovers processors from the global registry.
 
 ## Common Use Cases
 

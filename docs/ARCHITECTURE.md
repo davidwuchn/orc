@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document provides a comprehensive architectural reference for understanding how ORC (behavior trees), Grain (event sourcing), and DSPy (LLM optimization) integrate in the workshop-template codebase.
+This document provides a comprehensive architectural reference for understanding how ORC (behavior trees), Grain (event sourcing), and DSPy (LLM optimization) integrate in the ORC library.
 
 ---
 
@@ -10,31 +10,29 @@ This document provides a comprehensive architectural reference for understanding
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         UI (ClojureScript)                       │
-│                    UIx + Re-frame + ShadCN                       │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ HTTP
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Pedestal Web API                            │
-│                 /bases/web-api/core.clj                          │
+│              Consumer Code (cp/process-command, defquery)        │
 └────────────────────────────┬────────────────────────────────────┘
                              │
               ┌──────────────┴──────────────┐
               ▼                              ▼
 ┌──────────────────────┐          ┌──────────────────────┐
-│   COMMAND PATH       │          │    QUERY PATH        │
+│   COMMANDS           │          │    QUERIES           │
 │   (mutations)        │          │    (reads)           │
 └──────────┬───────────┘          └──────────┬───────────┘
            │                                  │
            ▼                                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    GRAIN EVENT STORE                             │
-│     Events → Read Models → Todo Processors                       │
-│  /components/orc-service/core/{commands,read_models,queries}  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-                             ▼
+┌──────────────────────┐          ┌──────────────────────┐
+│   EVENTS             │          │   READ MODELS        │
+│   (event store)      │          │   (projections)      │
+└──────────┬───────────┘          └──────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   TODO PROCESSORS    │
+│   (side effects)     │
+└──────────────────────┘
+           │
+           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    SHEET SERVICE (ORC)                           │
 │               Behavior Tree Execution Engine                     │
@@ -138,7 +136,7 @@ FALLBACK:  ORC → libpython-clj → DSPy (Python) → LLMs
 - Node `:instruction` → module instructions
 
 **Key Files:**
-- `web-api/core.clj:147-149` - DSCloj initialization
+- `bases/orc-dev/core.clj` - DSCloj initialization
 - `executor.clj:109-140` - `build-module` (schema → DSCloj module)
 - `executor.clj:264-354` - `execute-ai` (call DSCloj predictor)
 - `executor.clj:27-82` - `malli-schema->description`
@@ -517,118 +515,6 @@ Judges are defined at the workflow level (paralleling `sheet/blackboard`) and st
 
 ---
 
-## UI Layer (ClojureScript)
-
-**Stack:** UIx (React wrapper) + Re-frame (state management) + Reitit (routing) + ShadCN (components)
-
-### Project Structure
-
-```
-ui/web-app/src/
-├── app/              # Entry point, re-frame setup
-├── components/
-│   ├── api/          # APIClient protocol, HTTP communication
-│   ├── auth/         # Login, signup, password reset forms
-│   ├── context/      # React context provider
-│   ├── router/       # Reitit routing, protected routes
-│   └── runs/         # BT execution visualization
-│       ├── runs_list.cljs    # Paginated trace table
-│       ├── run_detail.cljs   # Single trace view
-│       ├── gantt_chart.cljs  # Timeline visualization
-│       ├── flame_graph.cljs  # Hierarchical tree view
-│       └── timeline.cljs     # Blackboard state evolution
-├── store/
-│   ├── auth/         # Auth events, subs, effects
-│   ├── runs/         # Runs events, subs, effects
-│   └── router/       # Navigation effects
-└── config/           # API base URL
-```
-
-### Re-frame Pattern
-
-**Events** (mutations):
-```clojure
-(rf/reg-event-fx ::load-runs-screen
-  (fn [{:keys [db]} [_ api-client]]
-    {:db (assoc-in db [:runs :loading?] true)
-     ::load-runs-screen {:api-client api-client
-                         :on-success [::load-runs-success]
-                         :on-failure [::load-runs-failure]}}))
-```
-
-**Subscriptions** (queries):
-```clojure
-(rf/reg-sub ::runs-list
-  (fn [db _] (get-in db [:runs :list])))
-```
-
-**Effects** (side effects):
-```clojure
-(rf/reg-fx ::load-runs-screen
-  (fn [{:keys [api-client on-success on-failure]}]
-    (go
-      (let [response (<! (api/query api-client
-                           {:query/name :sheet/runs-screen}))]
-        (if (anomaly? response)
-          (rf/dispatch (conj on-failure response))
-          (rf/dispatch (conj on-success response)))))))
-```
-
-### API Client
-
-**Protocol:**
-```clojure
-(defprotocol APIClient
-  (command [this cmd])  ; POST /command → channel
-  (query [this qry]))   ; POST /query → channel
-```
-
-**Error Handling** (Anomaly pattern):
-```clojure
-;; HTTP status → anomaly category
-400 → :incorrect
-401/403 → :forbidden
-404 → :not-found
-409 → :conflict
-500 → :fault
-```
-
-### UIx Component Pattern
-
-```clojure
-(defui runs-list [{:keys [on-select]}]
-  (let [runs (use-subscribe [::runs-subs/runs-list])
-        {:keys [dispatch]} (uix/use-context app-context)]
-
-    (uix/use-effect
-      (fn []
-        (dispatch [::runs-events/load-runs-screen])
-        js/undefined)
-      [])
-
-    ($ data-table/DataTable
-       {:columns columns
-        :data runs
-        :onRowClick on-select})))
-```
-
-### Visualization Components
-
-**Gantt Chart**: Timeline view of node execution
-- X-axis: time, Y-axis: nodes in tree order
-- Color: status (green=success, red=failure)
-- Click: opens node detail panel
-
-**Flame Graph**: Hierarchical tree visualization
-- Width: duration, Color: node type
-- Nested: parent-child relationships
-
-**Timeline**: Blackboard state evolution
-- Shows key-value changes over time
-- Links to node that wrote each value
-
----
-
 ## Quick Reference: Key Files
 
 | Purpose | Path |
@@ -643,7 +529,7 @@ ui/web-app/src/
 | Read Models | `orc-service/core/read_models.clj` |
 | Todo Processors | `orc-service/core/todo_processors.clj` |
 | Tracing | `orc-service/core/tracing.clj` |
-| System Setup | `web-api/core.clj` |
+| System Setup | `bases/orc-dev/core.clj` |
 
 ---
 
