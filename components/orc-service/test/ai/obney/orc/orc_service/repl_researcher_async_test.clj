@@ -80,8 +80,8 @@
           :or {instruction "Find the answer"
                mcp-tools ["lookup"]
                max-iterations 5
-               reads ["question"]
-               writes ["answer"]}}]
+               reads [:question]
+               writes [:answer]}}]
   (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Researcher Test"))
         sheet-id (-> sheet-result :command-result/events first :sheet-id)]
     (doseq [k (concat reads writes)]
@@ -144,11 +144,11 @@
                             {:outputs {:code "FINAL_ANSWER: 42"}
                              :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})))]
           (let [{:keys [sheet-id]} (setup-repl-researcher-sheet! ctx)
-                {:keys [promise]} (dispatch-async-execute! ctx sheet-id {"question" "What is the answer?"})
+                {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:question "What is the answer?"})
                 result (wait-for-completion promise)]
             (is (not= :timeout result) "Execution should complete within timeout")
             (is (= :success (:status result)))
-            (is (= "42" (get (:outputs result) "answer")))
+            (is (= "42" (:answer (:outputs result))))
             (is (= 1 (count @tool-calls)))
             (is (= "lookup" (:tool (first @tool-calls))))))))))
 
@@ -161,8 +161,8 @@
                        :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}})]
         (let [{:keys [sheet-id]} (setup-repl-researcher-sheet!
                                    ctx :mcp-tools [] :instruction "Compute 21+21")
-              {:keys [promise]} (dispatch-async-execute! ctx sheet-id {"question" "What is 21+21?"})
+              {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:question "What is 21+21?"})
               result (wait-for-completion promise)]
           (is (not= :timeout result))
           (is (= :success (:status result)))
-          (is (= "42" (get (:outputs result) "answer"))))))))
+          (is (= "42" (:answer (:outputs result)))))))))

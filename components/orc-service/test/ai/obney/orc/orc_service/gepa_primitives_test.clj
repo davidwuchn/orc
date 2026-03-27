@@ -30,14 +30,14 @@
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id seq-id "Root"))
 
         ;; Declare blackboard keys
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "test-key" :string))
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "other-key" :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :test-key :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :other-key :string))
 
         ;; Create first condition (child of sequence)
         cond1-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :condition :parent-id seq-id))
         cond1-id (-> cond1-result :command-result/events first :node-id)
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id cond1-id "check-exists"))
-        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond1-id {:key "test-key" :op :exists}))
+        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond1-id {:key :test-key :op :exists}))
 
         ;; Create fallback (child of sequence)
         fb-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :fallback :parent-id seq-id))
@@ -48,13 +48,13 @@
         cond2-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :condition :parent-id fb-id))
         cond2-id (-> cond2-result :command-result/events first :node-id)
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id cond2-id "check-nonexistent"))
-        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond2-id {:key "nonexistent" :op :exists}))
+        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond2-id {:key :nonexistent :op :exists}))
 
         ;; Create third condition (child of fallback - will succeed)
         cond3-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :condition :parent-id fb-id))
         cond3-id (-> cond3-result :command-result/events first :node-id)
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id cond3-id "check-other"))
-        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond3-id {:key "other-key" :op :exists}))]
+        _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id cond3-id {:key :other-key :op :exists}))]
 
     {:sheet-id sheet-id
      :node-ids {:root seq-id
@@ -117,7 +117,7 @@
   (testing "execution stores an execution trace via async assembly"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (create-simple-workflow! ctx)
-            result (sheet/execute ctx sheet-id {"test-key" "hello" "other-key" "world"})
+            result (sheet/execute ctx sheet-id {:test-key "hello" :other-key "world"})
             trace-id (:trace-id result)]
         (is (= :success (:status result)))
         (is (uuid? trace-id))
@@ -136,7 +136,7 @@
   (testing "trace node entries include name, type, and status"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (create-simple-workflow! ctx)
-            result (sheet/execute ctx sheet-id {"test-key" "hello" "other-key" "world"})
+            result (sheet/execute ctx sheet-id {:test-key "hello" :other-key "world"})
             trace (wait-for-trace ctx (:trace-id result))]
         (is (some? trace))
         (when trace
@@ -155,12 +155,12 @@
   (testing "trace input snapshot captures execution inputs"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (create-simple-workflow! ctx)
-            result (sheet/execute ctx sheet-id {"test-key" "input-val" "other-key" "other-val"})
+            result (sheet/execute ctx sheet-id {:test-key "input-val" :other-key "other-val"})
             trace (wait-for-trace ctx (:trace-id result))]
         (is (some? trace))
         (when trace
-          (is (= "input-val" (get (:input-snapshot trace) "test-key")))
-          (is (= "other-val" (get (:input-snapshot trace) "other-key"))))))))
+          (is (= "input-val" (get (:input-snapshot trace) :test-key)))
+          (is (= "other-val" (get (:input-snapshot trace) :other-key))))))))
 
 ;; =============================================================================
 ;; Phase 2: Trace Querying
@@ -177,7 +177,7 @@
   (testing "get-traces returns traces for a sheet"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (create-simple-workflow! ctx)
-            result (sheet/execute ctx sheet-id {"test-key" "hello" "other-key" "world"})
+            result (sheet/execute ctx sheet-id {:test-key "hello" :other-key "world"})
             _ (wait-for-trace ctx (:trace-id result))
             traces-result (h/run-query ctx (h/make-get-traces-query sheet-id))]
         (is (not (h/is-anomaly? traces-result)))
@@ -200,7 +200,7 @@
 
             ;; Execute version 1
             result (h/run-command ctx (h/make-execute-version-command sheet-id 1
-                                        :inputs {"test-key" "v1" "other-key" "v1"}))
+                                        :inputs {:test-key "v1" :other-key "v1"}))
             data (:command-result/data result)]
 
         (is (= :success (:status data)))
@@ -235,9 +235,9 @@
 
             ;; Batch execute
             result (h/run-command ctx (h/make-batch-execute-command sheet-id
-                                        [{"test-key" "a" "other-key" "a"}
-                                         {"test-key" "b" "other-key" "b"}
-                                         {"test-key" "c" "other-key" "c"}]
+                                        [{:test-key "a" :other-key "a"}
+                                         {:test-key "b" :other-key "b"}
+                                         {:test-key "c" :other-key "c"}]
                                         :version-number 1))
             data (:command-result/data result)]
 
@@ -295,7 +295,7 @@
 
             ;; Modify a node
             _ (h/run-and-apply! ctx (h/make-set-node-check-command sheet-id (:cond1 node-ids)
-                                      {:key "test-key" :op :truthy}))
+                                      {:key :test-key :op :truthy}))
 
             ;; Publish v2
             _ (h/run-and-apply! ctx (h/make-publish-version-command sheet-id))

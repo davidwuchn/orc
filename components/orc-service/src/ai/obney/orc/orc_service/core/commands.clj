@@ -1067,7 +1067,7 @@
         blackboard (rm/get-blackboard-for-sheet ctx sheet-id)]
     {:sheet {:name (:name sheet) :id sheet-id}
      :blackboard-schema (into {}
-                              (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
+                              (map (fn [bb] [(:key bb) (:schema bb)])
                                    blackboard))
      :nodes (build-node-tree nodes-by-id (:root-node-id sheet))}))
 

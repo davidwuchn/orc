@@ -23,15 +23,15 @@
   "Simple Q&A executor that echoes instruction + question as answer.
    Used to test GEPA flow without real LLM calls."
   [{:keys [inputs]}]
-  (let [question (get inputs "question")
-        instruction (get inputs "instruction" "Answer the question.")]
-    {"answer" (str "Instruction was: '" instruction "'. Question: " question ". Answer: test-answer")}))
+  (let [question (:question inputs)
+        instruction (get inputs :instruction "Answer the question.")]
+    {:answer (str "Instruction was: '" instruction "'. Question: " question ". Answer: test-answer")}))
 
 (defn echo-executor
   "Simple executor that echoes all inputs as output.
    Useful for testing blackboard flow."
   [{:keys [inputs]}]
-  {"output" inputs})
+  {:output inputs})
 
 ;; =============================================================================
 ;; Helper: Create GEPA-Compatible Workflow
@@ -56,14 +56,14 @@
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node-id "answer"))
 
         ;; Declare blackboard keys (GEPA-compatible pattern)
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "question" :string))
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "instruction" :string))
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "answer" :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :question :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :instruction :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :answer :string))
 
         ;; Set up code executor (reads question + instruction, writes answer)
         _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id
-                                                            ["question" "instruction"]
-                                                            ["answer"]))
+                                                            [:question :instruction]
+                                                            [:answer]))
         _ (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node-id :code
                                   :fn "ai.obney.orc.orc-service.gepa-integration-test/qa-executor"))]
 
@@ -90,15 +90,15 @@
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id seq-id "root"))
 
         ;; Declare blackboard keys
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "intermediate" :string))
-        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :intermediate :string))
+        _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         ;; Create node 1
         node1-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :leaf :parent-id seq-id))
         node1-id (-> node1-result :command-result/events first :node-id)
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node1-id "step-1"))
-        _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node1-id ["input"] ["intermediate"]))
+        _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node1-id [:input] [:intermediate]))
         _ (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node1-id :code
                                   :fn "ai.obney.orc.orc-service.gepa-integration-test/echo-executor"))
 
@@ -106,7 +106,7 @@
         node2-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :leaf :parent-id seq-id))
         node2-id (-> node2-result :command-result/events first :node-id)
         _ (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id node2-id "step-2"))
-        _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node2-id ["intermediate"] ["output"]))
+        _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node2-id [:intermediate] [:output]))
         _ (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node2-id :code
                                   :fn "ai.obney.orc.orc-service.gepa-integration-test/echo-executor"))]
 
@@ -150,16 +150,16 @@
 
         ;; Verify blackboard has instruction key
         (let [blackboard (sheet/get-blackboard-by-key ctx sheet-id)]
-          (is (contains? blackboard "instruction"))
-          (is (contains? blackboard "question"))
-          (is (contains? blackboard "answer")))
+          (is (contains? blackboard :instruction))
+          (is (contains? blackboard :question))
+          (is (contains? blackboard :answer)))
 
         ;; Verify node reads instruction
         (let [nodes (sheet/get-nodes-for-sheet ctx sheet-id)
               leaf-node (first (filter #(= :leaf (:type %)) nodes))]
           (is (some? leaf-node))
-          (is (some #{"instruction"} (:reads leaf-node)))
-          (is (some #{"question"} (:reads leaf-node))))))))
+          (is (some #{:instruction} (:reads leaf-node)))
+          (is (some #{:question} (:reads leaf-node))))))))
 
 (deftest gepa-workflow-executes-with-instruction-test
   (testing "workflow executes with instruction from inputs"
@@ -168,14 +168,14 @@
 
             ;; Execute with dynamic instruction
             result (sheet/execute ctx sheet-id
-                     {"question" "What is 2+2?"
-                      "instruction" "Be concise and accurate."})]
+                     {:question "What is 2+2?"
+                      :instruction "Be concise and accurate."})]
 
         (is (= :success (:status result)))
         (is (some? (:outputs result)))
 
         ;; Verify instruction was passed through
-        (let [answer (get (:outputs result) "answer")]
+        (let [answer (get (:outputs result) :answer)]
           (is (string? answer))
           (is (clojure.string/includes? answer "Be concise and accurate.")))))))
 
@@ -190,20 +190,20 @@
 
             ;; Execute with first instruction
             result1 (sheet/execute ctx sheet-id
-                      {"question" "What is 2+2?"
-                       "instruction" "Instruction A"})
+                      {:question "What is 2+2?"
+                       :instruction "Instruction A"})
 
             ;; Execute with second instruction
             result2 (sheet/execute ctx sheet-id
-                      {"question" "What is 2+2?"
-                       "instruction" "Instruction B"})]
+                      {:question "What is 2+2?"
+                       :instruction "Instruction B"})]
 
         (is (= :success (:status result1)))
         (is (= :success (:status result2)))
 
         ;; Verify different instructions appear in outputs
-        (let [answer1 (get (:outputs result1) "answer")
-              answer2 (get (:outputs result2) "answer")]
+        (let [answer1 (get (:outputs result1) :answer)
+              answer2 (get (:outputs result2) :answer)]
           (is (clojure.string/includes? answer1 "Instruction A"))
           (is (clojure.string/includes? answer2 "Instruction B"))
           (is (not= answer1 answer2)))))))
@@ -219,7 +219,7 @@
             event-store (:event-store ctx)
 
             ;; Execute workflow
-            result (sheet/execute ctx sheet-id {"input" "test-value"})
+            result (sheet/execute ctx sheet-id {:input "test-value"})
             _ (is (= :success (:status result)))
 
             ;; Wait for trace to be assembled
@@ -254,7 +254,7 @@
 
             ;; Execute workflow
             result (sheet/execute ctx sheet-id
-                     {"question" "test" "instruction" "test-instruction"})
+                     {:question "test" :instruction "test-instruction"})
             _ (is (= :success (:status result)))
 
             ;; Query for tick events - materialize reducible with into []
@@ -280,8 +280,8 @@
   (testing "multiple judges aggregate to weighted score"
     ;; Use mock LLM to avoid real API calls
     (binding [judges/*use-mock-llm* true]
-      (let [trace-data {:inputs {"question" "What is 2+2?"}
-                        :outputs {"answer" "4"}
+      (let [trace-data {:inputs {:question "What is 2+2?"}
+                        :outputs {:answer "4"}
                         :instruction "Answer math questions accurately."}
 
             ;; Evaluate with all judges
@@ -299,8 +299,8 @@
 (deftest judge-subset-test
   (testing "can evaluate with subset of judges"
     (binding [judges/*use-mock-llm* true]
-      (let [trace-data {:inputs {"question" "What is 2+2?"}
-                        :outputs {"answer" "4"}
+      (let [trace-data {:inputs {:question "What is 2+2?"}
+                        :outputs {:answer "4"}
                         :instruction "Answer accurately."}
 
             ;; Evaluate with only grounding judge
@@ -331,7 +331,7 @@
         ;; Test get-blackboard-by-key
         (let [bb (sheet/get-blackboard-by-key ctx sheet-id)]
           (is (map? bb))
-          (is (= :string (get-in bb ["question" :schema]))))))))
+          (is (= :string (get-in bb [:question :schema]))))))))
 
 ;; =============================================================================
 ;; Test 6: Manual Evaluation Loop Pattern
@@ -344,13 +344,13 @@
         (let [{:keys [sheet-id]} (create-gepa-workflow! ctx)
 
               ;; Define trainset
-              trainset [{:inputs {"question" "What is 2+2?"}}
-                        {:inputs {"question" "What is the capital of France?"}}]
+              trainset [{:inputs {:question "What is 2+2?"}}
+                        {:inputs {:question "What is the capital of France?"}}]
 
               ;; Run evaluations manually (simulating GEPA's evaluate loop)
               results (mapv (fn [example]
                               (let [inputs (assoc (:inputs example)
-                                                  "instruction" "Answer the question.")
+                                                  :instruction "Answer the question.")
                                     exec-result (sheet/execute ctx sheet-id inputs)]
                                 (when (= :success (:status exec-result))
                                   (let [trace-data {:inputs (:inputs example)
@@ -385,7 +385,7 @@
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (create-gepa-workflow! ctx)
             result (sheet/execute ctx sheet-id
-                     {"question" "test" "instruction" "test"})]
+                     {:question "test" :instruction "test"})]
 
         (is (= :success (:status result)))
         (is (number? (:duration-ms result)))
@@ -403,15 +403,15 @@
             ;; Run multiple executions with different inputs
             results (mapv (fn [i]
                             (sheet/execute ctx sheet-id
-                              {"question" (str "Question " i)
-                               "instruction" (str "Instruction " i)}))
+                              {:question (str "Question " i)
+                               :instruction (str "Instruction " i)}))
                           (range 3))]
 
         ;; All should succeed
         (is (every? #(= :success (:status %)) results))
 
         ;; Each should have unique output
-        (let [answers (map #(get-in % [:outputs "answer"]) results)]
+        (let [answers (map #(get-in % [:outputs :answer]) results)]
           (is (= 3 (count (distinct answers)))))))))
 
 ;; =============================================================================
@@ -426,9 +426,9 @@
 
             ;; Execute multiple times
             _ (sheet/execute ctx sheet-id
-                {"question" "Q1" "instruction" "I1"})
+                {:question "Q1" :instruction "I1"})
             _ (sheet/execute ctx sheet-id
-                {"question" "Q2" "instruction" "I2"})
+                {:question "Q2" :instruction "I2"})
 
             ;; Wait a bit for async trace assembly
             _ (Thread/sleep 200)
@@ -456,7 +456,7 @@
             ;; Execute multiple times
             _ (dotimes [_ 3]
                 (sheet/execute ctx sheet-id
-                  {"question" "test" "instruction" "test"}))
+                  {:question "test" :instruction "test"}))
 
             ;; Wait for events to be processed
             _ (Thread/sleep 100)

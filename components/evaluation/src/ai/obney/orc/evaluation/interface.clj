@@ -170,7 +170,7 @@
 
 (def selective-judge-suite
   "Create an evaluation suite with only specified judges.
-   Args: judge-keys - vector of :grounding, :instruction, :reasoning, :completeness"
+   Args: judge-keys - vector of :grounding, :instruction-following, :reasoning, :completeness"
   sheets/selective-judge-suite)
 
 (def grounding-judge-sheet
@@ -215,7 +215,7 @@
    (evaluate-trace trace-data {}))
   ([trace-data {:keys [judges] :or {judges [:grounding :instruction-following
                                             :reasoning :completeness]}}]
-   (let [executor-context {:inputs {"trace-data" trace-data}}
+   (let [executor-context {:inputs {:trace-data trace-data}}
          results (reduce
                   (fn [acc judge-key]
                     (let [judge-fn (get-judge judge-key)
@@ -225,9 +225,9 @@
                   judges)
          agg-result (aggregate-dimensions {:inputs results})]
      (->score-with-feedback
-      (get agg-result "aggregate-score")
-      (get agg-result "feedback-summary")
-      (get agg-result "dimensions")))))
+      (:aggregate-score agg-result)
+      (:feedback-summary agg-result)
+      (:dimensions agg-result)))))
 
 (defn evaluate-traces
   "Evaluate multiple traces and return aggregated statistics.

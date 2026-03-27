@@ -22,7 +22,7 @@
   (let [n (swap! attempt-counter inc)]
     (if (< n 3)
       (throw (ex-info "Transient failure" {:attempt n}))
-      {"result" (str "Success on attempt " n)})))
+      {:result (str "Success on attempt " n)})))
 
 (defn always-fails [{:keys [inputs]}]
   (swap! attempt-counter inc)
@@ -30,7 +30,7 @@
 
 (defn succeeds-first-time [{:keys [inputs]}]
   (swap! attempt-counter inc)
-  {"result" "immediate success"})
+  {:result "immediate success"})
 
 ;; =============================================================================
 ;; get-backoff Tests
@@ -56,10 +56,10 @@
   (testing "returns result on immediate success without retry"
     (reset-attempts!)
     (let [result (executor/execute-with-retry
-                   (fn [] {:status :success :outputs {"x" 1}})
+                   (fn [] {:status :success :outputs {:x 1}})
                    {:max-attempts 3})]
       (is (= :success (:status result)))
-      (is (= 1 (get-in result [:outputs "x"]))))))
+      (is (= 1 (get-in result [:outputs :x]))))))
 
 (deftest execute-with-retry-eventual-success-test
   (testing "retries until success"
@@ -69,10 +69,10 @@
                      (let [n (swap! attempt-counter inc)]
                        (if (< n 3)
                          {:status :failure :error "retry"}
-                         {:status :success :outputs {"n" n}})))
+                         {:status :success :outputs {:n n}})))
                    {:max-attempts 5 :backoff-ms [10 20]})]
       (is (= :success (:status result)))
-      (is (= 3 (get-in result [:outputs "n"])))
+      (is (= 3 (get-in result [:outputs :n])))
       (is (= 3 @attempt-counter)))))
 
 (deftest execute-with-retry-max-attempts-test
@@ -98,7 +98,7 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Retry Flaky"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "result" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :result :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -107,12 +107,12 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.retry-test/flaky-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] ["result"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] [:result]))
           (h/run-and-apply! ctx (h/make-set-node-retry-command sheet-id leaf-id 5 [50 100]))
 
           (let [result (sheet/execute ctx sheet-id {})]
             (is (= :success (:status result)))
-            (is (= "Success on attempt 3" (get-in result [:outputs "result"])))
+            (is (= "Success on attempt 3" (get-in result [:outputs :result])))
             (is (= 3 @attempt-counter))))))))
 
 (deftest retry-integration-always-fails-test
@@ -123,7 +123,7 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Retry Always Fails"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "result" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :result :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -132,7 +132,7 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.retry-test/always-fails"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] ["result"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] [:result]))
           (h/run-and-apply! ctx (h/make-set-node-retry-command sheet-id leaf-id 3 [10 20]))
 
           (let [result (sheet/execute ctx sheet-id {})]
@@ -147,7 +147,7 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Retry Not Needed"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "result" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :result :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -156,7 +156,7 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.retry-test/succeeds-first-time"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] ["result"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] [:result]))
           (h/run-and-apply! ctx (h/make-set-node-retry-command sheet-id leaf-id 5 [100 200]))
 
           (let [result (sheet/execute ctx sheet-id {})]
@@ -171,7 +171,7 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Retry Backoff Timing"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "result" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :result :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -180,7 +180,7 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.retry-test/flaky-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] ["result"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] [:result]))
           ;; 100ms + 200ms = 300ms minimum for 2 retries
           (h/run-and-apply! ctx (h/make-set-node-retry-command sheet-id leaf-id 5 [100 200]))
 

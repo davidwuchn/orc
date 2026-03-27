@@ -204,9 +204,9 @@
          :executor executor
          :duration-ms duration-ms
          :status status
-         :prompt-tokens (:prompt_tokens usage)
-         :completion-tokens (:completion_tokens usage)
-         :total-tokens (:total_tokens usage)
+         :prompt-tokens (:prompt-tokens usage)
+         :completion-tokens (:completion-tokens usage)
+         :total-tokens (:total-tokens usage)
          :trace-id trace-id
          :error (when error (str error))))
 

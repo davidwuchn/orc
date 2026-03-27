@@ -108,11 +108,10 @@
   [trace-id node-id node-name model start-time end-time inputs outputs status error
    & {:keys [observation-id parent-observation-id usage]}]
   (let [;; Convert usage keys to camelCase for Langfuse
-        ;; Handle both kebab-case (from litellm-clj) and snake_case
         langfuse-usage (when usage
-                         (let [prompt (or (:prompt-tokens usage) (:prompt_tokens usage))
-                               completion (or (:completion-tokens usage) (:completion_tokens usage))
-                               total (or (:total-tokens usage) (:total_tokens usage))]
+                         (let [prompt (:prompt-tokens usage)
+                               completion (:completion-tokens usage)
+                               total (:total-tokens usage)]
                            (cond-> {}
                              prompt (assoc :promptTokens prompt)
                              completion (assoc :completionTokens completion)

@@ -75,10 +75,10 @@
         root-id (when (seq node-pairs) (first (first node-pairs)))
         ;; Build blackboard from schema (values will be set from inputs)
         blackboard (reduce (fn [bb [k schema]]
-                            (assoc bb (name k) {:key (name k)
-                                                :schema schema
-                                                :value nil
-                                                :version 0}))
+                            (assoc bb k {:key k
+                                         :schema schema
+                                         :value nil
+                                         :version 0}))
                           {}
                           blackboard-schema)]
     {:nodes-by-id nodes-by-id

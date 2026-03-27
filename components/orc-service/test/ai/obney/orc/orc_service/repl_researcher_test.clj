@@ -14,21 +14,21 @@
   {:type :repl-researcher
    :name "test-researcher"
    :instruction "Find the answer"
-   :reads ["question"]
-   :writes ["answer"]
+   :reads [:question]
+   :writes [:answer]
    :mcp-tools ["lookup"]
    :max-iterations 5
    :model "test-model"})
 
 (def test-blackboard
-  {"question" {:key "question"
-               :schema :string
-               :value "What is 2+2?"
-               :version 1}
-   "answer"   {:key "answer"
-               :schema :string
-               :value nil
-               :version 0}})
+  {:question {:key :question
+              :schema :string
+              :value "What is 2+2?"
+              :version 1}
+   :answer   {:key :answer
+              :schema :string
+              :value nil
+              :version 0}})
 
 (defn mock-call-tool [tool-name args]
   {"result" (clojure.core/str "looked-up:" (get args "key" "default"))})
@@ -50,7 +50,7 @@
       (let [result (executor/execute-repl-researcher
                      test-node test-blackboard :test test-context)]
         (is (= :success (:status result)))
-        (is (= "42" (get (:outputs result) "answer")))
+        (is (= "42" (:answer (:outputs result))))
         (is (some? (:duration-ms result)))))))
 
 (deftest final-answer-via-execution-test
@@ -63,7 +63,7 @@
       (let [result (executor/execute-repl-researcher
                      test-node test-blackboard :test test-context)]
         (is (= :success (:status result)))
-        (is (= "hello" (get (:outputs result) "answer")))))))
+        (is (= "hello" (:answer (:outputs result))))))))
 
 (deftest tool-call-then-answer-test
   (testing "first iteration calls tool, second produces FINAL_ANSWER"
@@ -86,7 +86,7 @@
               result (executor/execute-repl-researcher
                        test-node test-blackboard :test ctx)]
           (is (= :success (:status result)))
-          (is (= "pi is 3.14" (get (:outputs result) "answer")))
+          (is (= "pi is 3.14" (:answer (:outputs result))))
           (is (= 1 (count @tool-calls)))
           (is (= "lookup" (:tool (first @tool-calls)))))))))
 
@@ -130,9 +130,9 @@
         (let [result (executor/execute-repl-researcher
                        test-node test-blackboard :test test-context)]
           (is (= :success (:status result)))
-          (is (= 300 (get-in result [:usage :prompt_tokens])))
-          (is (= 150 (get-in result [:usage :completion_tokens])))
-          (is (= 450 (get-in result [:usage :total_tokens]))))))))
+          (is (= 300 (get-in result [:usage :prompt-tokens])))
+          (is (= 150 (get-in result [:usage :completion-tokens])))
+          (is (= 450 (get-in result [:usage :total-tokens]))))))))
 
 (deftest nil-call-tool-fn-no-crash-test
   (testing "works without call-tool-fn when code doesn't call tools"
@@ -144,7 +144,7 @@
             result (executor/execute-repl-researcher
                      test-node test-blackboard :test ctx)]
         (is (= :success (:status result)))
-        (is (= "42" (get (:outputs result) "answer")))))))
+        (is (= "42" (:answer (:outputs result))))))))
 
 (deftest namespaced-tools-test
   (testing "repl-researcher with namespaced MCP tools from multiple servers"
@@ -172,7 +172,7 @@
               result (executor/execute-repl-researcher
                        node test-blackboard :test ctx)]
           (is (= :success (:status result)))
-          (is (= "3 issues and 2 pulls" (get (:outputs result) "answer")))
+          (is (= "3 issues and 2 pulls" (:answer (:outputs result))))
           (is (= 2 (count @tool-calls)))
           (is (= #{"linear/list_issues" "github/list_pulls"}
                  (set (map :tool @tool-calls)))))))))

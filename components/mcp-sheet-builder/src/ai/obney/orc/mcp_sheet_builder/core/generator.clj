@@ -164,8 +164,8 @@
   [tool-name input-keys output-key]
   `(~'sheet/code ~(str "call-" tool-name)
      :fn "ai.obney.orc.mcp-sheet-builder.core.executors/call-mcp-tool"
-     :reads ~(vec (map str input-keys))
-     :writes ~[output-key]))
+     :reads ~(vec (map keyword input-keys))
+     :writes ~[(keyword output-key)]))
 
 (defn generate-llm-node
   "Generate an LLM node for synthesis/generation."
@@ -173,8 +173,8 @@
   `(~'sheet/llm ~node-name
      :model "google/gemini-2.5-flash"
      :instruction ~instruction
-     :reads ~(vec (map str input-keys))
-     :writes ~(vec (map str output-keys))))
+     :reads ~(vec (map keyword input-keys))
+     :writes ~(vec (map keyword output-keys))))
 
 ;; ============================================================================
 ;; Pattern-specific Generation
@@ -202,7 +202,7 @@
                          (let [input-keys (keys (get-in tool [:input-schema "properties"]))
                                output-key (str (:name tool) "-result")]
                            (generate-code-node (:name tool) input-keys output-key)))
-        result-keys (mapv #(str (:name %) "-result") parallel-tools)]
+        result-keys (mapv #(keyword (str (:name %) "-result")) parallel-tools)]
     `(~'sheet/sequence "fan-out-gather"
        (~'sheet/parallel "fan-out"
          ~@parallel-nodes)
@@ -210,7 +210,7 @@
          :model "google/gemini-2.5-flash"
          :instruction "Synthesize the results from all parallel operations."
          :reads ~result-keys
-         :writes ["synthesis-result"]))))
+         :writes [:synthesis-result]))))
 
 (defn generate-research-compilation
   "Generate a research compilation workflow.
@@ -222,7 +222,7 @@
                        (let [input-keys (keys (get-in tool [:input-schema "properties"]))
                              output-key (str (:name tool) "-result")]
                          (generate-code-node (:name tool) input-keys output-key)))
-        result-keys (mapv #(str (:name %) "-result") sorted-searchers)]
+        result-keys (mapv #(keyword (str (:name %) "-result")) sorted-searchers)]
     `(~'sheet/sequence "research"
        (~'sheet/parallel "gather"
          ~@search-nodes)
@@ -230,7 +230,7 @@
          :model "google/gemini-2.5-flash"
          :instruction "Compile and synthesize the research findings into a coherent summary."
          :reads ~result-keys
-         :writes ["compiled-research"]))))
+         :writes [:compiled-research]))))
 
 (defn generate-generator-critic
   "Generate a generator-critic workflow.
@@ -254,8 +254,8 @@
           `(~'sheet/llm "generate"
              :model "google/gemini-2.5-flash"
              :instruction "Generate the requested content."
-             :reads ["input"]
-             :writes ["generated-content"]))
+             :reads [:input]
+             :writes [:generated-content]))
        ~(if validator
           (generate-code-node (:name validator)
                               [(str (or (:name generator) "generated") "-content")]
@@ -263,8 +263,8 @@
           `(~'sheet/llm "critique"
              :model "google/gemini-2.5-flash"
              :instruction "Critique and validate the generated content."
-             :reads [~(str (or (:name generator) "generated") "-result")]
-             :writes ["critique-result"])))))
+             :reads [~(keyword (str (or (:name generator) "generated") "-result"))]
+             :writes [:critique-result])))))
 
 ;; ============================================================================
 ;; Main Generation
@@ -337,8 +337,8 @@
    :name (str "call-" tool-name)
    :executor :code
    :fn "ai.obney.orc.mcp-sheet-builder.core.executors/call-mcp-tool"
-   :reads (vec (map str input-keys))
-   :writes [output-key]})
+   :reads (vec (map keyword input-keys))
+   :writes [(keyword output-key)]})
 
 (defn generate-llm-node-data
   "Generate an LLM node as a data structure.
@@ -372,8 +372,8 @@
       :executor :ai
       :model "google/gemini-2.5-flash"
       :instruction enriched-instruction
-      :reads (vec (map str input-keys))
-      :writes (vec (map str output-keys))})))
+      :reads (vec (map keyword input-keys))
+      :writes (vec (map keyword output-keys))})))
 
 (defn generate-repl-researcher-node-data
   "Generate a repl-researcher node as a data structure."
@@ -382,8 +382,8 @@
    :name node-name
    :model (or model "google/gemini-2.5-flash")
    :instruction instruction
-   :reads (vec (map str input-keys))
-   :writes (vec (map str output-keys))
+   :reads (vec (map keyword input-keys))
+   :writes (vec (map keyword output-keys))
    :mcp-tools (vec mcp-tools)
    :max-iterations (or max-iterations 5)})
 
@@ -425,7 +425,7 @@
                                         output-key (str (:name tool) "-result")]
                                     (generate-code-node-data (:name tool) input-keys output-key)))
                                 parallel-nodes)
-         result-keys (mapv #(str (:name %) "-result")
+         result-keys (mapv #(keyword (str (:name %) "-result"))
                            (if (empty? parallel) tools parallel))]
      {:node-type :sequence
       :name "fan-out-gather"
@@ -440,7 +440,7 @@
                    (generate-llm-node-data "synthesize"
                                            "Synthesize the results from all parallel operations."
                                            result-keys
-                                           ["synthesis-result"]
+                                           [:synthesis-result]
                                            intent))]})))
 
 (defn generate-research-compilation-data
@@ -460,7 +460,7 @@
                         (let [input-keys (keys (get-in tool [:input-schema "properties"]))
                               output-key (str (:name tool) "-result")]
                           (generate-code-node-data (:name tool) input-keys output-key)))
-         result-keys (mapv #(str (:name %) "-result") sorted-searchers)
+         result-keys (mapv #(keyword (str (:name %) "-result")) sorted-searchers)
          ;; Use generator tool if available and has relationship to searchers
          generator-with-rel (first
                              (filter (fn [gen]
@@ -481,7 +481,7 @@
                    (generate-llm-node-data "compile"
                                            "Compile and synthesize the research findings into a coherent summary."
                                            result-keys
-                                           ["compiled-research"]
+                                           [:compiled-research]
                                            intent))]})))
 
 (defn generate-repl-researcher-workflow-data
@@ -516,8 +516,8 @@
       :name "researcher"
       :model "google/gemini-2.5-flash"
       :instruction instruction
-      :reads ["question"]
-      :writes ["answer"]
+      :reads [:question]
+      :writes [:answer]
       :mcp-tools (vec tool-names)
       :max-iterations 5})))
 

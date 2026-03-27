@@ -82,7 +82,7 @@
                         (str "{"
                              (str/join ", "
                                        (for [p params]
-                                         (str "\"" p "\" (get inputs \"" p "\")")))
+                                         (str ":" p " (get inputs :" p ")")))
                              "}"))]
     (str
      "(defn " fn-name "\n"
@@ -94,8 +94,8 @@
      "        tool-args (into {} (filter (fn [[_ v]] (some? v)) raw-args))]\n"
      "    (if mcp-session\n"
      "      (let [result (mcp-client/call-tool mcp-session \"" tool-name "\" tool-args)]\n"
-     "        {\"" output-k "\" result})\n"
-     "      {\"" output-k "\" {:mock true\n"
+     "        {:" output-k " result})\n"
+     "      {:" output-k " {:mock true\n"
      "                         :tool \"" tool-name "\"\n"
      "                         :args tool-args\n"
      "                         :message \"No MCP session - mock response\"}})))\n")))
@@ -244,7 +244,7 @@
                                                  (second (re-matches #"call-(.+)" n)))
                                     ;; Or from writes "<tool>-result"
                                     writes-match (when-let [w (first (:writes x))]
-                                                   (second (re-matches #"(.+)-result" w)))
+                                                   (second (re-matches #"(.+)-result" (name w))))
                                     ;; Or check if :fn already contains a tool name pattern
                                     fn-match (some #(when (str/includes? (:fn x) (str "call-" (sanitize-name %))) %)
                                                    tools)

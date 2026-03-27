@@ -10,17 +10,17 @@
 ;; =============================================================================
 
 (defn simple-fn [{:keys [inputs]}]
-  {"output" (str "Hello, " (get inputs "name"))})
+  {:output (str "Hello, " (get inputs :name))})
 
 (defn multi-input-fn [{:keys [inputs]}]
-  (let [a (get inputs "a")
-        b (get inputs "b")]
-    {"sum" (+ a b)
-     "product" (* a b)}))
+  (let [a (get inputs :a)
+        b (get inputs :b)]
+    {:sum (+ a b)
+     :product (* a b)}))
 
 (defn context-fn [{:keys [event-store inputs]}]
-  {"has-store" (some? event-store)
-   "input-count" (count inputs)})
+  {:has-store (some? event-store)
+   :input-count (count inputs)})
 
 (defn throwing-fn [{:keys [inputs]}]
   (throw (ex-info "Intentional error" {:reason "testing"})))
@@ -55,36 +55,36 @@
 (deftest execute-code-simple-test
   (testing "executes function with inputs and returns outputs"
     (let [node {:fn "ai.obney.orc.orc-service.code-executor-test/simple-fn"
-                :reads ["name"]
-                :writes ["output"]}
-          blackboard {"name" {:key "name" :value "World" :version 1}}
+                :reads [:name]
+                :writes [:output]}
+          blackboard {:name {:key :name :value "World" :version 1}}
           result (executor/execute-code node blackboard {})]
       (is (= :success (:status result)))
-      (is (= "Hello, World" (get-in result [:outputs "output"])))
+      (is (= "Hello, World" (get-in result [:outputs :output])))
       (is (number? (:duration-ms result))))))
 
 (deftest execute-code-multi-input-test
   (testing "handles multiple inputs and outputs"
     (let [node {:fn "ai.obney.orc.orc-service.code-executor-test/multi-input-fn"
-                :reads ["a" "b"]
-                :writes ["sum" "product"]}
-          blackboard {"a" {:key "a" :value 5 :version 1}
-                      "b" {:key "b" :value 3 :version 1}}
+                :reads [:a :b]
+                :writes [:sum :product]}
+          blackboard {:a {:key :a :value 5 :version 1}
+                      :b {:key :b :value 3 :version 1}}
           result (executor/execute-code node blackboard {})]
       (is (= :success (:status result)))
-      (is (= 8 (get-in result [:outputs "sum"])))
-      (is (= 15 (get-in result [:outputs "product"]))))))
+      (is (= 8 (get-in result [:outputs :sum])))
+      (is (= 15 (get-in result [:outputs :product]))))))
 
 (deftest execute-code-context-test
   (testing "passes event-store in context"
     (let [node {:fn "ai.obney.orc.orc-service.code-executor-test/context-fn"
-                :reads ["x"]
-                :writes ["has-store" "input-count"]}
-          blackboard {"x" {:key "x" :value 42 :version 1}}
+                :reads [:x]
+                :writes [:has-store :input-count]}
+          blackboard {:x {:key :x :value 42 :version 1}}
           result (executor/execute-code node blackboard {:event-store :mock-store})]
       (is (= :success (:status result)))
-      (is (= true (get-in result [:outputs "has-store"])))
-      (is (= 1 (get-in result [:outputs "input-count"]))))))
+      (is (= true (get-in result [:outputs :has-store])))
+      (is (= 1 (get-in result [:outputs :input-count]))))))
 
 (deftest execute-code-error-test
   (testing "handles function exceptions gracefully"
@@ -114,8 +114,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Code Executor Integration"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "name" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :name :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -124,8 +124,8 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.code-executor-test/simple-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["name"] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:name] [:output]))
 
-          (let [result (sheet/execute ctx sheet-id {"name" "Clojure"})]
+          (let [result (sheet/execute ctx sheet-id {:name "Clojure"})]
             (is (= :success (:status result)))
-            (is (= "Hello, Clojure" (get-in result [:outputs "output"])))))))))
+            (is (= "Hello, Clojure" (get-in result [:outputs :output])))))))))

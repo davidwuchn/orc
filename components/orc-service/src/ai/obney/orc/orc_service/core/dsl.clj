@@ -14,29 +14,29 @@
        (sequence \"main\"
          (code \"fetch-programs\"
            :fn \"myapp.fns/fetch-programs\"
-           :reads [\"student-profile\"]
-           :writes [\"programs\"])
+           :reads [:student-profile]
+           :writes [:programs])
 
          (map-each \"score-programs\"
-           :from \"programs\"
-           :as \"current-program\"
-           :into \"scored-programs\"
+           :from :programs
+           :as :current-program
+           :into :scored-programs
            :parallel 5
            (parallel \"scoring\"
              (llm \"academic\"
                :model \"google/gemini-2.5-flash\"
                :instruction \"Score academic fit 0-100\"
-               :reads [\"current-program\" \"student-profile\"]
-               :writes [\"academic-score\"])
+               :reads [:current-program :student-profile]
+               :writes [:academic-score])
              (llm \"career\"
                :model \"google/gemini-2.5-flash\"
                :instruction \"Score career alignment 0-100\"
-               :reads [\"current-program\" \"student-profile\"]
-               :writes [\"career-score\"]))))))
+               :reads [:current-program :student-profile]
+               :writes [:career-score]))))))
 
    ;; Build and execute - idempotent, name is identity
    (def sheet-id (build-workflow! ctx my-workflow))
-   (sheet/execute ctx sheet-id {\"student-profile\" {...}})
+   (sheet/execute ctx sheet-id {:student-profile {...}})
 
    ;; Rebuild after changes - same sheet-id, nodes updated
    (build-workflow! ctx modified-workflow)
@@ -124,8 +124,8 @@
    Options:
      :model - OpenRouter model ID (e.g., \"google/gemini-2.5-flash\")
      :instruction - Prompt for the LLM
-     :reads - Vector of blackboard keys to read
-     :writes - Vector of blackboard keys to write
+     :reads - Vector of blackboard keys to read (e.g., [:student-profile :programs])
+     :writes - Vector of blackboard keys to write (e.g., [:result])
      :retry - {:max-attempts n :backoff-ms [100 500]}
      :judges - Vector of judge names (defined in sheet/judges)"
   [name & {:keys [model instruction reads writes retry judges]}]
@@ -144,8 +144,8 @@
 
    Options:
      :fn - Fully-qualified function symbol string
-     :reads - Vector of blackboard keys to read
-     :writes - Vector of blackboard keys to write
+     :reads - Vector of blackboard keys to read (e.g., [:input])
+     :writes - Vector of blackboard keys to write (e.g., [:output])
      :retry - {:max-attempts n :backoff-ms [100 500]}
      :judges - Vector of judge names (defined in sheet/judges)"
   [name & {:keys [fn reads writes retry judges]}]
@@ -162,7 +162,7 @@
   "Define a condition node.
 
    Options:
-     :check - {:key \"bb-key\" :op :equals/:gt/:lt/etc :value expected}
+     :check - {:key :bb-key :op :equals/:gt/:lt/etc :value expected}
      :on-fail - :failure (default) or :success"
   [name & {:keys [check on-fail]}]
   {:node-type :condition
@@ -176,7 +176,7 @@
    Options:
      :model - OpenRouter model ID (e.g., \"google/gemini-2.5-flash\")
      :instruction - Prompt describing what to evaluate (should be a yes/no question)
-     :reads - Vector of blackboard keys to read as context"
+     :reads - Vector of blackboard keys to read as context (e.g., [:student-profile])"
   [name & {:keys [model instruction reads]}]
   {:node-type :llm-condition
    :name name
@@ -197,7 +197,7 @@
      :model - OpenRouter model ID (e.g., \"google/gemini-2.5-flash\")
      :instruction - Research goal/question
      :reads - Vector of blackboard keys (metadata only shown to LLM, not values)
-     :writes - Vector of output keys (e.g., \"final-answer\", \"iterations\")
+     :writes - Vector of output keys (e.g., [:final-answer :iterations])
      :mcp-tools - Vector of MCP tool names available for research
      :max-iterations - Max research iterations (default 10)"
   [name & {:keys [model instruction reads writes mcp-tools max-iterations]}]
@@ -251,9 +251,9 @@
   "Define a map-each node (iterates over a list).
 
    Options:
-     :from - Blackboard key containing the source list
-     :as - Blackboard key for the current item
-     :into - Blackboard key for the results list
+     :from - Blackboard key containing the source list (e.g., :programs)
+     :as - Blackboard key for the current item (e.g., :current-program)
+     :into - Blackboard key for the results list (e.g., :scored-programs)
      :parallel - Max parallel executions (default 1 = sequential)"
   [name & args]
   (let [[opts children] (if (keyword? (first args))
@@ -468,7 +468,7 @@
   ;; Declare blackboard keys
   (doseq [[key-name schema] blackboard-schema]
     (h/run-and-apply! ctx
-      (h/make-declare-key-command sheet-id (name key-name) schema)))
+      (h/make-declare-key-command sheet-id key-name schema)))
 
   ;; Declare judges
   (doseq [[judge-name judge-config] judges-schema]
@@ -631,7 +631,7 @@
      :sheet {:name (:name sheet)
              :id sheet-id}
      :blackboard-schema (into {}
-                              (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
+                              (map (fn [bb] [(:key bb) (:schema bb)])
                                    blackboard))
      :nodes (build-node-tree nodes (:root-node-id sheet))}))
 
@@ -742,7 +742,7 @@
     ;; Declare blackboard keys
     (doseq [[key-name schema] blackboard-schema]
       (h/run-and-apply! ctx
-        (h/make-declare-key-command sheet-id (name key-name) schema)))
+        (h/make-declare-key-command sheet-id key-name schema)))
 
     ;; Build the node tree
     (when root-node

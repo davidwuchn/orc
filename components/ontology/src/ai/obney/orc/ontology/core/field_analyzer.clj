@@ -145,8 +145,8 @@
       :sample-values [\"Acme Corp\" \"Beta Inc\" \"Gamma LLC\"]
       :value-stats {:avg-length 9.3 :unique-count 3}}"
   [{:keys [inputs]}]
-  (let [schema (get inputs "schema")
-        sample-data (get inputs "sample-data")
+  (let [schema (get inputs :schema)
+        sample-data (get inputs :sample-data)
         ;; Convert sample-data keys from strings to keywords if needed
         normalized-data (when (seq sample-data)
                           (mapv (fn [record]
@@ -156,7 +156,7 @@
                                     record))
                                 sample-data))
         field-candidates (analyze-schema-fields schema normalized-data)]
-    {"field-candidates" (or field-candidates [])}))
+    {:field-candidates (or field-candidates [])}))
 
 (defn filter-embeddable-fields
   "Code node executor: Post-process LLM assessment.
@@ -172,8 +172,8 @@
      - confidence-scores: Map of field-name -> confidence
      - reasoning: Map of field-name -> reasoning string"
   [{:keys [inputs]}]
-  (let [assessment (get inputs "llm-assessment")
-        threshold (or (get inputs "confidence-threshold") 0.7)
+  (let [assessment (get inputs :llm-assessment)
+        threshold (or (get inputs :confidence-threshold) 0.7)
         fields (or (:fields assessment)
                    (get assessment "fields")
                    [])
@@ -198,13 +198,13 @@
                         (filter #(:should-embed %))
                         (filter #(>= (:confidence %) threshold))
                         (sort-by :confidence >))]
-    {"embeddable-fields" (mapv :field-name embeddable)
-     "confidence-scores" (into {}
-                               (map (juxt :field-name :confidence)
-                                    normalized-fields))
-     "reasoning" (into {}
-                       (map (juxt :field-name :reasoning)
-                            normalized-fields))}))
+    {:embeddable-fields (mapv :field-name embeddable)
+     :confidence-scores (into {}
+                              (map (juxt :field-name :confidence)
+                                   normalized-fields))
+     :reasoning (into {}
+                      (map (juxt :field-name :reasoning)
+                           normalized-fields))}))
 
 ;; =============================================================================
 ;; Utility Functions

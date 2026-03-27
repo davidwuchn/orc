@@ -22,57 +22,57 @@
 (defn fetch-tools-executor
   "Executor that fetches tools from an MCP connection."
   [{:keys [inputs context]}]
-  (let [mcp-opts (get inputs "mcp-opts")
+  (let [mcp-opts (get inputs :mcp-opts)
         mcp-conn (or (:mcp-session context)
                      (mcp-client/connect mcp-opts))
         tools (mcp-client/list-tools mcp-conn)]
-    {"raw-tools" tools
-     "mcp-session" mcp-conn}))
+    {:raw-tools tools
+     :mcp-session mcp-conn}))
 
 (defn analyze-capabilities-executor
   "Executor that analyzes tool capabilities."
   [{:keys [inputs]}]
-  (let [raw-tools (get inputs "raw-tools")
+  (let [raw-tools (get inputs :raw-tools)
         analyzed (analyzer/analyze-tools raw-tools)]
-    {"analyzed-tools" analyzed}))
+    {:analyzed-tools analyzed}))
 
 (defn detect-relationships-executor
   "Executor that detects tool relationships."
   [{:keys [inputs]}]
-  (let [analyzed-tools (get inputs "analyzed-tools")
+  (let [analyzed-tools (get inputs :analyzed-tools)
         relationships (relationships/detect-relationships analyzed-tools)]
-    {"tool-relationships" relationships}))
+    {:tool-relationships relationships}))
 
 (defn match-patterns-executor
   "Executor that matches applicable patterns."
   [{:keys [inputs]}]
-  (let [analyzed-tools (get inputs "analyzed-tools")
-        tool-relationships (get inputs "tool-relationships")
+  (let [analyzed-tools (get inputs :analyzed-tools)
+        tool-relationships (get inputs :tool-relationships)
         matched-patterns (patterns/select-patterns analyzed-tools tool-relationships)]
-    {"applicable-patterns" matched-patterns}))
+    {:applicable-patterns matched-patterns}))
 
 (defn generate-sheet-executor
   "Executor that generates the ORC sheet."
   [{:keys [inputs]}]
-  (let [analyzed-tools (get inputs "analyzed-tools")
-        tool-relationships (get inputs "tool-relationships")
-        selected-pattern (get inputs "selected-pattern")
+  (let [analyzed-tools (get inputs :analyzed-tools)
+        tool-relationships (get inputs :tool-relationships)
+        selected-pattern (get inputs :selected-pattern)
         analysis {:tools analyzed-tools
                   :relationships tool-relationships
                   :patterns [selected-pattern]}
         sheet (generator/generate-sheet analysis {:pattern (:pattern selected-pattern)})]
-    {"generated-dsl-code" (:code sheet)
-     "generated-workflow" (:workflow sheet)
-     "generated-blackboard" (:blackboard sheet)}))
+    {:generated-dsl-code (:code sheet)
+     :generated-workflow (:workflow sheet)
+     :generated-blackboard (:blackboard sheet)}))
 
 (defn validate-sheet-executor
   "Executor that validates the generated sheet."
   [{:keys [inputs]}]
-  (let [workflow (get inputs "generated-workflow")
-        blackboard (get inputs "generated-blackboard")
+  (let [workflow (get inputs :generated-workflow)
+        blackboard (get inputs :generated-blackboard)
         validation (validator/validate-sheet {:workflow workflow
                                               :blackboard blackboard})]
-    {"validation-result" validation}))
+    {:validation-result validation}))
 
 ;; ============================================================================
 ;; ORC Workflow Definition
@@ -107,26 +107,26 @@
        ;; Phase 1: Discover
        (sheet/code "fetch-tools"
          :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/fetch-tools-executor"
-         :reads ["mcp-opts"]
-         :writes ["raw-tools"])
+         :reads [:mcp-opts]
+         :writes [:raw-tools])
 
        ;; Phase 2: Analyze (parallel)
        (sheet/sequence "analyze"
          (sheet/code "analyze-capabilities"
            :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/analyze-capabilities-executor"
-           :reads ["raw-tools"]
-           :writes ["analyzed-tools"])
+           :reads [:raw-tools]
+           :writes [:analyzed-tools])
 
          (sheet/code "detect-relationships"
            :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/detect-relationships-executor"
-           :reads ["analyzed-tools"]
-           :writes ["tool-relationships"]))
+           :reads [:analyzed-tools]
+           :writes [:tool-relationships]))
 
        ;; Phase 3: Match patterns
        (sheet/code "match-patterns"
          :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/match-patterns-executor"
-         :reads ["analyzed-tools" "tool-relationships"]
-         :writes ["applicable-patterns"])
+         :reads [:analyzed-tools :tool-relationships]
+         :writes [:applicable-patterns])
 
        ;; Phase 4: Select best pattern (LLM-assisted)
        (sheet/llm "select-pattern"
@@ -140,20 +140,20 @@
                        - Which pattern would create the most useful workflow
 
                        Return the selected pattern with reasoning."
-         :reads ["analyzed-tools" "applicable-patterns"]
-         :writes ["selected-pattern"])
+         :reads [:analyzed-tools :applicable-patterns]
+         :writes [:selected-pattern])
 
        ;; Phase 5: Generate
        (sheet/code "generate-sheet"
          :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/generate-sheet-executor"
-         :reads ["analyzed-tools" "tool-relationships" "selected-pattern"]
-         :writes ["generated-dsl-code" "generated-workflow" "generated-blackboard"])
+         :reads [:analyzed-tools :tool-relationships :selected-pattern]
+         :writes [:generated-dsl-code :generated-workflow :generated-blackboard])
 
        ;; Phase 6: Validate
        (sheet/code "validate-sheet"
          :fn "ai.obney.orc.mcp-sheet-builder.workflows.builder/validate-sheet-executor"
-         :reads ["generated-workflow" "generated-blackboard"]
-         :writes ["validation-result"]))))
+         :reads [:generated-workflow :generated-blackboard]
+         :writes [:validation-result]))))
 
 ;; ============================================================================
 ;; Direct Execution (without ORC)

@@ -277,12 +277,9 @@
   [{:keys [inputs outputs instruction]}]
   (let [;; Try to extract a primary response from outputs
         ;; Common patterns: {:response "..."}, {:answer "..."}, {:output "..."}
-        response (or (get outputs "response")
-                     (get outputs :response)
-                     (get outputs "answer")
-                     (get outputs :answer)
-                     (get outputs "output")
-                     (get outputs :output)
+        response (or (:response outputs)
+                     (:answer outputs)
+                     (:output outputs)
                      ;; If no specific response field, use full outputs
                      outputs)]
     {:inputs inputs

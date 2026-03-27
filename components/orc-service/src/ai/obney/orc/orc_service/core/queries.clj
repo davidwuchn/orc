@@ -79,7 +79,7 @@
   "Convert a snapshot's blackboard-schema to a blackboard list."
   [snapshot]
   (mapv (fn [[k schema]]
-          {:key (name k)
+          {:key k
            :schema schema
            :value nil})  ;; Published snapshots don't store runtime values
         (:blackboard-schema snapshot)))
@@ -234,7 +234,7 @@
           :sheet {:name (:name sheet)
                   :id sheet-id}
           :blackboard-schema (into {}
-                                   (map (fn [bb] [(keyword (:key bb)) (:schema bb)])
+                                   (map (fn [bb] [(:key bb) (:schema bb)])
                                         blackboard))
           :nodes (build-node-tree nodes (:root-node-id sheet))}}))))
 

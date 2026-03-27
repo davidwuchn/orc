@@ -86,8 +86,8 @@
       ;; -----------------------------------------------------------------------
       (sheet/code "extract-metadata"
         :fn "ai.obney.orc.ontology.core.field-analyzer/extract-field-metadata"
-        :reads ["schema" "sample-data"]
-        :writes ["field-candidates"])
+        :reads [:schema :sample-data]
+        :writes [:field-candidates])
 
       ;; -----------------------------------------------------------------------
       ;; Step 2: LLM Assessment
@@ -125,8 +125,8 @@ Examples of poor embedding candidates:
 - Email addresses, phone numbers, URLs
 
 Return your assessment as a JSON object with a 'fields' array containing one assessment object per field."
-        :reads ["field-candidates"]
-        :writes ["llm-assessment"]
+        :reads [:field-candidates]
+        :writes [:llm-assessment]
         :retry {:max-attempts 2 :backoff-ms [200 1000]})
 
       ;; -----------------------------------------------------------------------
@@ -135,8 +135,8 @@ Return your assessment as a JSON object with a 'fields' array containing one ass
       ;; -----------------------------------------------------------------------
       (sheet/code "filter-results"
         :fn "ai.obney.orc.ontology.core.field-analyzer/filter-embeddable-fields"
-        :reads ["llm-assessment" "confidence-threshold"]
-        :writes ["embeddable-fields" "confidence-scores" "reasoning"]))))
+        :reads [:llm-assessment :confidence-threshold]
+        :writes [:embeddable-fields :confidence-scores :reasoning]))))
 
 ;; =============================================================================
 ;; Convenience Functions
@@ -168,13 +168,13 @@ Return your assessment as a JSON object with a 'fields' array containing one ass
                                        :or {confidence-threshold 0.7}}]
   (let [sid (or sheet-id (build-field-analyzer! ctx))
         result (sheet/execute ctx sid
-                              {"schema" schema
-                               "sample-data" sample-data
-                               "confidence-threshold" confidence-threshold})]
+                              {:schema schema
+                               :sample-data sample-data
+                               :confidence-threshold confidence-threshold})]
     (if (:success? result)
-      {:embeddable-fields (get-in result [:outputs "embeddable-fields"])
-       :confidence-scores (get-in result [:outputs "confidence-scores"])
-       :reasoning (get-in result [:outputs "reasoning"])
+      {:embeddable-fields (get-in result [:outputs :embeddable-fields])
+       :confidence-scores (get-in result [:outputs :confidence-scores])
+       :reasoning (get-in result [:outputs :reasoning])
        :trace-id (:trace-id result)
        :method :llm}
       {:error (:error result)

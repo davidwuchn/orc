@@ -80,7 +80,7 @@
    Used in the discovery workflow to provide the LLM with current concepts
    so it can identify patterns NOT already covered."
   [{:keys [_inputs]}]
-  {"existing-concepts"
+  {:existing-concepts
    (->> (static/get-concepts-by-scope :failure)
         (map #(select-keys % [:uri :label :description :indicators]))
         vec)})
@@ -91,9 +91,9 @@
    Takes failure-traces from the blackboard and formats them into
    a structured summary for the pattern analysis LLM."
   [{:keys [inputs]}]
-  (let [traces (get inputs "failure-traces")
+  (let [traces (get inputs :failure-traces)
         formatted (mapv format-evaluation-for-discovery traces)]
-    {"formatted-traces"
+    {:formatted-traces
      (mapv (fn [{:keys [trace-id node-name aggregate-score dimension-feedback]}]
              {:trace-id (str trace-id)
               :node node-name
@@ -162,13 +162,13 @@
       (sheet/code "load-ontology"
         :fn "ai.obney.orc.ontology.core.discovery/load-failure-concepts"
         :reads []
-        :writes ["existing-concepts"])
+        :writes [:existing-concepts])
 
       ;; Step 2: Format traces for analysis
       (sheet/code "format-traces"
         :fn "ai.obney.orc.ontology.core.discovery/format-traces-for-analysis"
-        :reads ["failure-traces"]
-        :writes ["formatted-traces"])
+        :reads [:failure-traces]
+        :writes [:formatted-traces])
 
       ;; Step 3: Analyze patterns with LLM
       (sheet/llm "analyze-patterns"
@@ -194,8 +194,8 @@ For each NEW pattern you identify (must appear in 3+ traces):
 If no new patterns are found with 3+ occurrences, return an empty array.
 
 Focus on actionable, specific subtypes - not vague generalizations."
-        :reads ["formatted-traces" "existing-concepts"]
-        :writes ["discovered-subtypes"]))))
+        :reads [:formatted-traces :existing-concepts]
+        :writes [:discovered-subtypes]))))
 
 (defn build-discovery-workflow!
   "Build the pattern discovery workflow. Returns sheet-id.
@@ -244,9 +244,9 @@ Focus on actionable, specific subtypes - not vague generalizations."
 
             ;; Execute discovery workflow
             result (sheet/execute ctx discovery-sheet-id
-                                  {"failure-traces" low-scoring})
+                                  {:failure-traces low-scoring})
 
-            subtypes (get-in result [:outputs "discovered-subtypes"] [])]
+            subtypes (get-in result [:outputs :discovered-subtypes] [])]
 
         {:discovered (count subtypes)
          :analyzed-traces trace-count

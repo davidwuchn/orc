@@ -119,12 +119,12 @@
                                     (:source-code exec-def)
                                     (:namespace-requires exec-def))
           executor (runtime/get-executor "testTool")
-          result (executor {:inputs {"query" "test query"}
+          result (executor {:inputs {:query "test query"}
                             :context {}})]
       ;; Without MCP session, should return mock response
       (is (map? result))
-      (is (contains? result "testTool-result"))
-      (is (get-in result ["testTool-result" :mock])))))
+      (is (contains? result :testTool-result))
+      (is (get-in result [:testTool-result :mock])))))
 
 ;; ============================================================================
 ;; Registry Management Tests

@@ -14,19 +14,19 @@
 (defn identity-fn
   "Returns the input as output."
   [{:keys [inputs]}]
-  {"output" (get inputs "input")})
+  {:output (get inputs :input)})
 
 (defn transform-fn
   "Transforms input by uppercasing."
   [{:keys [inputs]}]
-  {"output" (clojure.string/upper-case (get inputs "input"))})
+  {:output (clojure.string/upper-case (get inputs :input))})
 
 (defn multi-output-fn
   "Returns multiple outputs."
   [{:keys [inputs]}]
-  (let [x (get inputs "x")]
-    {"doubled" (* x 2)
-     "squared" (* x x)}))
+  (let [x (get inputs :x)]
+    {:doubled (* x 2)
+     :squared (* x x)}))
 
 ;; =============================================================================
 ;; Helper: build sheet and dispatch async execution
@@ -38,8 +38,8 @@
   [ctx & {:keys [name fn-sym reads writes]
           :or {name "Async Test Sheet"
                fn-sym "ai.obney.orc.orc-service.async-execution-test/identity-fn"
-               reads ["input"]
-               writes ["output"]}}]
+               reads [:input]
+               writes [:output]}}]
   (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name name))
         sheet-id (-> sheet-result :command-result/events first :sheet-id)]
     ;; Declare blackboard keys
@@ -87,11 +87,11 @@
   (testing "async execution through todo processors returns correct output"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (setup-simple-sheet! ctx)
-            {:keys [promise]} (dispatch-async-execute! ctx sheet-id {"input" "hello"})
+            {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:input "hello"})
             result (wait-for-completion promise)]
         (is (not= :timeout result) "Execution should complete within timeout")
         (is (= :success (:status result)))
-        (is (= "hello" (get (:outputs result) "output")))))))
+        (is (= "hello" (get (:outputs result) :output)))))))
 
 (deftest async-transform-execution-test
   (testing "async execution with transform function"
@@ -99,50 +99,50 @@
       (let [{:keys [sheet-id]} (setup-simple-sheet!
                                  ctx
                                  :fn-sym "ai.obney.orc.orc-service.async-execution-test/transform-fn")
-            {:keys [promise]} (dispatch-async-execute! ctx sheet-id {"input" "hello"})
+            {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:input "hello"})
             result (wait-for-completion promise)]
         (is (= :success (:status result)))
-        (is (= "HELLO" (get (:outputs result) "output")))))))
+        (is (= "HELLO" (get (:outputs result) :output)))))))
 
 (deftest async-execution-isolation-test
   (testing "async execution doesn't mutate sheet's stored blackboard"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (setup-simple-sheet! ctx)]
         ;; Set initial value on sheet's persistent blackboard
-        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id "input" "original"))
+        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id :input "original"))
 
         ;; Execute with different input
-        (let [{:keys [promise]} (dispatch-async-execute! ctx sheet-id {"input" "overridden"})
+        (let [{:keys [promise]} (dispatch-async-execute! ctx sheet-id {:input "overridden"})
               result (wait-for-completion promise)]
           (is (= :success (:status result)))
-          (is (= "overridden" (get (:outputs result) "output"))))
+          (is (= "overridden" (get (:outputs result) :output))))
 
         ;; Verify original blackboard unchanged
         (let [bb (rm/get-blackboard-by-key ctx sheet-id)]
-          (is (= "original" (get-in bb ["input" :value]))))))))
+          (is (= "original" (get-in bb [:input :value]))))))))
 
 (deftest async-concurrent-executions-isolation-test
   (testing "two concurrent async executions of the same sheet are isolated"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (setup-simple-sheet! ctx)
             ;; Dispatch two executions with different inputs
-            exec1 (dispatch-async-execute! ctx sheet-id {"input" "first"})
-            exec2 (dispatch-async-execute! ctx sheet-id {"input" "second"})
+            exec1 (dispatch-async-execute! ctx sheet-id {:input "first"})
+            exec2 (dispatch-async-execute! ctx sheet-id {:input "second"})
             result1 (wait-for-completion (:promise exec1))
             result2 (wait-for-completion (:promise exec2))]
         (is (= :success (:status result1)))
         (is (= :success (:status result2)))
-        (is (= "first" (get (:outputs result1) "output")))
-        (is (= "second" (get (:outputs result2) "output")))))))
+        (is (= "first" (get (:outputs result1) :output)))
+        (is (= "second" (get (:outputs result2) :output)))))))
 
 (deftest async-tick-scoped-blackboard-test
   (testing "execution-value-written events are scoped to tick"
     (h/with-async-test-context [ctx]
       (let [{:keys [sheet-id]} (setup-simple-sheet! ctx)
-            {:keys [tick-id promise]} (dispatch-async-execute! ctx sheet-id {"input" "test"})
+            {:keys [tick-id promise]} (dispatch-async-execute! ctx sheet-id {:input "test"})
             result (wait-for-completion promise)]
         (is (= :success (:status result)))
         ;; Verify tick-scoped blackboard has the values
         (let [tick-bb (rm/get-tick-blackboard ctx tick-id)]
           (is (some? tick-bb) "Tick should have a scoped blackboard")
-          (is (= "test" (get-in tick-bb ["input" :value]))))))))
+          (is (= "test" (get-in tick-bb [:input :value]))))))))

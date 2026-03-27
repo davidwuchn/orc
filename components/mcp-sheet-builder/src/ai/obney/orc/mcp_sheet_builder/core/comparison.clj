@@ -83,7 +83,7 @@
    {:status :success/:failure
     :outputs {...}
     :duration-ms int
-    :tokens {:prompt_tokens N :completion_tokens N :total_tokens N}
+    :tokens {:prompt-tokens N :completion-tokens N :total-tokens N}
     :accuracy float (0.0-1.0)
     :error string?
     :trace-id uuid}"
@@ -96,7 +96,7 @@
     {:status (:status result)
      :outputs (:outputs result)
      :duration-ms duration-ms
-     :tokens (or (:usage result) {:prompt_tokens 0 :completion_tokens 0 :total_tokens 0})
+     :tokens (or (:usage result) {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})
      :accuracy (or accuracy 0.0)
      :error (:error result)
      :trace-id (:trace-id result)}))
@@ -136,8 +136,8 @@
                           (< (:accuracy phase1-result) (:accuracy phase2-result)) :phase2
                           :else :tie)
 
-        tokens1 (get-in phase1-result [:tokens :total_tokens] 0)
-        tokens2 (get-in phase2-result [:tokens :total_tokens] 0)
+        tokens1 (get-in phase1-result [:tokens :total-tokens] 0)
+        tokens2 (get-in phase2-result [:tokens :total-tokens] 0)
         tokens-winner (cond
                         (< tokens1 tokens2) :phase1
                         (> tokens1 tokens2) :phase2
@@ -191,13 +191,13 @@
 
         phase1-summary {:avg-accuracy (avg phase1-results :accuracy)
                         :avg-latency (avg phase1-results :duration-ms)
-                        :avg-tokens (avg (map #(get-in % [:tokens :total_tokens] 0) phase1-results) identity)
+                        :avg-tokens (avg (map #(get-in % [:tokens :total-tokens] 0) phase1-results) identity)
                         :success-rate (/ (count (filter #(= :success (:status %)) phase1-results))
                                          (max 1 (count phase1-results)))}
 
         phase2-summary {:avg-accuracy (avg phase2-results :accuracy)
                         :avg-latency (avg phase2-results :duration-ms)
-                        :avg-tokens (avg (map #(get-in % [:tokens :total_tokens] 0) phase2-results) identity)
+                        :avg-tokens (avg (map #(get-in % [:tokens :total-tokens] 0) phase2-results) identity)
                         :success-rate (/ (count (filter #(= :success (:status %)) phase2-results))
                                          (max 1 (count phase2-results)))}
 
@@ -225,13 +225,13 @@
          "\nPhase 1 (Simple LLM+Code):\n"
          "  Status: " (:status phase1) "\n"
          "  Duration: " (:duration-ms phase1) "ms\n"
-         "  Tokens: " (get-in phase1 [:tokens :total_tokens] 0) "\n"
+         "  Tokens: " (get-in phase1 [:tokens :total-tokens] 0) "\n"
          "  Accuracy: " (format "%.2f" (float (:accuracy phase1))) "\n"
          (when (:error phase1) (str "  Error: " (:error phase1) "\n"))
          "\nPhase 2 (REPL Researcher):\n"
          "  Status: " (:status phase2) "\n"
          "  Duration: " (:duration-ms phase2) "ms\n"
-         "  Tokens: " (get-in phase2 [:tokens :total_tokens] 0) "\n"
+         "  Tokens: " (get-in phase2 [:tokens :total-tokens] 0) "\n"
          "  Accuracy: " (format "%.2f" (float (:accuracy phase2))) "\n"
          (when (:error phase2) (str "  Error: " (:error phase2) "\n"))
          "\nWinners:\n"
@@ -264,8 +264,8 @@
     (run-comparison ctx
       phase1-sheet-id
       phase2-sheet-id
-      {"question" "How do I trace LLM calls in Langfuse?"}
-      {"answer" #"trace|Langfuse"}))
+      {:question "How do I trace LLM calls in Langfuse?"}
+      {:answer #"trace|Langfuse"}))
 
   (println (format-comparison-report result))
 
@@ -274,11 +274,11 @@
     (batch-comparison ctx
       phase1-sheet-id
       phase2-sheet-id
-      [{:inputs {"question" "How do I trace LLM calls?"}
-        :expected {"answer" #"trace"}}
-       {:inputs {"question" "What is the Python SDK?"}
-        :expected {"answer" #"Python|SDK"}}
-       {:inputs {"question" "How do sessions work?"}
-        :expected {"answer" #"session"}}]))
+      [{:inputs {:question "How do I trace LLM calls?"}
+        :expected {:answer #"trace"}}
+       {:inputs {:question "What is the Python SDK?"}
+        :expected {:answer #"Python|SDK"}}
+       {:inputs {:question "How do sessions work?"}
+        :expected {:answer #"session"}}]))
 
   (println (format-batch-summary batch-result)))

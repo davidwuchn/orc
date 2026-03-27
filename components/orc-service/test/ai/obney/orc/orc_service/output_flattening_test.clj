@@ -59,7 +59,7 @@
 (deftest flatten-output-schema-nested-map-test
   (testing "flattens [:map ...] schema into separate fields"
     (let [schema [:map [:score :double] [:reasoning :string] [:keyFactors [:vector :string]]]
-          result (flatten-output-schema "academic-score" schema)]
+          result (flatten-output-schema :academic-score schema)]
 
       ;; Should produce 3 separate fields
       (is (= 3 (count result)))
@@ -71,38 +71,38 @@
 
         ;; Score field
         (is (= :score (:name score-field)))
-        (is (= "academic-score" (:original-key score-field)))
+        (is (= :academic-score (:original-key score-field)))
         (is (= "score" (:nested-key score-field)))
         (is (= :double (:spec score-field)))
 
         ;; Reasoning field
         (is (= :reasoning (:name reasoning-field)))
-        (is (= "academic-score" (:original-key reasoning-field)))
+        (is (= :academic-score (:original-key reasoning-field)))
         (is (= "reasoning" (:nested-key reasoning-field)))
         (is (= :string (:spec reasoning-field)))
 
         ;; KeyFactors field
         (is (= :keyFactors (:name factors-field)))
-        (is (= "academic-score" (:original-key factors-field)))
+        (is (= :academic-score (:original-key factors-field)))
         (is (= "keyFactors" (:nested-key factors-field)))
         (is (= [:vector :string] (:spec factors-field)))))))
 
 (deftest flatten-output-schema-simple-test
   (testing "passes through simple schemas unchanged"
-    (let [result (flatten-output-schema "answer" :string)]
+    (let [result (flatten-output-schema :answer :string)]
       (is (= 1 (count result)))
       (is (= :answer (:name (first result))))
-      (is (= "answer" (:original-key (first result))))
+      (is (= :answer (:original-key (first result))))
       (is (nil? (:nested-key (first result))))
       (is (= :string (:spec (first result)))))))
 
 (deftest flatten-output-schema-map-of-test
   (testing "[:map-of ...] schema is NOT flattened (no defined field names)"
-    (let [result (flatten-output-schema "personalization" [:map-of :keyword :any])]
+    (let [result (flatten-output-schema :personalization [:map-of :keyword :any])]
       ;; Should return single field, not flattened
       (is (= 1 (count result)))
       (is (= :personalization (:name (first result))))
-      (is (= "personalization" (:original-key (first result))))
+      (is (= :personalization (:original-key (first result))))
       (is (nil? (:nested-key (first result))))
       (is (= [:map-of :keyword :any] (:spec (first result))))
       ;; Should have JSON guidance in description
@@ -113,7 +113,7 @@
     (let [schema [:map
                   [:required-field :string]
                   [:optional-field {:optional true} :int]]
-          result (flatten-output-schema "data" schema)]
+          result (flatten-output-schema :data schema)]
       (is (= 2 (count result)))
       ;; Both fields should be present
       (is (some #(= :required-field (:name %)) result))
@@ -128,17 +128,17 @@
     (let [raw-outputs {:score 0.85
                        :reasoning "Strong academic match"
                        :keyFactors ["GPA" "Test scores"]}
-          output-mapping {:score {:original-key "academic-score" :nested-key "score"}
-                          :reasoning {:original-key "academic-score" :nested-key "reasoning"}
-                          :keyFactors {:original-key "academic-score" :nested-key "keyFactors"}}
+          output-mapping {:score {:original-key :academic-score :nested-key "score"}
+                          :reasoning {:original-key :academic-score :nested-key "reasoning"}
+                          :keyFactors {:original-key :academic-score :nested-key "keyFactors"}}
           result (reassemble-flattened-outputs raw-outputs output-mapping)]
 
       ;; Should produce single key with nested map
       (is (= 1 (count result)))
-      (is (contains? result "academic-score"))
+      (is (contains? result :academic-score))
 
       ;; Check nested values
-      (let [nested (get result "academic-score")]
+      (let [nested (get result :academic-score)]
         (is (= 0.85 (:score nested)))
         (is (= "Strong academic match" (:reasoning nested)))
         (is (= ["GPA" "Test scores"] (:keyFactors nested)))))))
@@ -147,31 +147,31 @@
   (testing "reassembles multiple separate output keys"
     (let [raw-outputs {:score 0.8
                        :answer "The answer is 42"}
-          output-mapping {:score {:original-key "rating" :nested-key nil}
-                          :answer {:original-key "response" :nested-key nil}}
+          output-mapping {:score {:original-key :rating :nested-key nil}
+                          :answer {:original-key :response :nested-key nil}}
           result (reassemble-flattened-outputs raw-outputs output-mapping)]
 
       ;; Should produce two separate keys (not nested)
       (is (= 2 (count result)))
-      (is (= 0.8 (get result "rating")))
-      (is (= "The answer is 42" (get result "response"))))))
+      (is (= 0.8 (get result :rating)))
+      (is (= "The answer is 42" (get result :response))))))
 
 (deftest reassemble-flattened-outputs-mixed-test
   (testing "handles mix of nested and non-nested outputs"
     (let [raw-outputs {:score 0.9
                        :reasoning "Good fit"
                        :summary "Brief summary"}
-          output-mapping {:score {:original-key "evaluation" :nested-key "score"}
-                          :reasoning {:original-key "evaluation" :nested-key "reasoning"}
-                          :summary {:original-key "summary" :nested-key nil}}
+          output-mapping {:score {:original-key :evaluation :nested-key "score"}
+                          :reasoning {:original-key :evaluation :nested-key "reasoning"}
+                          :summary {:original-key :summary :nested-key nil}}
           result (reassemble-flattened-outputs raw-outputs output-mapping)]
 
       ;; Should have nested evaluation and flat summary
       (is (= 2 (count result)))
-      (is (map? (get result "evaluation")))
-      (is (= 0.9 (get-in result ["evaluation" :score])))
-      (is (= "Good fit" (get-in result ["evaluation" :reasoning])))
-      (is (= "Brief summary" (get result "summary"))))))
+      (is (map? (get result :evaluation)))
+      (is (= 0.9 (get-in result [:evaluation :score])))
+      (is (= "Good fit" (get-in result [:evaluation :reasoning])))
+      (is (= "Brief summary" (get result :summary))))))
 
 ;; =============================================================================
 ;; build-module Integration Tests
@@ -181,13 +181,13 @@
   (testing "build-module correctly flattens nested map outputs"
     (let [node {:name "score-node"
                 :instruction "Score this item"
-                :reads ["input-data"]
-                :writes ["score-result"]}
-          blackboard {"input-data" {:key "input-data"
+                :reads [:input-data]
+                :writes [:score-result]}
+          blackboard {:input-data {:key :input-data
                                     :schema :string
                                     :value "test input"
                                     :version 1}
-                      "score-result" {:key "score-result"
+                      :score-result {:key :score-result
                                       :schema [:map
                                                [:score :double]
                                                [:reasoning :string]]
@@ -202,20 +202,20 @@
 
       ;; Check output-mapping exists
       (is (contains? module :output-mapping))
-      (is (= "score-result" (get-in module [:output-mapping :score :original-key])))
+      (is (= :score-result (get-in module [:output-mapping :score :original-key])))
       (is (= "score" (get-in module [:output-mapping :score :nested-key]))))))
 
 (deftest build-module-simple-output-test
   (testing "build-module handles simple (non-nested) outputs"
     (let [node {:name "simple-node"
                 :instruction "Answer the question"
-                :reads ["question"]
-                :writes ["answer"]}
-          blackboard {"question" {:key "question"
+                :reads [:question]
+                :writes [:answer]}
+          blackboard {:question {:key :question
                                   :schema :string
                                   :value "What is 2+2?"
                                   :version 1}
-                      "answer" {:key "answer"
+                      :answer {:key :answer
                                 :schema :string
                                 :value nil
                                 :version 0}}
@@ -234,13 +234,13 @@
   (testing "build-module warns when using [:map-of ...] schema"
     (let [node {:name "loose-schema-node"
                 :instruction "Generate data"
-                :reads ["input"]
-                :writes ["output"]}
-          blackboard {"input" {:key "input"
+                :reads [:input]
+                :writes [:output]}
+          blackboard {:input {:key :input
                                :schema :string
                                :value "test"
                                :version 1}
-                      "output" {:key "output"
+                      :output {:key :output
                                 :schema [:map-of :keyword :any]
                                 :value nil
                                 :version 0}}
@@ -259,7 +259,7 @@
 
 (deftest empty-map-schema-test
   (testing "handles empty [:map] schema"
-    (let [result (flatten-output-schema "empty" [:map])]
+    (let [result (flatten-output-schema :empty [:map])]
       ;; Empty map should produce empty flattened fields
       (is (= 0 (count result))))))
 
@@ -268,7 +268,7 @@
     (let [schema [:map
                   [:outer :string]
                   [:nested [:map [:inner :int]]]]
-          result (flatten-output-schema "data" schema)]
+          result (flatten-output-schema :data schema)]
       ;; Should flatten to 2 fields: :outer and :nested
       ;; The nested [:map] becomes the spec for :nested, not further flattened
       (is (= 2 (count result)))

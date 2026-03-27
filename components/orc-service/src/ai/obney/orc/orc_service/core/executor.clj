@@ -65,6 +65,18 @@
   (dscloj/predict provider module inputs options))
 
 ;; =============================================================================
+;; Usage Normalization
+;; =============================================================================
+
+(defn- normalize-usage
+  "Normalize DSCloj/litellm usage map from snake_case to kebab-case."
+  [usage]
+  (when usage
+    {:prompt-tokens (:prompt_tokens usage 0)
+     :completion-tokens (:completion_tokens usage 0)
+     :total-tokens (:total_tokens usage 0)}))
+
+;; =============================================================================
 ;; Schema Description Generation
 ;; =============================================================================
 
@@ -217,7 +229,7 @@
     (if (map-of-schema? schema)
       (let [custom-desc (extract-schema-description schema)
             type-desc (malli-schema->description schema)]
-        [{:name (keyword (sanitize-field-name key-name))
+        [{:name key-name
           :original-key key-name
           :nested-key nil
           :spec schema
@@ -227,7 +239,7 @@
       ;; Regular non-map schema
       (let [custom-desc (extract-schema-description schema)
             type-desc (malli-schema->description schema)]
-        [{:name (keyword (sanitize-field-name key-name))
+        [{:name key-name
           :original-key key-name
           :nested-key nil
           :spec schema
@@ -260,7 +272,7 @@
            ;; Non-nested field - use directly
            (assoc acc original-key output-value)))
        ;; No mapping found, use as-is
-       (assoc acc (name output-key) output-value)))
+       (assoc acc output-key output-value)))
    {}
    raw-outputs))
 
@@ -273,7 +285,6 @@
    This aligns with Python DSPy's InputField(desc=\"...\") pattern."
   [key-name blackboard-entry]
   (let [schema (:schema blackboard-entry)
-        safe-name (sanitize-field-name key-name)
         ;; Extract custom description from Malli schema properties
         custom-desc (extract-schema-description schema)
         type-desc (when schema (malli-schema->description schema))
@@ -294,7 +305,7 @@
                       ;; Fallback when no schema
                       :else
                       (str "Blackboard key: " key-name))]
-    {:name (keyword safe-name)
+    {:name key-name
      :original-key key-name  ;; Keep original for mapping back
      :spec (or schema :any)  ;; Use the Malli schema directly
      :description description}))
@@ -321,7 +332,7 @@
   (let [inputs (mapv (fn [key-name]
                        (if-let [entry (get blackboard key-name)]
                          (build-field key-name entry)
-                         {:name (keyword (sanitize-field-name key-name))
+                         {:name key-name
                           :original-key key-name
                           :spec :string
                           :description (str "Input: " key-name)}))
@@ -332,7 +343,7 @@
                      (mapcat (fn [key-name]
                                (if-let [entry (get blackboard key-name)]
                                  (flatten-output-schema key-name (:schema entry))
-                                 [{:name (keyword (sanitize-field-name key-name))
+                                 [{:name key-name
                                    :original-key key-name
                                    :nested-key nil
                                    :spec :string
@@ -381,7 +392,7 @@
             (if-let [entry (get blackboard key-name)]
               (let [value (:value entry)
                     serialized (serialize-for-llm value)]
-                (assoc acc (keyword (sanitize-field-name key-name)) serialized))
+                (assoc acc key-name serialized))
               acc))
           {}
           (:reads node)))
@@ -506,7 +517,7 @@
       :outputs {string-key value} - outputs to write to blackboard
       :error string?             - error message if failed
       :duration-ms int           - execution time
-      :usage {:prompt_tokens N :completion_tokens N :total_tokens N} - token usage (when available)
+      :usage {:prompt-tokens N :completion-tokens N :total-tokens N} - token usage (when available)
       :model string?}            - model used (when available)
 
    OUTPUT FLATTENING:
@@ -549,7 +560,7 @@
                          ;; Reassemble flattened outputs back into nested structure
                          outputs (reassemble-flattened-outputs raw-outputs output-mapping)]
                      (println "[DEBUG executor] Reassembled outputs:" (pr-str outputs))
-                     {:outputs outputs :usage (:usage result) :model (:model result)}))]
+                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (:model result)}))]
     (try
       (loop [attempt 0]
         (let [{:keys [outputs usage model]} (try-once)]
@@ -614,7 +625,7 @@
       :result boolean?          - the LLM's yes/no answer
       :error string?            - error message if failed
       :duration-ms int          - execution time
-      :usage {:prompt_tokens N :completion_tokens N :total_tokens N} - token usage (when available)
+      :usage {:prompt-tokens N :completion-tokens N :total-tokens N} - token usage (when available)
       :model string?}           - model used (when available)"
   [node blackboard provider & {:keys [options] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
@@ -622,7 +633,7 @@
         inputs (mapv (fn [key-name]
                        (if-let [entry (get blackboard key-name)]
                          (build-field key-name entry)
-                         {:name (keyword (sanitize-field-name key-name))
+                         {:name key-name
                           :original-key key-name
                           :spec :string
                           :description (str "Input: " key-name)}))
@@ -638,7 +649,7 @@
                            (for [key-name (:reads node)
                                  :let [entry (get blackboard key-name)]
                                  :when entry]
-                             [(keyword (sanitize-field-name key-name)) (:value entry)]))
+                             [key-name (:value entry)]))
         ;; Build effective provider config with model override if specified
         effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking
@@ -652,7 +663,7 @@
         {:status :success
          :result (boolean bool-result)
          :duration-ms duration-ms
-         :usage (:usage response)
+         :usage (normalize-usage (:usage response))
          :model (:model response)})
       (catch Exception e
         {:status :failure
@@ -759,7 +770,7 @@
       :final-answer string?
       :error string?
       :duration-ms int
-      :usage {:prompt_tokens N :completion_tokens N :total_tokens N}}"
+      :usage {:prompt-tokens N :completion-tokens N :total-tokens N}}"
   [node blackboard provider context & {:keys [options] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
         max-iterations (or (:max-iterations node) 10)
@@ -778,7 +789,7 @@
         effective-provider (get-provider-with-model provider (:model node))
 
         ;; Track usage across iterations
-        total-usage (atom {:prompt_tokens 0 :completion_tokens 0 :total_tokens 0})]
+        total-usage (atom {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})]
 
     (try
       (loop [iteration 0
@@ -807,9 +818,9 @@
                 _ (when-let [usage (:usage llm-result)]
                     (swap! total-usage
                            (fn [u]
-                             {:prompt_tokens (+ (:prompt_tokens u 0) (:prompt_tokens usage 0))
-                              :completion_tokens (+ (:completion_tokens u 0) (:completion_tokens usage 0))
-                              :total_tokens (+ (:total_tokens u 0) (:total_tokens usage 0))})))]
+                             {:prompt-tokens (+ (:prompt-tokens u 0) (:prompt_tokens usage 0))
+                              :completion-tokens (+ (:completion-tokens u 0) (:completion_tokens usage 0))
+                              :total-tokens (+ (:total-tokens u 0) (:total_tokens usage 0))})))]
 
             (cond
               ;; No code generated
@@ -981,18 +992,18 @@
   ;; 2. Define a node and blackboard
   (def example-node
     {:instruction "Given the question, provide a clear and concise answer."
-     :reads ["question"]
-     :writes ["answer"]})
+     :reads [:question]
+     :writes [:answer]})
 
   (def example-blackboard
-    {"question" {:key "question" :schema :string :value "What is 2+2?" :version 1}
-     "answer" {:key "answer" :schema :string :value nil :version 0}})
+    {:question {:key :question :schema :string :value "What is 2+2?" :version 1}
+     :answer {:key :answer :schema :string :value nil :version 0}})
 
   ;; 3. Execute
   (execute-leaf example-node example-blackboard :openrouter)
-  ;; => {:status :success, :outputs {"answer" "4"}, :duration-ms 1234}
+  ;; => {:status :success, :outputs {:answer "4"}, :duration-ms 1234}
 
   ;; 4. Or use mock for testing
   (execute-leaf-mock example-node example-blackboard)
-  ;; => {:status :success, :outputs {"answer" "mock-value-for-answer"}, :duration-ms 0}
+  ;; => {:status :success, :outputs {:answer "mock-value-for-answer"}, :duration-ms 0}
   )

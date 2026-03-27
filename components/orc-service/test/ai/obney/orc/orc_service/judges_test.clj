@@ -45,8 +45,8 @@
                      (sheet/sequence "main"
                        (sheet/code "process"
                          :fn "some.ns/fn"
-                         :reads ["input"]
-                         :writes ["output"])))]
+                         :reads [:input]
+                         :writes [:output])))]
       (is (some? (:judges-schema workflow)))
       (is (= :completeness (get-in workflow [:judges-schema :my-judge :type]))))))
 
@@ -59,8 +59,8 @@
                      (sheet/llm "analyze"
                        :model "test/model"
                        :instruction "Analyze"
-                       :reads ["input"]
-                       :writes ["output"]
+                       :reads [:input]
+                       :writes [:output]
                        :judges ["test-judge"]))
           ;; The llm node is the root node when it's the only node
           llm-node (:root-node workflow)]
@@ -200,8 +200,8 @@
                           :judge-b {:type :completeness :criteria "Criteria B" :weight 0.5}})
                        (sheet/code "process"
                          :fn "some.ns/fn"
-                         :reads ["input"]
-                         :writes ["output"]))
+                         :reads [:input]
+                         :writes [:output]))
             sheet-id (sheet/build-workflow! ctx workflow)
             judges (rm/get-judges ctx sheet-id)]
         (is (= 2 (count judges)))
@@ -219,8 +219,8 @@
                        (sheet/sequence "main"
                          (sheet/code "analyze"
                            :fn "some.ns/analyze-fn"
-                           :reads ["input"]
-                           :writes ["output"]
+                           :reads [:input]
+                           :writes [:output]
                            :judges ["my-judge"])))
             sheet-id (sheet/build-workflow! ctx workflow)
             nodes (rm/get-nodes-for-sheet ctx sheet-id)

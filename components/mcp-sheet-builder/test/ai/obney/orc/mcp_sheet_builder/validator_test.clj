@@ -14,8 +14,8 @@
                               (sheet/sequence "main"
                                 (sheet/code "call-search"
                                   :fn "search-fn"
-                                  :reads ["query"]
-                                  :writes ["search-result"])))
+                                  :reads [:query]
+                                  :writes [:search-result])))
                  :blackboard {:query :string
                               :search-result :any}}
           result (v/validate-sheet sheet)]
@@ -40,8 +40,8 @@
                               (sheet/sequence "main"
                                 (sheet/code "call-search"
                                   :fn "search-fn"
-                                  :reads ["query"]
-                                  :writes ["result"])))
+                                  :reads [:query]
+                                  :writes [:result])))
                  :blackboard {:result :any}}  ;; Missing :query
           result (v/validate-sheet sheet)]
       (is (not (:valid? result)))
@@ -53,8 +53,8 @@
                               (sheet/sequence "main"
                                 (sheet/code "call-search"
                                   :fn "search-fn"
-                                  :reads ["query"]
-                                  :writes ["result"])))
+                                  :reads [:query]
+                                  :writes [:result])))
                  :blackboard {:query :string}}  ;; Missing :result
           result (v/validate-sheet sheet)]
       (is (not (:valid? result)))
@@ -70,8 +70,8 @@
                               (sheet/sequence "main"
                                 (sheet/llm "analyze"
                                   :instruction "Analyze the input"
-                                  :reads ["input"]
-                                  :writes ["output"])))
+                                  :reads [:input]
+                                  :writes [:output])))
                  :blackboard {:input :string
                               :output :string}}
           result (v/validate-sheet sheet)]
@@ -88,12 +88,12 @@
                                 (sheet/sequence "inner"
                                   (sheet/code "step1"
                                     :fn "fn1"
-                                    :reads ["a"]
-                                    :writes ["b"])
+                                    :reads [:a]
+                                    :writes [:b])
                                   (sheet/code "step2"
                                     :fn "fn2"
-                                    :reads ["b"]
-                                    :writes ["c"]))))
+                                    :reads [:b]
+                                    :writes [:c]))))
                  :blackboard {:a :string
                               :b :string
                               :c :string}}
@@ -106,12 +106,12 @@
                               (sheet/parallel "fan-out"
                                 (sheet/code "branch1"
                                   :fn "fn1"
-                                  :reads ["input"]
-                                  :writes ["out1"])
+                                  :reads [:input]
+                                  :writes [:out1])
                                 (sheet/code "branch2"
                                   :fn "fn2"
-                                  :reads ["input"]
-                                  :writes ["out2"])))
+                                  :reads [:input]
+                                  :writes [:out2])))
                  :blackboard {:input :string
                               :out1 :any
                               :out2 :any}}
@@ -134,7 +134,7 @@
   (testing "explain provides error count for invalid sheet"
     (let [sheet {:workflow '(sheet/sequence "main"
                               (sheet/code "step"
-                                :reads ["missing-key"]
+                                :reads [:missing-key]
                                 :writes []))
                  :blackboard {}}
           result (v/validate-and-explain sheet)]

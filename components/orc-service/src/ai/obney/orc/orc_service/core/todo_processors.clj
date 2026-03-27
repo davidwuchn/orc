@@ -86,7 +86,7 @@
   "Extract map-each execution context from inputs.
    Returns a map with only the context keys needed for correlation."
   [inputs]
-  (select-keys inputs ["__map-each-index" "__map-each-parent"]))
+  (select-keys inputs [::map-each-index ::map-each-parent]))
 
 (defn execute-leaf-node
   "Execute a leaf node when node-execution-started is emitted.
@@ -108,7 +108,7 @@
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             ;; Merge event inputs into blackboard (e.g., map-each item values)
             blackboard (reduce (fn [bb [k v]]
-                                 (if (and (string? k) (not (.startsWith k "__")))
+                                 (if (and (keyword? k) (not (= (namespace k) (namespace ::_))))
                                    (assoc-in bb [k :value] v)
                                    bb))
                                raw-blackboard
@@ -179,7 +179,7 @@
     (when (= :repl-researcher (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             blackboard (reduce (fn [bb [k v]]
-                                 (if (and (string? k) (not (.startsWith k "__")))
+                                 (if (and (keyword? k) (not (= (namespace k) (namespace ::_))))
                                    (assoc-in bb [k :value] v)
                                    bb))
                                raw-blackboard
@@ -866,8 +866,8 @@
                            :node-id child-id
                            ;; Pass item as an input override
                            :inputs {item-key item
-                                    "__map-each-index" idx
-                                    "__map-each-parent" node-id}}}))))}))))))
+                                    ::map-each-index idx
+                                    ::map-each-parent node-id}}}))))}))))))
 
 (defn handle-map-each-child-completion
   "Handle completion of a map-each child iteration.
@@ -881,8 +881,8 @@
         inputs (:inputs event)
         writes (:writes event)
         ;; Check if this is a map-each child
-        map-each-parent-id (get inputs "__map-each-parent")
-        item-index (get inputs "__map-each-index")]
+        map-each-parent-id (get inputs ::map-each-parent)
+        item-index (get inputs ::map-each-index)]
     (when (and map-each-parent-id item-index)
       (let [state-key (map-each-key tick-id map-each-parent-id)
             state (get @map-each-state state-key)]
@@ -978,8 +978,8 @@
                     :tags #{[:sheet sheet-id] [:node child-id] [:tick tick-id]}
                     :body {:sheet-id sheet-id :tick-id tick-id :node-id child-id
                            :inputs {item-key next-item
-                                    "__map-each-index" (:next-index act)
-                                    "__map-each-parent" map-each-parent-id}}})]})
+                                    ::map-each-index (:next-index act)
+                                    ::map-each-parent map-each-parent-id}}})]})
 
               ;; :wait or :noop — just emit progress
               {:result/events
@@ -1164,7 +1164,7 @@
                               (:error completed) (assoc :error (:error completed))
                               ;; Inputs from event (non-context keys)
                               (:inputs started) (assoc :inputs
-                                                       (into {} (filter (fn [[k _]] (and (string? k) (not (.startsWith k "__"))))
+                                                       (into {} (filter (fn [[k _]] (and (keyword? k) (not (= (namespace k) (namespace ::_)))))
                                                                         (:inputs started)))))))
             ;; Calculate duration
             duration-ms (if (and started-at completed-at)
@@ -1282,7 +1282,7 @@
                                             {:type :sheet/key-declared
                                              :tags #{[:sheet sheet-id]}
                                              :body {:sheet-id sheet-id
-                                                    :key (name k)
+                                                    :key k
                                                     :schema schema}}))
                                          blackboard-schema)
 

@@ -44,32 +44,32 @@
   "Malli schema for grounding judge output"
   [:map
    [:score :double]
-   [:grounded_claims [:vector :string]]
-   [:ungrounded_claims [:vector :string]]
+   [:grounded-claims [:vector :string]]
+   [:ungrounded-claims [:vector :string]]
    [:feedback :string]])
 
 (def InstructionFollowingResultSchema
   "Malli schema for instruction following judge output"
   [:map
    [:score :double]
-   [:requirements_met [:vector :string]]
-   [:requirements_missed [:vector :string]]
+   [:requirements-met [:vector :string]]
+   [:requirements-missed [:vector :string]]
    [:feedback :string]])
 
 (def ReasoningResultSchema
   "Malli schema for reasoning quality judge output"
   [:map
    [:score :double]
-   [:reasoning_strengths [:vector :string]]
-   [:reasoning_weaknesses [:vector :string]]
+   [:reasoning-strengths [:vector :string]]
+   [:reasoning-weaknesses [:vector :string]]
    [:feedback :string]])
 
 (def CompletenessResultSchema
   "Malli schema for completeness judge output"
   [:map
    [:score :double]
-   [:aspects_covered [:vector :string]]
-   [:aspects_missing [:vector :string]]
+   [:aspects-covered [:vector :string]]
+   [:aspects-missing [:vector :string]]
    [:feedback :string]])
 
 ;; =============================================================================
@@ -122,10 +122,10 @@
   [{:name :score
     :spec :double
     :description "Score from 0.0 to 1.0"}
-   {:name :grounded_claims
+   {:name :grounded-claims
     :spec [:vector :string]
     :description "List of claims that ARE supported by inputs"}
-   {:name :ungrounded_claims
+   {:name :ungrounded-claims
     :spec [:vector :string]
     :description "List of claims that are NOT supported by inputs"}
    {:name :feedback
@@ -136,10 +136,10 @@
   [{:name :score
     :spec :double
     :description "Score from 0.0 to 1.0"}
-   {:name :requirements_met
+   {:name :requirements-met
     :spec [:vector :string]
     :description "List of instruction requirements that were satisfied"}
-   {:name :requirements_missed
+   {:name :requirements-missed
     :spec [:vector :string]
     :description "List of instruction requirements that were NOT satisfied"}
    {:name :feedback
@@ -150,10 +150,10 @@
   [{:name :score
     :spec :double
     :description "Score from 0.0 to 1.0"}
-   {:name :reasoning_strengths
+   {:name :reasoning-strengths
     :spec [:vector :string]
     :description "Aspects of reasoning that were good"}
-   {:name :reasoning_weaknesses
+   {:name :reasoning-weaknesses
     :spec [:vector :string]
     :description "Logical gaps or unclear elements"}
    {:name :feedback
@@ -164,10 +164,10 @@
   [{:name :score
     :spec :double
     :description "Score from 0.0 to 1.0"}
-   {:name :aspects_covered
+   {:name :aspects-covered
     :spec [:vector :string]
     :description "Aspects of the task that were addressed"}
-   {:name :aspects_missing
+   {:name :aspects-missing
     :spec [:vector :string]
     :description "Aspects that should have been included but weren't"}
    {:name :feedback
@@ -202,29 +202,29 @@
 
 (defn- mock-grounding-result [prompt]
   {:score 0.8
-   :grounded_claims ["Mock: Response uses information from provided context"]
-   :ungrounded_claims []
+   :grounded-claims ["Mock: Response uses information from provided context"]
+   :ungrounded-claims []
    :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
                   "In production, this would analyze actual grounding.")})
 
 (defn- mock-instruction-following-result [prompt]
   {:score 0.85
-   :requirements_met ["Mock: Main task addressed"]
-   :requirements_missed []
+   :requirements-met ["Mock: Main task addressed"]
+   :requirements-missed []
    :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
                   "In production, this would analyze instruction compliance.")})
 
 (defn- mock-reasoning-result [prompt]
   {:score 0.75
-   :reasoning_strengths ["Mock: Clear logical structure"]
-   :reasoning_weaknesses []
+   :reasoning-strengths ["Mock: Clear logical structure"]
+   :reasoning-weaknesses []
    :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
                   "In production, this would analyze reasoning quality.")})
 
 (defn- mock-completeness-result [prompt]
   {:score 0.9
-   :aspects_covered ["Mock: Main aspects addressed"]
-   :aspects_missing []
+   :aspects-covered ["Mock: Main aspects addressed"]
+   :aspects-missing []
    :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
                   "In production, this would analyze completeness.")})
 
@@ -241,15 +241,15 @@
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     grounding-result: Map with :score, :grounded_claims, :ungrounded_claims, :feedback"
+     grounding-result: Map with :score, :grounded-claims, :ungrounded-claims, :feedback"
   [{:keys [inputs] :as _executor-context}]
-  (let [trace-data (get inputs "trace-data")
+  (let [trace-data (:trace-data inputs)
         rubric (rubrics/get-rubric :grounding)
         prompt (render-rubric-prompt rubric trace-data)
         result (if *use-mock-llm*
                  (mock-grounding-result prompt)
                  (call-llm-judge prompt (grounding-output-fields)))]
-    {"grounding-result" result}))
+    {:grounding-result result}))
 
 (defn instruction-following-judge
   "Evaluate if the LLM followed its instruction.
@@ -258,15 +258,15 @@
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     instruction-result: Map with :score, :requirements_met, :requirements_missed, :feedback"
+     instruction-result: Map with :score, :requirements-met, :requirements-missed, :feedback"
   [{:keys [inputs] :as _executor-context}]
-  (let [trace-data (get inputs "trace-data")
+  (let [trace-data (:trace-data inputs)
         rubric (rubrics/get-rubric :instruction-following)
         prompt (render-rubric-prompt rubric trace-data)
         result (if *use-mock-llm*
                  (mock-instruction-following-result prompt)
                  (call-llm-judge prompt (instruction-following-output-fields)))]
-    {"instruction-result" result}))
+    {:instruction-result result}))
 
 (defn reasoning-judge
   "Evaluate the quality of reasoning in the response.
@@ -275,15 +275,15 @@
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     reasoning-result: Map with :score, :reasoning_strengths, :reasoning_weaknesses, :feedback"
+     reasoning-result: Map with :score, :reasoning-strengths, :reasoning-weaknesses, :feedback"
   [{:keys [inputs] :as _executor-context}]
-  (let [trace-data (get inputs "trace-data")
+  (let [trace-data (:trace-data inputs)
         rubric (rubrics/get-rubric :reasoning)
         prompt (render-rubric-prompt rubric trace-data)
         result (if *use-mock-llm*
                  (mock-reasoning-result prompt)
                  (call-llm-judge prompt (reasoning-output-fields)))]
-    {"reasoning-result" result}))
+    {:reasoning-result result}))
 
 (defn completeness-judge
   "Evaluate the completeness of the response.
@@ -292,15 +292,15 @@
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     completeness-result: Map with :score, :aspects_covered, :aspects_missing, :feedback"
+     completeness-result: Map with :score, :aspects-covered, :aspects-missing, :feedback"
   [{:keys [inputs] :as _executor-context}]
-  (let [trace-data (get inputs "trace-data")
+  (let [trace-data (:trace-data inputs)
         rubric (rubrics/get-rubric :completeness)
         prompt (render-rubric-prompt rubric trace-data)
         result (if *use-mock-llm*
                  (mock-completeness-result prompt)
                  (call-llm-judge prompt (completeness-output-fields)))]
-    {"completeness-result" result}))
+    {:completeness-result result}))
 
 ;; =============================================================================
 ;; Aggregation Executor
@@ -320,10 +320,10 @@
      feedback-summary: Combined feedback string
      dimensions: Vector of dimension details"
   [{:keys [inputs] :as _executor-context}]
-  (let [grounding (get inputs "grounding-result")
-        instruction (get inputs "instruction-result")
-        reasoning (get inputs "reasoning-result")
-        completeness (get inputs "completeness-result")
+  (let [grounding (:grounding-result inputs)
+        instruction (:instruction-result inputs)
+        reasoning (:reasoning-result inputs)
+        completeness (:completeness-result inputs)
 
         dimensions [(feedback/->metric-dimension
                      "Source Grounding" 0.35
@@ -344,9 +344,9 @@
 
         result (feedback/combine-dimension-scores dimensions)]
 
-    {"aggregate-score" (:score result)
-     "feedback-summary" (feedback/aggregate-feedback-summary result)
-     "dimensions" (mapv #(select-keys % [:name :weight :score :feedback])
+    {:aggregate-score (:score result)
+     :feedback-summary (feedback/aggregate-feedback-summary result)
+     :dimensions (mapv #(select-keys % [:name :weight :score :feedback])
                        dimensions)}))
 
 ;; =============================================================================
@@ -370,7 +370,7 @@
                    :instruction-following instruction-following-judge
                    :reasoning reasoning-judge
                    :completeness completeness-judge)]
-    (judge-fn {:inputs {"trace-data" trace-data}})))
+    (judge-fn {:inputs {:trace-data trace-data}})))
 
 (defn evaluate-all
   "Evaluate a trace with all judges and aggregate.
@@ -385,23 +385,23 @@
        :dimensions - Per-dimension results
        :raw-results - Individual judge results"
   [trace-data]
-  (let [grounding-res (grounding-judge {:inputs {"trace-data" trace-data}})
-        instruction-res (instruction-following-judge {:inputs {"trace-data" trace-data}})
-        reasoning-res (reasoning-judge {:inputs {"trace-data" trace-data}})
-        completeness-res (completeness-judge {:inputs {"trace-data" trace-data}})
+  (let [grounding-res (grounding-judge {:inputs {:trace-data trace-data}})
+        instruction-res (instruction-following-judge {:inputs {:trace-data trace-data}})
+        reasoning-res (reasoning-judge {:inputs {:trace-data trace-data}})
+        completeness-res (completeness-judge {:inputs {:trace-data trace-data}})
 
         ;; Combine all results for aggregation
         combined-inputs (merge grounding-res instruction-res reasoning-res completeness-res)
 
         agg-result (aggregate-dimensions {:inputs combined-inputs})]
 
-    {:aggregate-score (get agg-result "aggregate-score")
-     :feedback-summary (get agg-result "feedback-summary")
-     :dimensions (get agg-result "dimensions")
-     :raw-results {:grounding (get grounding-res "grounding-result")
-                   :instruction-following (get instruction-res "instruction-result")
-                   :reasoning (get reasoning-res "reasoning-result")
-                   :completeness (get completeness-res "completeness-result")}}))
+    {:aggregate-score (:aggregate-score agg-result)
+     :feedback-summary (:feedback-summary agg-result)
+     :dimensions (:dimensions agg-result)
+     :raw-results {:grounding (:grounding-result grounding-res)
+                   :instruction-following (:instruction-result instruction-res)
+                   :reasoning (:reasoning-result reasoning-res)
+                   :completeness (:completeness-result completeness-res)}}))
 
 ;; =============================================================================
 ;; Judge Registry

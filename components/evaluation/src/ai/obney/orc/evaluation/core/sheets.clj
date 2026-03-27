@@ -14,7 +14,7 @@
    (def suite-id (sheet/build-workflow! ctx (eval-sheets/evaluation-suite)))
 
    ;; Execute on a trace
-   (sheet/execute ctx suite-id {\"trace-data\" {...}})
+   (sheet/execute ctx suite-id {:trace-data {...}})
    ```
 
    ## Available Sheets
@@ -47,32 +47,32 @@
   "Schema for grounding judge result"
   [:map
    [:score :double]
-   [:grounded_claims [:vector :string]]
-   [:ungrounded_claims [:vector :string]]
+   [:grounded-claims [:vector :string]]
+   [:ungrounded-claims [:vector :string]]
    [:feedback :string]])
 
 (def InstructionResultSchema
   "Schema for instruction following judge result"
   [:map
    [:score :double]
-   [:requirements_met [:vector :string]]
-   [:requirements_missed [:vector :string]]
+   [:requirements-met [:vector :string]]
+   [:requirements-missed [:vector :string]]
    [:feedback :string]])
 
 (def ReasoningResultSchema
   "Schema for reasoning quality judge result"
   [:map
    [:score :double]
-   [:reasoning_strengths [:vector :string]]
-   [:reasoning_weaknesses [:vector :string]]
+   [:reasoning-strengths [:vector :string]]
+   [:reasoning-weaknesses [:vector :string]]
    [:feedback :string]])
 
 (def CompletenessResultSchema
   "Schema for completeness judge result"
   [:map
    [:score :double]
-   [:aspects_covered [:vector :string]]
-   [:aspects_missing [:vector :string]]
+   [:aspects-covered [:vector :string]]
+   [:aspects-missing [:vector :string]]
    [:feedback :string]])
 
 (def DimensionSchema
@@ -107,8 +107,8 @@
 
     (dsl/code "evaluate-grounding"
       :fn "ai.obney.orc.evaluation.core.judges/grounding-judge"
-      :reads ["trace-data"]
-      :writes ["grounding-result"])))
+      :reads [:trace-data]
+      :writes [:grounding-result])))
 
 (defn instruction-judge-sheet
   "Sheet that evaluates instruction following.
@@ -123,8 +123,8 @@
 
     (dsl/code "evaluate-instruction"
       :fn "ai.obney.orc.evaluation.core.judges/instruction-following-judge"
-      :reads ["trace-data"]
-      :writes ["instruction-result"])))
+      :reads [:trace-data]
+      :writes [:instruction-result])))
 
 (defn reasoning-judge-sheet
   "Sheet that evaluates reasoning quality.
@@ -139,8 +139,8 @@
 
     (dsl/code "evaluate-reasoning"
       :fn "ai.obney.orc.evaluation.core.judges/reasoning-judge"
-      :reads ["trace-data"]
-      :writes ["reasoning-result"])))
+      :reads [:trace-data]
+      :writes [:reasoning-result])))
 
 (defn completeness-judge-sheet
   "Sheet that evaluates response completeness.
@@ -155,8 +155,8 @@
 
     (dsl/code "evaluate-completeness"
       :fn "ai.obney.orc.evaluation.core.judges/completeness-judge"
-      :reads ["trace-data"]
-      :writes ["completeness-result"])))
+      :reads [:trace-data]
+      :writes [:completeness-result])))
 
 ;; =============================================================================
 ;; Full Evaluation Suite
@@ -178,9 +178,9 @@
    Example:
      (def suite-id (sheet/build-workflow! ctx (evaluation-suite)))
      (sheet/execute ctx suite-id
-       {\"trace-data\" {:inputs {:question \"What is 2+2?\"}
-                        :response \"4\"
-                        :instruction \"Answer math questions\"}})"
+       {:trace-data {:inputs {:question \"What is 2+2?\"}
+                     :response \"4\"
+                     :instruction \"Answer math questions\"}})"
   []
   (dsl/workflow "evaluation-suite"
     (dsl/blackboard
@@ -196,30 +196,30 @@
       (dsl/parallel "run-judges"
         (dsl/code "grounding-judge"
           :fn "ai.obney.orc.evaluation.core.judges/grounding-judge"
-          :reads ["trace-data"]
-          :writes ["grounding-result"])
+          :reads [:trace-data]
+          :writes [:grounding-result])
 
         (dsl/code "instruction-judge"
           :fn "ai.obney.orc.evaluation.core.judges/instruction-following-judge"
-          :reads ["trace-data"]
-          :writes ["instruction-result"])
+          :reads [:trace-data]
+          :writes [:instruction-result])
 
         (dsl/code "reasoning-judge"
           :fn "ai.obney.orc.evaluation.core.judges/reasoning-judge"
-          :reads ["trace-data"]
-          :writes ["reasoning-result"])
+          :reads [:trace-data]
+          :writes [:reasoning-result])
 
         (dsl/code "completeness-judge"
           :fn "ai.obney.orc.evaluation.core.judges/completeness-judge"
-          :reads ["trace-data"]
-          :writes ["completeness-result"]))
+          :reads [:trace-data]
+          :writes [:completeness-result]))
 
       ;; Aggregate all results into final score
       (dsl/code "aggregate"
         :fn "ai.obney.orc.evaluation.core.judges/aggregate-dimensions"
-        :reads ["grounding-result" "instruction-result"
-                "reasoning-result" "completeness-result"]
-        :writes ["aggregate-result"]))))
+        :reads [:grounding-result :instruction-result
+                :reasoning-result :completeness-result]
+        :writes [:aggregate-result]))))
 
 ;; =============================================================================
 ;; Batch Evaluation Suite
@@ -239,8 +239,8 @@
    Example:
      (def batch-id (sheet/build-workflow! ctx (batch-evaluation-suite)))
      (sheet/execute ctx batch-id
-       {\"traces\" [{:inputs {...} :response \"...\" :instruction \"...\"}
-                    {:inputs {...} :response \"...\" :instruction \"...\"}]})"
+       {:traces [{:inputs {...} :response \"...\" :instruction \"...\"}
+                 {:inputs {...} :response \"...\" :instruction \"...\"}]})"
   []
   (dsl/workflow "evaluation-batch-suite"
     (dsl/blackboard
@@ -254,9 +254,9 @@
       :results [:vector AggregateResultSchema]})
 
     (dsl/map-each "evaluate-all"
-      :from "traces"
-      :as "current-trace"
-      :into "results"
+      :from :traces
+      :as :current-trace
+      :into :results
       :parallel 3  ;; Process 3 traces concurrently
 
       (dsl/sequence "evaluate-one"
@@ -264,30 +264,30 @@
         (dsl/parallel "run-judges"
           (dsl/code "grounding-judge"
             :fn "ai.obney.orc.evaluation.core.judges/grounding-judge"
-            :reads ["current-trace"]
-            :writes ["grounding-result"])
+            :reads [:current-trace]
+            :writes [:grounding-result])
 
           (dsl/code "instruction-judge"
             :fn "ai.obney.orc.evaluation.core.judges/instruction-following-judge"
-            :reads ["current-trace"]
-            :writes ["instruction-result"])
+            :reads [:current-trace]
+            :writes [:instruction-result])
 
           (dsl/code "reasoning-judge"
             :fn "ai.obney.orc.evaluation.core.judges/reasoning-judge"
-            :reads ["current-trace"]
-            :writes ["reasoning-result"])
+            :reads [:current-trace]
+            :writes [:reasoning-result])
 
           (dsl/code "completeness-judge"
             :fn "ai.obney.orc.evaluation.core.judges/completeness-judge"
-            :reads ["current-trace"]
-            :writes ["completeness-result"]))
+            :reads [:current-trace]
+            :writes [:completeness-result]))
 
         ;; Aggregate
         (dsl/code "aggregate"
           :fn "ai.obney.orc.evaluation.core.judges/aggregate-dimensions"
-          :reads ["grounding-result" "instruction-result"
-                  "reasoning-result" "completeness-result"]
-          :writes ["current-aggregate"])))))
+          :reads [:grounding-result :instruction-result
+                  :reasoning-result :completeness-result]
+          :writes [:current-aggregate])))))
 
 ;; =============================================================================
 ;; Selective Judge Suite
@@ -300,7 +300,7 @@
 
    Args:
      judge-keys: Vector of judge keys to include
-                 Options: :grounding, :instruction, :reasoning, :completeness
+                 Options: :grounding, :instruction-following, :reasoning, :completeness
 
    Example:
      ;; Only grounding and reasoning
@@ -309,7 +309,7 @@
          (selective-judge-suite [:grounding :reasoning])))"
   [judge-keys]
   (let [include-grounding? (some #{:grounding} judge-keys)
-        include-instruction? (some #{:instruction} judge-keys)
+        include-instruction? (some #{:instruction-following} judge-keys)
         include-reasoning? (some #{:reasoning} judge-keys)
         include-completeness? (some #{:completeness} judge-keys)
 
@@ -318,26 +318,26 @@
                       include-grounding?
                       (conj (dsl/code "grounding-judge"
                               :fn "ai.obney.orc.evaluation.core.judges/grounding-judge"
-                              :reads ["trace-data"]
-                              :writes ["grounding-result"]))
+                              :reads [:trace-data]
+                              :writes [:grounding-result]))
 
                       include-instruction?
                       (conj (dsl/code "instruction-judge"
                               :fn "ai.obney.orc.evaluation.core.judges/instruction-following-judge"
-                              :reads ["trace-data"]
-                              :writes ["instruction-result"]))
+                              :reads [:trace-data]
+                              :writes [:instruction-result]))
 
                       include-reasoning?
                       (conj (dsl/code "reasoning-judge"
                               :fn "ai.obney.orc.evaluation.core.judges/reasoning-judge"
-                              :reads ["trace-data"]
-                              :writes ["reasoning-result"]))
+                              :reads [:trace-data]
+                              :writes [:reasoning-result]))
 
                       include-completeness?
                       (conj (dsl/code "completeness-judge"
                               :fn "ai.obney.orc.evaluation.core.judges/completeness-judge"
-                              :reads ["trace-data"]
-                              :writes ["completeness-result"])))
+                              :reads [:trace-data]
+                              :writes [:completeness-result])))
 
         ;; Build blackboard schema based on selection
         bb-schema (cond-> {:trace-data TraceDataSchema
@@ -356,10 +356,10 @@
 
         ;; Build aggregator reads
         agg-reads (cond-> []
-                    include-grounding? (conj "grounding-result")
-                    include-instruction? (conj "instruction-result")
-                    include-reasoning? (conj "reasoning-result")
-                    include-completeness? (conj "completeness-result"))]
+                    include-grounding? (conj :grounding-result)
+                    include-instruction? (conj :instruction-result)
+                    include-reasoning? (conj :reasoning-result)
+                    include-completeness? (conj :completeness-result))]
 
     (dsl/workflow (str "evaluation-selective-" (clojure.string/join "-" (map name judge-keys)))
       (dsl/blackboard bb-schema)
@@ -370,4 +370,4 @@
         (dsl/code "aggregate"
           :fn "ai.obney.orc.evaluation.core.judges/aggregate-dimensions"
           :reads agg-reads
-          :writes ["aggregate-result"])))))
+          :writes [:aggregate-result])))))

@@ -52,8 +52,8 @@ The LLM was given these inputs:
 ## Required Output (JSON)
 {
   \"score\": <float 0.0-1.0>,
-  \"grounded_claims\": [\"list of claims that ARE supported by inputs\"],
-  \"ungrounded_claims\": [\"list of claims that are NOT supported\"],
+  \"grounded-claims\": [\"list of claims that ARE supported by inputs\"],
+  \"ungrounded-claims\": [\"list of claims that are NOT supported\"],
   \"feedback\": \"Specific actionable feedback explaining the score. Include suggestions for improvement.\"
 }"})
 
@@ -101,8 +101,8 @@ Evaluate how well the response follows the instruction:
 ## Required Output (JSON)
 {
   \"score\": <float 0.0-1.0>,
-  \"requirements_met\": [\"list of instruction requirements that were satisfied\"],
-  \"requirements_missed\": [\"list of instruction requirements that were NOT satisfied\"],
+  \"requirements-met\": [\"list of instruction requirements that were satisfied\"],
+  \"requirements-missed\": [\"list of instruction requirements that were NOT satisfied\"],
   \"feedback\": \"Specific actionable feedback explaining the score and how to better follow the instruction.\"
 }"})
 
@@ -150,8 +150,8 @@ Evaluate the reasoning quality:
 ## Required Output (JSON)
 {
   \"score\": <float 0.0-1.0>,
-  \"reasoning_strengths\": [\"aspects of reasoning that were good\"],
-  \"reasoning_weaknesses\": [\"logical gaps or unclear elements\"],
+  \"reasoning-strengths\": [\"aspects of reasoning that were good\"],
+  \"reasoning-weaknesses\": [\"logical gaps or unclear elements\"],
   \"feedback\": \"Specific actionable feedback for improving reasoning clarity and rigor.\"
 }"})
 
@@ -199,8 +199,8 @@ Evaluate completeness:
 ## Required Output (JSON)
 {
   \"score\": <float 0.0-1.0>,
-  \"aspects_covered\": [\"aspects of the task that were addressed\"],
-  \"aspects_missing\": [\"aspects that should have been included but weren't\"],
+  \"aspects-covered\": [\"aspects of the task that were addressed\"],
+  \"aspects-missing\": [\"aspects that should have been included but weren't\"],
   \"feedback\": \"Specific actionable feedback for improving completeness.\"
 }"})
 

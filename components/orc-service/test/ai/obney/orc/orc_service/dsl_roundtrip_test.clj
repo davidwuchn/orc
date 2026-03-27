@@ -43,8 +43,8 @@
                              (dsl/llm "process"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process the input"
-                               :reads ["input"]
-                               :writes ["output"])))
+                               :reads [:input]
+                               :writes [:output])))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -72,8 +72,8 @@
                            (dsl/sequence "main"
                              (dsl/code "compute"
                                :fn "some.ns/compute-fn"
-                               :reads ["x"]
-                               :writes ["result"])))
+                               :reads [:x]
+                               :writes [:result])))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -107,62 +107,62 @@
                              (dsl/llm "ai-step"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process input and extract items"
-                               :reads ["input"]
-                               :writes ["items"])
+                               :reads [:input]
+                               :writes [:items])
 
                              ;; Code node
                              (dsl/code "code-step"
                                :fn "my.ns/transform"
-                               :reads ["items"]
-                               :writes ["items"])
+                               :reads [:items]
+                               :writes [:items])
 
                              ;; Condition node
                              (dsl/condition "check-flag"
-                               :check {:key "flag" :op :truthy})
+                               :check {:key :flag :op :truthy})
 
                              ;; LLM condition node
                              (dsl/llm-condition "llm-check"
                                :model "google/gemini-2.5-flash"
                                :instruction "Should we continue?"
-                               :reads ["items"])
+                               :reads [:items])
 
                              ;; Fallback node
                              (dsl/fallback "try-options"
                                (dsl/llm "option-1"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Try option 1"
-                                 :reads ["items"]
-                                 :writes ["result"])
+                                 :reads [:items]
+                                 :writes [:result])
                                (dsl/llm "option-2"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Try option 2"
-                                 :reads ["items"]
-                                 :writes ["result"]))
+                                 :reads [:items]
+                                 :writes [:result]))
 
                              ;; Parallel node with custom policies
                              (dsl/parallel "scoring" {:success-policy :any}
                                (dsl/llm "parallel-a"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Path A"
-                                 :reads ["items"]
-                                 :writes ["score"])
+                                 :reads [:items]
+                                 :writes [:score])
                                (dsl/llm "parallel-b"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Path B"
-                                 :reads ["items"]
-                                 :writes ["score"]))
+                                 :reads [:items]
+                                 :writes [:score]))
 
                              ;; Map-each node
                              (dsl/map-each "process-items"
-                               :from "items"
-                               :as "item"
-                               :into "results"
+                               :from :items
+                               :as :item
+                               :into :results
                                :parallel 3
                                (dsl/llm "process"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Process item"
-                                 :reads ["item"]
-                                 :writes ["item-result"]))))
+                                 :reads [:item]
+                                 :writes [:item-result]))))
 
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
@@ -194,8 +194,8 @@
                              (dsl/llm "step"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process"
-                               :reads ["input"]
-                               :writes ["output"])))
+                               :reads [:input]
+                               :writes [:output])))
             sheet-id-1 (dsl/build-workflow! ctx workflow-def)
             sheet-id-2 (dsl/build-workflow! ctx workflow-def)]
         (is (= sheet-id-1 sheet-id-2)
@@ -210,21 +210,21 @@
                             (dsl/llm "step-1"
                               :model "google/gemini-2.5-flash"
                               :instruction "Version 1"
-                              :reads ["input"]
-                              :writes ["output"])))
+                              :reads [:input]
+                              :writes [:output])))
             workflow-v2 (dsl/workflow "evolving-workflow"
                           (dsl/blackboard {:input :string :extra :int})
                           (dsl/sequence "main"
                             (dsl/llm "step-1"
                               :model "google/gemini-2.5-flash"
                               :instruction "Version 2 - modified"
-                              :reads ["input"]
-                              :writes ["output"])
+                              :reads [:input]
+                              :writes [:output])
                             (dsl/llm "step-2"
                               :model "google/gemini-2.5-flash"
                               :instruction "New step"
-                              :reads ["output"]
-                              :writes ["final"])))
+                              :reads [:output]
+                              :writes [:final])))
             sheet-id-1 (dsl/build-workflow! ctx workflow-v1)
             sheet-id-2 (dsl/build-workflow! ctx workflow-v2)]
         (is (= sheet-id-1 sheet-id-2)
@@ -261,8 +261,8 @@
                              (dsl/llm "process"
                                :model "google/gemini-2.5-flash"
                                :instruction "Original"
-                               :reads ["data"]
-                               :writes ["result"])))
+                               :reads [:data]
+                               :writes [:result])))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -288,13 +288,13 @@
                              (dsl/llm "step-a"
                                :model "google/gemini-2.5-flash"
                                :instruction "Step A"
-                               :reads ["x"]
-                               :writes ["y"])
+                               :reads [:x]
+                               :writes [:y])
                              (dsl/llm "step-b"
                                :model "google/gemini-2.5-flash"
                                :instruction "Step B"
-                               :reads ["y"]
-                               :writes ["z"])))
+                               :reads [:y]
+                               :writes [:z])))
             ;; Build twice
             _ (dsl/build-workflow! ctx workflow-def)
             export-1 (dsl/export-sheet ctx (dsl/sheet-id-for-name "deterministic-nodes"))
@@ -325,8 +325,8 @@
                              (dsl/llm "step"
                                :model "google/gemini-2.5-flash"
                                :instruction "Do something"
-                               :reads ["input"]
-                               :writes ["output"])))
+                               :reads [:input]
+                               :writes [:output])))
             sheet-id (dsl/build-workflow! ctx original-def)
             exported (dsl/export-sheet ctx sheet-id)
             dsl-1 (dsl/export-to-dsl exported)
@@ -347,8 +347,8 @@
                              (dsl/llm "process"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process data"
-                               :reads ["data"]
-                               :writes ["data"])))
+                               :reads [:data]
+                               :writes [:data])))
             sheet-id (dsl/build-workflow! ctx original-def)
             exported (dsl/export-sheet ctx sheet-id)
             dsl-code (dsl/export-to-dsl exported)]
@@ -367,7 +367,7 @@
                            (dsl/sequence "main"
                              (dsl/code "no-input"
                                :fn "my.ns/generate"
-                               :writes ["result"])))
+                               :writes [:result])))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -393,8 +393,8 @@
                              (dsl/llm "process"
                                :model "google/gemini-2.5-flash"
                                :instruction instruction
-                               :reads ["input"]
-                               :writes ["output"])))
+                               :reads [:input]
+                               :writes [:output])))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -424,18 +424,18 @@
                                      (dsl/llm "deep-1"
                                        :model "google/gemini-2.5-flash"
                                        :instruction "Level 5"
-                                       :reads ["data"]
-                                       :writes ["data"]))
+                                       :reads [:data]
+                                       :writes [:data]))
                                    (dsl/llm "deep-2"
                                      :model "google/gemini-2.5-flash"
                                      :instruction "Level 4 parallel"
-                                     :reads ["data"]
-                                     :writes ["data"])))
+                                     :reads [:data]
+                                     :writes [:data])))
                                (dsl/llm "fallback"
                                  :model "google/gemini-2.5-flash"
                                  :instruction "Fallback option"
-                                 :reads ["data"]
-                                 :writes ["data"]))))
+                                 :reads [:data]
+                                 :writes [:data]))))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
             exported (dsl/export-sheet ctx sheet-id-1)
@@ -461,8 +461,8 @@
                              (dsl/llm "with-retry"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process with retry"
-                               :reads ["input"]
-                               :writes ["output"]
+                               :reads [:input]
+                               :writes [:output]
                                :retry {:max-attempts 3 :backoff-ms [100 500 1000]})))
             sheet-id-1 (dsl/build-workflow! ctx original-def)
 
@@ -493,8 +493,8 @@
                              (dsl/llm "process"
                                :model "google/gemini-2.5-flash"
                                :instruction "Process input"
-                               :reads ["input"]
-                               :writes ["output"])))
+                               :reads [:input]
+                               :writes [:output])))
             sheet-id (dsl/build-workflow! ctx original-def)
             exported (dsl/export-sheet ctx sheet-id)
             dsl-code (dsl/export-to-dsl exported :pretty? true)]

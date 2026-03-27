@@ -157,8 +157,8 @@ Provide the new instructions within ``` blocks.")
     (sheet/llm "propose"
       :model "anthropic/claude-sonnet-4"
       :instruction python-gepa-prompt-template
-      :reads ["current-instruction" "reflective-examples"]
-      :writes ["proposed-instruction"])))
+      :reads [:current-instruction :reflective-examples]
+      :writes [:proposed-instruction])))
 
 ;; =============================================================================
 ;; Workflow Builder
@@ -271,11 +271,11 @@ Provide the new instructions within ``` blocks.")
          :sheet-id sheet-id)
 
   (let [result (sheet/execute context sheet-id
-                 {"current-instruction" current-instruction
-                  "reflective-examples" formatted-examples})]
+                 {:current-instruction current-instruction
+                  :reflective-examples formatted-examples})]
 
     (if (= :success (:status result))
-      (let [raw-response (get-in result [:outputs "proposed-instruction"])
+      (let [raw-response (get-in result [:outputs :proposed-instruction])
             extracted (extract-instruction-from-response raw-response)]
         {:status :success
          :proposed-instruction extracted

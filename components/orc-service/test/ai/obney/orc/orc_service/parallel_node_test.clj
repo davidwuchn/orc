@@ -10,15 +10,15 @@
 
 (defn score-a [{:keys [inputs]}]
   (Thread/sleep 50)
-  {"score-a" 10})
+  {:score-a 10})
 
 (defn score-b [{:keys [inputs]}]
   (Thread/sleep 50)
-  {"score-b" 20})
+  {:score-b 20})
 
 (defn score-c [{:keys [inputs]}]
   (Thread/sleep 50)
-  {"score-c" 30})
+  {:score-c 30})
 
 (defn failing-scorer [{:keys [inputs]}]
   (throw (ex-info "Scorer failed" {})))
@@ -29,13 +29,13 @@
   (swap! execution-log conj {:start :a :time (System/currentTimeMillis)})
   (Thread/sleep 100)
   (swap! execution-log conj {:end :a :time (System/currentTimeMillis)})
-  {"score-a" 10})
+  {:score-a 10})
 
 (defn logged-score-b [{:keys [inputs]}]
   (swap! execution-log conj {:start :b :time (System/currentTimeMillis)})
   (Thread/sleep 100)
   (swap! execution-log conj {:end :b :time (System/currentTimeMillis)})
-  {"score-b" 20})
+  {:score-b 20})
 
 ;; =============================================================================
 ;; Parallel Execution Tests
@@ -48,9 +48,9 @@
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
         ;; Declare blackboard
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-a" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-b" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-c" :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-a :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-b :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-c :int))
 
         ;; Create parallel node
         (let [parallel-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :parallel))
@@ -60,9 +60,9 @@
                                   :success-policy :all :failure-policy :any))
 
           ;; Create 3 scorer children
-          (doseq [[idx [fn-name writes]] [[0 ["ai.obney.orc.orc-service.parallel-node-test/score-a" ["score-a"]]]
-                                          [1 ["ai.obney.orc.orc-service.parallel-node-test/score-b" ["score-b"]]]
-                                          [2 ["ai.obney.orc.orc-service.parallel-node-test/score-c" ["score-c"]]]]]
+          (doseq [[idx [fn-name writes]] [[0 ["ai.obney.orc.orc-service.parallel-node-test/score-a" [:score-a]]]
+                                          [1 ["ai.obney.orc.orc-service.parallel-node-test/score-b" [:score-b]]]
+                                          [2 ["ai.obney.orc.orc-service.parallel-node-test/score-c" [:score-c]]]]]
             (let [leaf-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :leaf
                                                       :parent-id parallel-id :index idx))
                   leaf-id (-> leaf-result :command-result/events first :node-id)]
@@ -72,9 +72,9 @@
           ;; Execute
           (let [result (sheet/execute ctx sheet-id {})]
             (is (= :success (:status result)))
-            (is (= 10 (get-in result [:outputs "score-a"])))
-            (is (= 20 (get-in result [:outputs "score-b"])))
-            (is (= 30 (get-in result [:outputs "score-c"])))))))))
+            (is (= 10 (get-in result [:outputs :score-a])))
+            (is (= 20 (get-in result [:outputs :score-b])))
+            (is (= 30 (get-in result [:outputs :score-c])))))))))
 
 (deftest parallel-concurrent-execution-test
   (testing "children execute concurrently, not sequentially"
@@ -84,8 +84,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Parallel Concurrent"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-a" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-b" :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-a :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-b :int))
 
         (let [parallel-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :parallel))
               parallel-id (-> parallel-result :command-result/events first :node-id)]
@@ -103,11 +103,11 @@
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-a-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/logged-score-a"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] ["score-a"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] [:score-a]))
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-b-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/logged-score-b"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] ["score-b"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] [:score-b]))
 
             ;; Execute
             (let [result (sheet/execute ctx sheet-id {})
@@ -129,8 +129,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Parallel Policy All"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-a" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-b" :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-a :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-b :int))
 
         (let [parallel-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :parallel))
               parallel-id (-> parallel-result :command-result/events first :node-id)]
@@ -148,11 +148,11 @@
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-a-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/score-a"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] ["score-a"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] [:score-a]))
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-b-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/failing-scorer"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] ["score-b"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] [:score-b]))
 
             (let [result (sheet/execute ctx sheet-id {})]
               (is (= :failure (:status result))))))))))
@@ -163,8 +163,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Parallel Policy Any"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-a" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "score-b" :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-a :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :score-b :int))
 
         (let [parallel-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :parallel))
               parallel-id (-> parallel-result :command-result/events first :node-id)]
@@ -182,12 +182,12 @@
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-a-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/score-a"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] ["score-a"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-a-id [] [:score-a]))
 
             (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-b-id :code
                                     :fn "ai.obney.orc.orc-service.parallel-node-test/failing-scorer"))
-            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] ["score-b"]))
+            (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-b-id [] [:score-b]))
 
             (let [result (sheet/execute ctx sheet-id {})]
               (is (= :success (:status result)))
-              (is (= 10 (get-in result [:outputs "score-a"]))))))))))
+              (is (= 10 (get-in result [:outputs :score-a]))))))))))

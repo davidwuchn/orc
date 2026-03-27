@@ -284,7 +284,7 @@
 
   ;; Resolve and call
   (def exec-fn (get-executor "searchLangfuseDocs"))
-  (exec-fn {:inputs {"query" "test"} :context {}})
+  (exec-fn {:inputs {:query "test"} :context {}})
 
   ;; List loaded executors
   (list-loaded-executors)

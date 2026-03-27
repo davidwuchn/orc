@@ -12,25 +12,25 @@
 (defn identity-fn
   "Returns the input as output."
   [{:keys [inputs]}]
-  {"output" (get inputs "input")})
+  {:output (get inputs :input)})
 
 (defn transform-fn
   "Transforms input by uppercasing."
   [{:keys [inputs]}]
-  {"output" (clojure.string/upper-case (get inputs "input"))})
+  {:output (clojure.string/upper-case (get inputs :input))})
 
 (defn multi-output-fn
   "Returns multiple outputs."
   [{:keys [inputs]}]
-  (let [x (get inputs "x")]
-    {"doubled" (* x 2)
-     "squared" (* x x)}))
+  (let [x (get inputs :x)]
+    {:doubled (* x 2)
+     :squared (* x x)}))
 
 (defn slow-fn
   "Simulates slow operation."
   [{:keys [inputs]}]
   (Thread/sleep 2000)
-  {"output" "done"})
+  {:output "done"})
 
 ;; =============================================================================
 ;; Execute API Tests
@@ -44,8 +44,8 @@
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
         ;; Declare blackboard
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         ;; Create sequence with one leaf
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
@@ -55,12 +55,12 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/transform-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["input"] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:input] [:output]))
 
           ;; Execute
-          (let [result (sheet/execute ctx sheet-id {"input" "hello"})]
+          (let [result (sheet/execute ctx sheet-id {:input "hello"})]
             (is (= :success (:status result)))
-            (is (= "HELLO" (get-in result [:outputs "output"])))))))))
+            (is (= "HELLO" (get-in result [:outputs :output])))))))))
 
 (deftest execute-isolated-blackboard-test
   (testing "execution doesn't mutate sheet's stored blackboard"
@@ -69,9 +69,9 @@
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
         ;; Declare blackboard with initial value
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
-        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id "input" "original"))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
+        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id :input "original"))
 
         ;; Create leaf
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
@@ -81,16 +81,16 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/identity-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["input"] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:input] [:output]))
 
           ;; Execute with different input
-          (let [result (sheet/execute ctx sheet-id {"input" "overridden"})]
+          (let [result (sheet/execute ctx sheet-id {:input "overridden"})]
             (is (= :success (:status result)))
-            (is (= "overridden" (get-in result [:outputs "output"]))))
+            (is (= "overridden" (get-in result [:outputs :output]))))
 
           ;; Verify original blackboard unchanged
           (let [bb (sheet/get-blackboard-by-key ctx sheet-id)]
-            (is (= "original" (get-in bb ["input" :value])))))))))
+            (is (= "original" (get-in bb [:input :value])))))))))
 
 (deftest execute-timeout-test
   (testing "returns timeout status when execution exceeds limit"
@@ -98,7 +98,7 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Timeout Test"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -107,7 +107,7 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/slow-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [] [:output]))
 
           ;; Execute with very short timeout
           (let [result (sheet/execute ctx sheet-id {} :timeout-ms 100)]
@@ -120,9 +120,9 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Multi Output"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "x" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "doubled" :int))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "squared" :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :x :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :doubled :int))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :squared :int))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -131,12 +131,12 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/multi-output-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["x"] ["doubled" "squared"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:x] [:doubled :squared]))
 
-          (let [result (sheet/execute ctx sheet-id {"x" 5})]
+          (let [result (sheet/execute ctx sheet-id {:x 5})]
             (is (= :success (:status result)))
-            (is (= 10 (get-in result [:outputs "doubled"])))
-            (is (= 25 (get-in result [:outputs "squared"])))))))))
+            (is (= 10 (get-in result [:outputs :doubled])))
+            (is (= 25 (get-in result [:outputs :squared])))))))))
 
 ;; =============================================================================
 ;; Event Pipeline Tests
@@ -154,8 +154,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Event Test"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -164,9 +164,9 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/identity-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["input"] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:input] [:output]))
 
-          (sheet/execute ctx sheet-id {"input" "test"})
+          (sheet/execute ctx sheet-id {:input "test"})
 
           (let [tick-started-events (read-events-by-type (:event-store ctx) :sheet/tree-tick-started)]
             (is (= 1 (count tick-started-events)))
@@ -178,8 +178,8 @@
       (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "Completion Event Test"))
             sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
 
         (let [seq-result (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
               seq-id (-> seq-result :command-result/events first :node-id)
@@ -188,9 +188,9 @@
 
           (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id leaf-id :code
                                   :fn "ai.obney.orc.orc-service.runtime-test/identity-fn"))
-          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id ["input"] ["output"]))
+          (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id leaf-id [:input] [:output]))
 
-          (sheet/execute ctx sheet-id {"input" "test"})
+          (sheet/execute ctx sheet-id {:input "test"})
 
           (let [tick-completed-events (read-events-by-type (:event-store ctx) :sheet/tree-tick-completed)]
             (is (= 1 (count tick-completed-events)))

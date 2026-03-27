@@ -94,9 +94,9 @@
                                                            "properties" {"a" {"type" "string"}
                                                                          "b" {"type" "integer"}
                                                                          "c" {"type" "boolean"}}}})]
-      (is (.contains code "\"a\""))
-      (is (.contains code "\"b\""))
-      (is (.contains code "\"c\"")))))
+      (is (.contains code ":a"))
+      (is (.contains code ":b"))
+      (is (.contains code ":c")))))
 
 (deftest generate-namespace-code-test
   (testing "Generates complete namespace"

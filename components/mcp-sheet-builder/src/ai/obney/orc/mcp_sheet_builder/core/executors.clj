@@ -21,10 +21,10 @@
    Context must include:
    - :mcp-session - An MCP connection"
   [{:keys [inputs context]}]
-  (let [tool-name (get inputs "tool-name")
+  (let [tool-name (get inputs :tool-name)
         mcp-session (:mcp-session context)
-        tool-args (dissoc inputs "tool-name")
-        output-key (str tool-name "-result")]
+        tool-args (dissoc inputs :tool-name)
+        output-key (keyword (str tool-name "-result"))]
     (u/trace ::call-mcp-tool {:tool tool-name :args tool-args}
       (if mcp-session
         (let [result (mcp-client/call-tool mcp-session tool-name tool-args)]
@@ -49,14 +49,14 @@
    Returns:
    - search-results: Vector of search results"
   [{:keys [inputs context]}]
-  (let [query (get inputs "query")
-        tool-name (get inputs "tool-name" "search")
+  (let [query (get inputs :query)
+        tool-name (get inputs :tool-name "search")
         mcp-session (:mcp-session context)]
     (u/trace ::search-executor {:query query :tool tool-name}
       (if mcp-session
         (let [result (mcp-client/call-tool mcp-session tool-name {"query" query})]
-          {"search-results" result})
-        {"search-results" [{:mock true :query query}]}))))
+          {:search-results result})
+        {:search-results [{:mock true :query query}]}))))
 
 (defn fetch-executor
   "Executor specialized for fetch/retrieval tools.
@@ -68,19 +68,19 @@
    Returns:
    - fetched-content: The retrieved content"
   [{:keys [inputs context]}]
-  (let [path (or (get inputs "path")
-                 (get inputs "url")
-                 (get inputs "pathOrUrl"))
-        tool-name (get inputs "tool-name" "fetch")
+  (let [path (or (get inputs :path)
+                 (get inputs :url)
+                 (get inputs :pathOrUrl))
+        tool-name (get inputs :tool-name "fetch")
         mcp-session (:mcp-session context)]
     (u/trace ::fetch-executor {:path path :tool tool-name}
       (if mcp-session
         (let [result (mcp-client/call-tool mcp-session tool-name
-                                           (or (when (get inputs "pathOrUrl")
+                                           (or (when (get inputs :pathOrUrl)
                                                  {"pathOrUrl" path})
                                                {"path" path}))]
-          {"fetched-content" result})
-        {"fetched-content" {:mock true :path path}}))))
+          {:fetched-content result})
+        {:fetched-content {:mock true :path path}}))))
 
 ;; ============================================================================
 ;; Dynamic Executor Factory
@@ -95,7 +95,7 @@
     (let [mcp-session (:mcp-session context)
           mapped-args (reduce-kv
                        (fn [acc input-key tool-arg]
-                         (if-let [v (get inputs (name input-key))]
+                         (if-let [v (get inputs (keyword input-key))]
                            (assoc acc tool-arg v)
                            acc))
                        {}
@@ -145,10 +145,10 @@
     (make-tool-executor
      "searchLangfuseDocs"
      {:query "query"}
-     "search-result"))
+     :search-result))
 
   ;; Example: Use the generic executor
   (call-mcp-tool
-   {:inputs {"tool-name" "searchLangfuseDocs"
-             "query" "How to trace LLM calls?"}
+   {:inputs {:tool-name "searchLangfuseDocs"
+             :query "How to trace LLM calls?"}
     :context {:mcp-session nil}}))

@@ -377,9 +377,9 @@
 
         ;; Create root and blackboard
         (h/run-and-apply! ctx (h/make-create-node-command sheet-id :sequence))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "count" :int))
-        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id "input" "test value"))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+        (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :count :int))
+        (h/run-and-apply! ctx (h/make-set-key-value-command sheet-id :input "test value"))
 
         ;; Publish
         (h/run-and-apply! ctx (h/make-publish-version-command sheet-id))

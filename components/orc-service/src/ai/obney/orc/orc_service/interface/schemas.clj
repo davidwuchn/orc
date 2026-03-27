@@ -76,7 +76,7 @@
 (def condition-check
   "A condition check definition for condition nodes"
   [:map
-   [:key :string]
+   [:key :keyword]
    [:op condition-op]
    [:value {:optional true} :any]
    [:on-fail {:optional true} on-fail-behavior]])
@@ -109,8 +109,8 @@
     [:status node-status]
     ;; Leaf-only fields
     [:instruction {:optional true} :string]
-    [:reads [:vector :string]]
-    [:writes [:vector :string]]
+    [:reads [:vector :keyword]]
+    [:writes [:vector :keyword]]
     [:decorators [:vector decorator]]
     ;; Executor fields (for leaf nodes)
     [:executor {:optional true} executor-type]     ;; :ai, :code, :tool
@@ -126,9 +126,9 @@
     [:success-policy {:optional true} [:enum :all :any :majority]]
     [:failure-policy {:optional true} [:enum :all :any]]
     ;; Map-each-only fields
-    [:source-key {:optional true} :string]         ;; Blackboard key with list to iterate
-    [:item-key {:optional true} :string]           ;; Blackboard key for current item
-    [:output-key {:optional true} :string]         ;; Blackboard key for collected results
+    [:source-key {:optional true} :keyword]        ;; Blackboard key with list to iterate
+    [:item-key {:optional true} :keyword]          ;; Blackboard key for current item
+    [:output-key {:optional true} :keyword]        ;; Blackboard key for collected results
     [:max-concurrency {:optional true} :int]       ;; Max parallel iterations (nil = sequential)
     ;; Repl-researcher-only fields
     [:mcp-tools {:optional true} [:vector :string]] ;; Available MCP tool names for research
@@ -138,7 +138,7 @@
 
    ::blackboard-entry
    [:map
-    [:key :string]
+    [:key :keyword]
     [:schema :any]  ;; Malli schema EDN (e.g., :string, [:map [:name :string]])
     [:value {:optional true} :any]
     [:version :int]]
@@ -298,8 +298,8 @@
    [:map
     [:sheet-id :uuid]
     [:node-id :uuid]
-    [:reads [:vector :string]]
-    [:writes [:vector :string]]]
+    [:reads [:vector :keyword]]
+    [:writes [:vector :keyword]]]
 
    :sheet/set-node-decorators
    [:map
@@ -341,9 +341,9 @@
    [:map
     [:sheet-id :uuid]
     [:node-id :uuid]
-    [:source-key :string]
-    [:item-key :string]
-    [:output-key :string]
+    [:source-key :keyword]
+    [:item-key :keyword]
+    [:output-key :keyword]
     [:max-concurrency {:optional true} :int]]
 
    :sheet/set-llm-condition-config
@@ -351,7 +351,7 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:instruction :string]
-    [:reads [:vector :string]]
+    [:reads [:vector :keyword]]
     [:model {:optional true} :string]]
 
    :sheet/set-repl-researcher-config
@@ -359,8 +359,8 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:instruction :string]                              ;; Research goal/question
-    [:reads [:vector :string]]                          ;; Blackboard keys (metadata only shown to LLM)
-    [:writes [:vector :string]]                         ;; Output keys (final-answer, iterations, etc.)
+    [:reads [:vector :keyword]]                         ;; Blackboard keys (metadata only shown to LLM)
+    [:writes [:vector :keyword]]                        ;; Output keys (final-answer, iterations, etc.)
     [:mcp-tools [:vector :string]]                      ;; Available MCP tool names
     [:model {:optional true} :string]                   ;; OpenRouter model ID
     [:max-iterations {:optional true} :int]]            ;; Default 10
@@ -372,25 +372,25 @@
    :sheet/declare-key
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:schema :any]]  ;; Malli schema EDN
 
    :sheet/update-key-schema
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:schema :any]]  ;; New Malli schema EDN
 
    :sheet/set-key-value
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:value :any]]
 
    :sheet/delete-key
    [:map
     [:sheet-id :uuid]
-    [:key :string]]
+    [:key :keyword]]
 
    ;; -------------------------------------------------------------------------
    ;; Judge Commands
@@ -431,7 +431,7 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:tick-id {:optional true} :uuid]
-    [:overrides {:optional true} [:map-of :string :any]]]
+    [:overrides {:optional true} [:map-of :keyword :any]]]
 
    :sheet/cancel-tick
    [:map
@@ -445,9 +445,9 @@
     [:tick-id :uuid]
     [:node-id :uuid]
     [:status [:enum :success :failure]]
-    [:writes [:map-of :string :any]]
+    [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
-    [:inputs {:optional true} [:map-of :string :any]]]
+    [:inputs {:optional true} [:map-of :keyword :any]]]
 
    :sheet/fail-node-execution
    [:map
@@ -609,10 +609,10 @@
    [:map
     [:sheet-id :uuid]
     [:node-id :uuid]
-    [:reads [:vector :string]]
-    [:writes [:vector :string]]
-    [:previous-reads {:optional true} [:vector :string]]
-    [:previous-writes {:optional true} [:vector :string]]]
+    [:reads [:vector :keyword]]
+    [:writes [:vector :keyword]]
+    [:previous-reads {:optional true} [:vector :keyword]]
+    [:previous-writes {:optional true} [:vector :keyword]]]
 
    :sheet/node-decorators-set
    [:map
@@ -665,13 +665,13 @@
    [:map
     [:sheet-id :uuid]
     [:node-id :uuid]
-    [:source-key :string]
-    [:item-key :string]
-    [:output-key :string]
+    [:source-key :keyword]
+    [:item-key :keyword]
+    [:output-key :keyword]
     [:max-concurrency {:optional true} :int]
-    [:previous-source-key {:optional true} :string]
-    [:previous-item-key {:optional true} :string]
-    [:previous-output-key {:optional true} :string]
+    [:previous-source-key {:optional true} :keyword]
+    [:previous-item-key {:optional true} :keyword]
+    [:previous-output-key {:optional true} :keyword]
     [:previous-max-concurrency {:optional true} :int]]
 
    :sheet/llm-condition-config-set
@@ -679,10 +679,10 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:instruction :string]
-    [:reads [:vector :string]]
+    [:reads [:vector :keyword]]
     [:model {:optional true} :string]
     [:previous-instruction {:optional true} :string]
-    [:previous-reads {:optional true} [:vector :string]]
+    [:previous-reads {:optional true} [:vector :keyword]]
     [:previous-model {:optional true} :string]]
 
    :sheet/repl-researcher-config-set
@@ -690,14 +690,14 @@
     [:sheet-id :uuid]
     [:node-id :uuid]
     [:instruction :string]
-    [:reads [:vector :string]]
-    [:writes [:vector :string]]
+    [:reads [:vector :keyword]]
+    [:writes [:vector :keyword]]
     [:mcp-tools [:vector :string]]
     [:model {:optional true} :string]
     [:max-iterations {:optional true} :int]
     [:previous-instruction {:optional true} :string]
-    [:previous-reads {:optional true} [:vector :string]]
-    [:previous-writes {:optional true} [:vector :string]]
+    [:previous-reads {:optional true} [:vector :keyword]]
+    [:previous-writes {:optional true} [:vector :keyword]]
     [:previous-mcp-tools {:optional true} [:vector :string]]
     [:previous-model {:optional true} :string]
     [:previous-max-iterations {:optional true} :int]]
@@ -709,20 +709,20 @@
    :sheet/key-declared
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:schema :any]]  ;; Malli schema EDN
 
    :sheet/key-schema-updated
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:schema :any]
     [:previous-schema {:optional true} :any]]
 
    :sheet/key-value-set
    [:map
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:value :any]
     [:previous-value {:optional true} :any]
     [:version :int]]
@@ -730,7 +730,7 @@
    :sheet/key-deleted
    [:map
     [:sheet-id :uuid]
-    [:key :string]]
+    [:key :keyword]]
 
    ;; -------------------------------------------------------------------------
    ;; Judge Events
@@ -774,7 +774,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:inputs [:map-of :string :any]]]
+    [:inputs [:map-of :keyword :any]]]
 
    :sheet/node-execution-completed
    [:map
@@ -782,9 +782,9 @@
     [:tick-id :uuid]
     [:node-id :uuid]
     [:status [:enum :success :failure :running]]
-    [:writes {:optional true} [:map-of :string :any]]
+    [:writes {:optional true} [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
-    [:inputs {:optional true} [:map-of :string :any]]]
+    [:inputs {:optional true} [:map-of :keyword :any]]]
 
    :sheet/tree-tick-completed
    [:map
@@ -799,7 +799,7 @@
    [:map
     [:tick-id :uuid]
     [:sheet-id :uuid]
-    [:key :string]
+    [:key :keyword]
     [:value :any]]
 
    :sheet/tick-cancelled
@@ -1150,7 +1150,7 @@
 (defschemas read-models
   {:sheet/sheets       [:map-of :uuid ::sheet]
    :sheet/nodes        [:map-of :uuid ::node]
-   :sheet/blackboard   [:map-of :string ::blackboard-entry]
+   :sheet/blackboard   [:map-of :keyword ::blackboard-entry]
    :sheet/judges       [:map-of :string :map]
    :sheet/ticks        [:map-of :uuid :map]
    :sheet/versions     [:map-of :uuid [:map-of :int ::version-snapshot]]

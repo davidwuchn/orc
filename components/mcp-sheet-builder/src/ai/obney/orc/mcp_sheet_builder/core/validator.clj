@@ -118,5 +118,5 @@
                  (sheet/sequence "main"
                    (sheet/code "call-searchDocs"
                      :fn "..."
-                     :reads ["query"]
-                     :writes ["searchDocs-result"])))}))
+                     :reads [:query]
+                     :writes [:searchDocs-result])))}))

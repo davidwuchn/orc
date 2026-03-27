@@ -159,8 +159,8 @@
                                     :name "researcher"
                                     :model (or (:model opts) "google/gemini-2.5-flash")
                                     :instruction instruction
-                                    :reads ["question"]
-                                    :writes ["answer"]
+                                    :reads [:question]
+                                    :writes [:answer]
                                     :mcp-tools tool-names
                                     :max-iterations (or (:max-iterations opts) 5)}}
 

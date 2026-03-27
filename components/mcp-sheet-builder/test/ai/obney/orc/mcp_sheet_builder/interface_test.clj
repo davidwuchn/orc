@@ -200,8 +200,8 @@
                :children [{:node-type :leaf
                            :executor :code
                            :fn "mcp.executors.dynamic.t1234/call-searchDocs"
-                           :reads ["query"]
-                           :writes ["result"]}]}})
+                           :reads [:query]
+                           :writes [:result]}]}})
 
 ;; Dynamic var for temp directory in tests
 (def ^:dynamic *test-dir* nil)
@@ -293,7 +293,7 @@
         (is (re-find #"\{:keys \[inputs context\]\}" content)
             "Should have standard executor signature")
         ;; Should extract parameters from inputs
-        (is (re-find #"get inputs \"query\"" content)
+        (is (re-find #"get inputs :query" content)
             "Should extract query parameter from inputs")))))
 
 ;; ============================================================================
@@ -351,8 +351,8 @@
                             :root-node {:node-type :leaf
                                         :executor :code
                                         :fn "mcp.executors.dynamic.t1234/call-searchDocs"
-                                        :reads ["query"]
-                                        :writes ["result"]}}]
+                                        :reads [:query]
+                                        :writes [:result]}}]
       (msb/export-portable-sheet! workflow-with-fn
                                   sample-executor-defs
                                   dir
@@ -423,13 +423,13 @@
                                         :children [{:node-type :leaf
                                                     :executor :code
                                                     :fn "mcp.executors.dynamic.t1234/call-searchDocs"
-                                                    :reads ["query"]
-                                                    :writes ["intermediate"]}
+                                                    :reads [:query]
+                                                    :writes [:intermediate]}
                                                    {:node-type :leaf
                                                     :executor :code
                                                     :fn "mcp.executors.dynamic.t5678/call-getPage"
-                                                    :reads ["intermediate"]
-                                                    :writes ["result"]}]}}]
+                                                    :reads [:intermediate]
+                                                    :writes [:result]}]}}]
       (msb/export-portable-sheet! complex-workflow
                                   sample-executor-defs
                                   dir
