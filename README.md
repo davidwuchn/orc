@@ -121,13 +121,9 @@ Commands -> Events -> Read Models -> Queries
 # Clone
 git clone git@github.com:ObneyAI/orc.git && cd orc
 
-# Start nREPL
-clj -J--add-opens=java.base/java.nio=ALL-UNNAMED \
-    -J--add-opens=java.base/sun.nio.ch=ALL-UNNAMED \
-    -M:dev -m nrepl.cmdline --port 7888
+# Start nREPL (includes JVM flags for LMDB)
+./scripts/nrepl.sh
 ```
-
-The JVM `--add-opens` flags are required for LMDB (read model cache). They're already configured in the `:poly` alias for test runs.
 
 ### Running Tests
 
