@@ -1,5 +1,0 @@
-{:paths ["src" "resources"]
- :deps {software.amazon.awssdk/s3 {:mvn/version "2.32.26"}}
- :aliases {:test {:extra-paths ["test"]
-                  :extra-deps {}}}}
-

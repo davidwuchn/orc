@@ -5,31 +5,34 @@ description: Implement event-driven side effects that react to domain events
 
 # Grain Todo Processor Pattern
 
-Todo processors are policies that react to domain events and emit follow-up events.
+Todo processors are policies that react to domain events and emit follow-up events or perform side effects.
 
 ## Required Imports
 
 ```clojure
-(ns my.service.core.todo-processors
-  (:require [my.service.interface.read-models :as rm]
-            [ai.obney.grain.event-store-v2.interface :refer [->event]]
+(ns ai.obney.orc.my-service.core.todo-processors
+  (:require [ai.obney.orc.my-service.core.read-models :as rm]
+            [ai.obney.grain.event-store-v3.interface :refer [->event]]
+            [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]))
 ```
 
 ## Processor Template
 
 ```clojure
-(defn processor-name
+(defprocessor :ns processor-name
+  {:topics #{:ns/triggering-event}}
   "Docstring explaining what this processor does and when."
-  [{:keys [event event-store]}]
-  (let [entity-id (:entity-id event)
+  [context]
+  (let [event (:event context)
+        entity-id (:entity-id event)
         ;; Check current state using read models
-        entity (rm/get-entity event-store entity-id)]
+        entity (rm/get-entity context entity-id)]
     (if (should-take-action? entity)
       ;; Emit follow-up events
       {:result/events
        [(->event
-         {:type :namespace/follow-up-action
+         {:type :ns/follow-up-action
           :tags #{[:entity entity-id]}
           :body {:entity-id entity-id
                  :triggered-by (:event/type event)
@@ -38,11 +41,19 @@ Todo processors are policies that react to domain events and emit follow-up even
       {})))
 ```
 
+The generated var name is `ns-processor-name` (e.g., `(defprocessor :crm ensure-attribution ...)` creates var `crm-ensure-attribution`).
+
 ## Return Patterns
 
-### Emit Events
+### Emit Events (pure -- batch checkpointed)
 ```clojure
 {:result/events [event1 event2]}
+```
+
+### Side Effect with Checkpoint Control
+```clojure
+{:result/effect (fn [] (send-email! ...))
+ :result/checkpoint :after}  ;; or :before
 ```
 
 ### No Action
@@ -50,29 +61,36 @@ Todo processors are policies that react to domain events and emit follow-up even
 {}
 ```
 
-## Registry Structure
+## Auto-Registration
+
+`defprocessor` registers the processor in a global registry automatically. There is no manual registry map (`def todo-processors`) needed. The control plane discovers processors from the registry and starts them when a tenant is assigned to the node.
+
+**Interface.clj** only needs a bare side-effect require to load the namespace:
 
 ```clojure
-(def todo-processors
-  {:namespace/processor-name
-   {:handler-fn #'processor-function
-    :topics [:triggering/event-type]}
+(ns ai.obney.orc.my-service.interface
+  (:require ;; Side-effect requires
+            [ai.obney.orc.my-service.core.commands]
+            [ai.obney.orc.my-service.core.queries]
+            [ai.obney.orc.my-service.core.todo-processors]  ;; bare require, no alias
+            ...))
 
-   :namespace/another-processor
-   {:handler-fn #'another-function
-    :topics [:first/event-type :second/event-type]}})
+;; No todo-processors re-export needed
 ```
+
+No wiring in web-api `core.clj` is needed -- the control plane discovers processors from the global registry.
 
 ## Common Use Cases
 
 ### Ensure Default Value
 
 ```clojure
-(defn ensure-attribution
+(defprocessor :crm ensure-attribution
+  {:topics #{:crm/contact-created}}
   "Record default attribution if none exists."
-  [{:keys [event event-store]}]
-  (let [contact-id (:contact-id event)
-        existing (rm/get-contact event-store contact-id)]
+  [context]
+  (let [{:keys [contact-id]} (:event context)
+        existing (rm/get-contact context contact-id)]
     (if (:attribution existing)
       {}  ;; Already has attribution
       {:result/events
@@ -87,12 +105,13 @@ Todo processors are policies that react to domain events and emit follow-up even
 ### Duplicate Detection
 
 ```clojure
-(defn check-for-duplicates
+(defprocessor :crm check-for-duplicates
+  {:topics #{:crm/contact-created}}
   "Check for duplicates when contact is created."
-  [{:keys [event event-store]}]
-  (let [contact-id (:contact-id event)
-        email (normalize-email (get-in event [:field-values :email]))
-        existing (rm/get-contacts-by-email event-store email)]
+  [context]
+  (let [{:keys [contact-id]} (:event context)
+        email (normalize-email (get-in (:event context) [:field-values :email]))
+        existing (rm/get-contacts-by-email context email)]
     (if (seq (remove #(= contact-id (:id %)) existing))
       {:result/events
        [(->event
@@ -107,11 +126,12 @@ Todo processors are policies that react to domain events and emit follow-up even
 ### Cascade Operations
 
 ```clojure
-(defn end-relationships-on-archive
+(defprocessor :crm end-relationships-on-archive
+  {:topics #{:crm/contact-archived}}
   "End all relationships when contact is archived."
-  [{:keys [event event-store]}]
-  (let [contact-id (:contact-id event)
-        rels (rm/get-relationships-for-contact event-store contact-id)
+  [context]
+  (let [{:keys [contact-id]} (:event context)
+        rels (rm/get-relationships-for-contact context contact-id)
         active-rels (filter #(nil? (:end-date %)) rels)]
     (if (seq active-rels)
       {:result/events
@@ -129,11 +149,12 @@ Todo processors are policies that react to domain events and emit follow-up even
 ### Transform Source Data
 
 ```clojure
-(defn record-lead-attribution
+(defprocessor :crm record-lead-attribution
+  {:topics #{:crm/lead-captured}}
   "Map lead form type to attribution source."
-  [{:keys [event]}]
-  (let [contact-id (:contact-id event)
-        source (case (:form-type event)
+  [context]
+  (let [{:keys [contact-id form-type form-id]} (:event context)
+        source (case form-type
                  :application :application_form
                  :intake :intake_form
                  :interest :interest_form
@@ -144,40 +165,15 @@ Todo processors are policies that react to domain events and emit follow-up even
         :tags #{[:contact contact-id]}
         :body {:contact-id contact-id
                :attribution {:source source
-                             :form-id (:form-id event)}}})]}))
-```
-
-## Complete Registry Example
-
-```clojure
-(def todo-processors
-  {:crm/ensure-attribution
-   {:handler-fn #'ensure-attribution
-    :topics [:crm/contact-created]}
-
-   :crm/check-for-duplicates
-   {:handler-fn #'check-for-duplicates
-    :topics [:crm/contact-created]}
-
-   :crm/record-lead-attribution
-   {:handler-fn #'record-lead-attribution
-    :topics [:crm/lead-captured]}
-
-   :crm/end-relationships-on-archive
-   {:handler-fn #'end-relationships-on-archive
-    :topics [:crm/contact-archived]}
-
-   :crm/transfer-on-merge
-   {:handler-fn #'transfer-relationships-on-merge
-    :topics [:crm/contact-merged]}})
+                             :form-id form-id}}})]}))
 ```
 
 ## Conventions
 
-- Processors receive `{:keys [event event-store]}`
+- Processors receive a context map with `:event`, `:event-store`, `:tenant-id`
 - Use read models to check current state before acting
 - Return `{:result/events [...]}` or `{}` (empty map)
-- One processor can listen to multiple topics
+- One processor can listen to multiple topics via the `:topics` set
 - Multiple processors can listen to the same topic
 - Normalize data before comparison (email lowercase, phone digits only)
 - Include reason/context in generated events for audit trail

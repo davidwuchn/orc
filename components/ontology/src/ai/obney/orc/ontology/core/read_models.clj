@@ -1,0 +1,598 @@
+(ns ai.obney.orc.ontology.core.read-models
+  "Ontology read models - projections built from events.
+
+   Following the crm-service pattern:
+   - Event type sets for efficient querying
+   - Multimethod projections for each entity type
+   - Helper functions for common queries (via rmp/project)
+
+   Three main projections:
+   1. concepts - Ontology concept graph with relationships
+   2. tree-profiles - Per-tree strengths, weaknesses, problem mappings
+   3. node-experiences - Aggregated patterns by node type"
+  (:require [ai.obney.grain.read-model-processor-v2.interface :as rmp :refer [defreadmodel]]
+            [clojure.set :as set]))
+
+;; =============================================================================
+;; Event Type Sets
+;; =============================================================================
+
+(def ontology-events
+  "Events that affect the ontology lifecycle"
+  #{:ontology/ontology-created})
+
+(def concept-events
+  "Events that affect the concept graph read model"
+  #{:ontology/concept-created
+    :ontology/concept-updated
+    :ontology/relationship-created})
+
+(def tree-profile-events
+  "Events that affect tree profile read model"
+  #{:ontology/tree-strength-recorded
+    :ontology/tree-weakness-recorded
+    :ontology/tree-problem-mapping-created
+    :ontology/tree-problem-mapping-updated
+    :ontology/domain-knowledge-added})
+
+(def node-learning-events
+  "Events that affect node-level learning read model"
+  #{:ontology/node-pattern-learned})
+
+(def discovery-events
+  "Events for ontology discovery/extension"
+  #{:ontology/failure-subtype-discovered})
+
+(def all-ontology-events
+  "All events for full ontology reconstruction"
+  (set/union ontology-events
+             concept-events
+             tree-profile-events
+             node-learning-events
+             discovery-events))
+
+;; =============================================================================
+;; Concepts Projection
+;; =============================================================================
+;; Builds the concept graph with broader/narrower/related relationships
+
+(defmulti concepts*
+  "Apply event to concepts read model.
+   State: {uri -> concept-map}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod concepts* :ontology/concept-created
+  [state event]
+  (assoc state (:uri event)
+         {:uri (:uri event)
+          :id (:concept-id event)
+          :ontology-id (:ontology-id event)
+          :label (:label event)
+          :description (:description event)
+          :scope (:scope event)
+          :broader (set (or (:broader event) []))
+          :narrower #{}
+          :related #{}
+          :indicators (or (:indicators event) [])
+          :created-at (str (:created-at event))}))
+
+(defmethod concepts* :ontology/concept-updated
+  [state event]
+  (if-let [concept (get state (some-> event :concept-id str))]
+    (update state (:uri concept) merge (:changes event))
+    state))
+
+(defmethod concepts* :ontology/relationship-created
+  [state event]
+  (let [{:keys [source-uri target-uri predicate]} event]
+    (case predicate
+      "skos:broader"
+      (-> state
+          (update-in [source-uri :broader] (fnil conj #{}) target-uri)
+          (update-in [target-uri :narrower] (fnil conj #{}) source-uri))
+
+      "skos:narrower"
+      (-> state
+          (update-in [source-uri :narrower] (fnil conj #{}) target-uri)
+          (update-in [target-uri :broader] (fnil conj #{}) source-uri))
+
+      "skos:related"
+      (-> state
+          (update-in [source-uri :related] (fnil conj #{}) target-uri)
+          (update-in [target-uri :related] (fnil conj #{}) source-uri))
+
+      ;; Other predicates (owl:causes, etc.) - store as related
+      (-> state
+          (update-in [source-uri :related] (fnil conj #{}) target-uri)))))
+
+(defmethod concepts* :default [state _] state)
+
+(defn concepts
+  "Build concepts graph from events."
+  [initial-state events]
+  (reduce concepts* initial-state events))
+
+(defreadmodel :ontology concepts
+  {:events concept-events, :version 1}
+  [state event] (concepts* state event))
+
+;; =============================================================================
+;; Tree Profiles Projection
+;; =============================================================================
+;; Builds per-tree profiles with strengths, weaknesses, problem mappings
+
+(defmulti tree-profiles*
+  "Apply event to tree profiles read model.
+   State: {tree-id -> profile-map}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod tree-profiles* :ontology/tree-strength-recorded
+  [state event]
+  (let [tree-id (:tree-id event)]
+    (-> state
+        (assoc-in [tree-id :tree-id] tree-id)
+        (update-in [tree-id :strengths]
+                   (fnil conj [])
+                   {:pattern (:pattern-uri event)
+                    :confidence (:confidence event)
+                    :evidence-count (count (:evidence-trace-ids event))
+                    :avg-score (:avg-score event)
+                    :recorded-at (str (:recorded-at event))}))))
+
+(defmethod tree-profiles* :ontology/tree-weakness-recorded
+  [state event]
+  (let [tree-id (:tree-id event)]
+    (-> state
+        (assoc-in [tree-id :tree-id] tree-id)
+        (update-in [tree-id :weaknesses]
+                   (fnil conj [])
+                   {:failure (:failure-uri event)
+                    :subtype (:subtype-uri event)
+                    :frequency (:frequency event)
+                    :severity (:severity event)
+                    :triggers (:triggers event)
+                    :recorded-at (str (:recorded-at event))}))))
+
+(defmethod tree-profiles* :ontology/tree-problem-mapping-created
+  [state event]
+  (let [tree-id (:tree-id event)]
+    (-> state
+        (assoc-in [tree-id :tree-id] tree-id)
+        (update-in [tree-id :solves]
+                   (fnil conj [])
+                   {:problem-uri (:problem-uri event)
+                    :success-rate (:success-rate event)
+                    :execution-count (:execution-count event)
+                    :recorded-at (str (:recorded-at event))}))))
+
+(defmethod tree-profiles* :ontology/tree-problem-mapping-updated
+  [state event]
+  (let [tree-id (:tree-id event)
+        problem-uri (:problem-uri event)]
+    ;; Update the existing mapping for this problem type
+    (update-in state [tree-id :solves]
+               (fn [solves]
+                 (mapv (fn [s]
+                         (if (= problem-uri (:problem-uri s))
+                           {:problem-uri problem-uri
+                            :success-rate (:success-rate event)
+                            :execution-count (:execution-count event)
+                            :updated-at (str (:updated-at event))}
+                           s))
+                       (or solves []))))))
+
+(defmethod tree-profiles* :ontology/domain-knowledge-added
+  [state event]
+  (let [tree-id (:tree-id event)]
+    (-> state
+        (assoc-in [tree-id :tree-id] tree-id)
+        (update-in [tree-id :domain-knowledge]
+                   (fnil conj [])
+                   {:id (:knowledge-id event)
+                    :description (:description event)
+                    :node-id (:node-id event)
+                    :impact-score (:impact-score event)
+                    :added-at (str (:added-at event))}))))
+
+(defmethod tree-profiles* :default [state _] state)
+
+(defn tree-profiles
+  "Build tree profiles from events."
+  [initial-state events]
+  (reduce tree-profiles* initial-state events))
+
+(defreadmodel :ontology tree-profiles
+  {:events tree-profile-events, :version 1}
+  [state event] (tree-profiles* state event))
+
+;; =============================================================================
+;; Node Experiences Projection
+;; =============================================================================
+;; Aggregates patterns by node type across all nodes
+
+(defmulti node-experiences*
+  "Apply event to node experiences read model.
+   State: {node-type -> {pattern-type -> {:effective [...] :ineffective [...]}}}
+   Aggregates across all nodes of the same type."
+  (fn [_state event] (:event/type event)))
+
+(defmethod node-experiences* :ontology/node-pattern-learned
+  [state event]
+  (let [node-type (:node-type event)
+        pattern-type (:pattern-type event)
+        category (if (:effective? event) :effective :ineffective)]
+    (update-in state [node-type pattern-type category]
+               (fnil conj [])
+               {:pattern (:pattern-description event)
+                :metrics (:metrics event)
+                :evidence-count (count (:evidence-trace-ids event))
+                :node-id (:node-id event)
+                :sheet-id (:sheet-id event)
+                :learned-at (str (:learned-at event))})))
+
+(defmethod node-experiences* :default [state _] state)
+
+(defn node-experiences
+  "Build node experiences from events (aggregated by node-type)."
+  [initial-state events]
+  (reduce node-experiences* initial-state events))
+
+(defreadmodel :ontology node-experiences
+  {:events node-learning-events, :version 1}
+  [state event] (node-experiences* state event))
+
+;; =============================================================================
+;; Query Helpers
+;; =============================================================================
+
+(defn get-concepts
+  "Get all concepts, optionally filtered by scope."
+  [ctx & [{:keys [scope broader-uri]}]]
+  (let [all-concepts (vals (rmp/project ctx :ontology/concepts))]
+    (cond->> all-concepts
+      scope (filter #(= scope (:scope %)))
+      broader-uri (filter #(contains? (:broader %) broader-uri)))))
+
+(defn get-concept-by-uri
+  "Get a single concept by URI."
+  [ctx uri]
+  (get (rmp/project ctx :ontology/concepts) uri))
+
+(defn get-tree-profile
+  "Get profile for a specific tree."
+  [ctx tree-id]
+  (get (rmp/project ctx :ontology/tree-profiles {:tags #{[:tree tree-id]}}) tree-id))
+
+(defn get-all-tree-profiles
+  "Get all tree profiles."
+  [ctx]
+  (rmp/project ctx :ontology/tree-profiles))
+
+(defn get-node-type-learnings
+  "Get aggregated learnings for a specific node type."
+  [ctx node-type]
+  (get (rmp/project ctx :ontology/node-experiences {:tags #{[:node-type node-type]}}) node-type))
+
+(defn get-all-node-learnings
+  "Get all node learnings aggregated by type."
+  [ctx]
+  (rmp/project ctx :ontology/node-experiences))
+
+(defn find-trees-by-problem
+  "Find trees that solve a specific problem type."
+  [ctx problem-uri]
+  (let [profiles (get-all-tree-profiles ctx)]
+    (->> profiles
+         vals
+         (filter (fn [p]
+                   (some #(= problem-uri (:problem-uri %)) (:solves p)))))))
+
+(defn find-trees-with-weakness
+  "Find trees that have a specific weakness."
+  [ctx failure-uri]
+  (let [profiles (get-all-tree-profiles ctx)]
+    (->> profiles
+         vals
+         (filter (fn [p]
+                   (some #(= failure-uri (:failure %)) (:weaknesses p)))))))
+
+(defn get-narrower-concepts
+  "Get all concepts that are narrower than the given URI."
+  [ctx uri]
+  (get-in (rmp/project ctx :ontology/concepts) [uri :narrower] #{}))
+
+(defn get-broader-concepts
+  "Get all concepts that are broader than the given URI."
+  [ctx uri]
+  (get-in (rmp/project ctx :ontology/concepts) [uri :broader] #{}))
+
+;; =============================================================================
+;; Statistics
+;; =============================================================================
+
+(defn concept-statistics
+  "Get statistics about the concept graph."
+  [ctx]
+  (let [concept-graph (rmp/project ctx :ontology/concepts)
+        by-scope (group-by :scope (vals concept-graph))]
+    {:total-concepts (count concept-graph)
+     :by-scope (into {} (map (fn [[k v]] [k (count v)]) by-scope))
+     :with-indicators (count (filter #(seq (:indicators %)) (vals concept-graph)))}))
+
+(defn tree-profile-statistics
+  "Get statistics about tree profiles."
+  [ctx]
+  (let [profiles (get-all-tree-profiles ctx)]
+    {:total-profiles (count profiles)
+     :with-strengths (count (filter #(seq (:strengths %)) (vals profiles)))
+     :with-weaknesses (count (filter #(seq (:weaknesses %)) (vals profiles)))
+     :with-problem-mappings (count (filter #(seq (:solves %)) (vals profiles)))}))
+
+(defn node-learning-statistics
+  "Get statistics about node learning."
+  [ctx]
+  (let [learnings (get-all-node-learnings ctx)]
+    {:node-types-with-learnings (count learnings)
+     :by-node-type (into {}
+                         (for [[node-type patterns] learnings]
+                           [node-type
+                            {:pattern-types (count patterns)
+                             :total-patterns (reduce + 0
+                                                     (for [[_ {:keys [effective ineffective]}] patterns]
+                                                       (+ (count effective) (count ineffective))))}]))}))
+
+;; =============================================================================
+;; Embedding Projections (Phase 4)
+;; =============================================================================
+
+(def embedding-events
+  "Events that affect embedding read models"
+  #{:ontology/concept-embedded
+    :ontology/tree-profile-embedded
+    :ontology/evaluation-embedded
+    :ontology/embedding-model-configured})
+
+(defmulti concept-embeddings*
+  "Apply event to concept embeddings read model.
+   State: {uri -> {:embedding [...] :text-embedded ... :model-id ...}}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod concept-embeddings* :ontology/concept-embedded
+  [state event]
+  (assoc state (:uri event)
+         {:uri (:uri event)
+          :concept-id (:concept-id event)
+          :embedding (:embedding event)
+          :text-embedded (:text-embedded event)
+          :field-source (:field-source event)
+          :model-id (:model-id event)
+          :embedded-at (str (:embedded-at event))}))
+
+(defmethod concept-embeddings* :default [state _] state)
+
+(defn concept-embeddings
+  "Build concept embeddings from events."
+  [initial-state events]
+  (reduce concept-embeddings* initial-state events))
+
+(defreadmodel :ontology concept-embeddings
+  {:events #{:ontology/concept-embedded}, :version 1}
+  [state event] (concept-embeddings* state event))
+
+(defmulti tree-profile-embeddings*
+  "Apply event to tree profile embeddings read model.
+   State: {tree-id -> {:embedding [...] :text-embedded ...}}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod tree-profile-embeddings* :ontology/tree-profile-embedded
+  [state event]
+  (assoc state (:tree-id event)
+         {:tree-id (:tree-id event)
+          :embedding (:embedding event)
+          :text-embedded (:text-embedded event)
+          :model-id (:model-id event)
+          :embedded-at (str (:embedded-at event))}))
+
+(defmethod tree-profile-embeddings* :default [state _] state)
+
+(defn tree-profile-embeddings
+  "Build tree profile embeddings from events."
+  [initial-state events]
+  (reduce tree-profile-embeddings* initial-state events))
+
+(defreadmodel :ontology tree-profile-embeddings
+  {:events #{:ontology/tree-profile-embedded}, :version 1}
+  [state event] (tree-profile-embeddings* state event))
+
+(defmulti embedding-config*
+  "Apply event to embedding config read model.
+   State: {scope -> {:model-id ... :dimensions ...}}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod embedding-config* :ontology/embedding-model-configured
+  [state event]
+  (assoc state (:scope event)
+         {:model-id (:model-id event)
+          :dimensions (:dimensions event)
+          :configured-at (str (:configured-at event))}))
+
+(defmethod embedding-config* :default [state _] state)
+
+(defn embedding-config
+  "Build embedding configuration from events."
+  [initial-state events]
+  (reduce embedding-config* initial-state events))
+
+(defreadmodel :ontology embedding-config
+  {:events #{:ontology/embedding-model-configured}, :version 1}
+  [state event] (embedding-config* state event))
+
+;; =============================================================================
+;; Embedding Query Helpers
+;; =============================================================================
+
+(defn get-concept-embedding
+  "Get embedding for a specific concept by URI."
+  [ctx uri]
+  (get (rmp/project ctx :ontology/concept-embeddings {:tags #{[:uri uri]}}) uri))
+
+(defn get-all-concept-embeddings
+  "Get all concept embeddings, optionally filtered by scope."
+  [ctx & [{:keys [scope]}]]
+  (if scope
+    (rmp/project ctx :ontology/concept-embeddings {:tags #{[:scope scope]}})
+    (rmp/project ctx :ontology/concept-embeddings)))
+
+(defn get-tree-profile-embedding
+  "Get embedding for a specific tree profile."
+  [ctx tree-id]
+  (get (rmp/project ctx :ontology/tree-profile-embeddings {:tags #{[:tree tree-id]}}) tree-id))
+
+(defn get-all-tree-profile-embeddings
+  "Get all tree profile embeddings."
+  [ctx]
+  (rmp/project ctx :ontology/tree-profile-embeddings))
+
+(defn get-embedding-config
+  "Get embedding model configuration for a scope."
+  [ctx scope]
+  (get (rmp/project ctx :ontology/embedding-config {:tags #{[:scope scope]}}) scope))
+
+(defn embedding-statistics
+  "Get statistics about embeddings."
+  [ctx]
+  (let [embeddings (rmp/project ctx :ontology/concept-embeddings)
+        profile-embs (rmp/project ctx :ontology/tree-profile-embeddings)
+        configs (rmp/project ctx :ontology/embedding-config)]
+    {:concept-embeddings-count (count embeddings)
+     :tree-profile-embeddings-count (count profile-embs)
+     :configured-scopes (keys configs)
+     :by-model (frequencies (map :model-id (vals embeddings)))}))
+
+;; =============================================================================
+;; Ontology-ColBERT Index Mapping (Phase 7 Evolutionary Integration)
+;; =============================================================================
+
+(def ontology-colbert-events
+  "Events that track ontology-to-ColBERT index mappings."
+  #{:evolutionary/colbert-indexed
+    :evolutionary/colbert-index-updated})
+
+(defn- ontology-colbert-indexes*
+  "Reducer for ontology-colbert-indexes read model.
+   Tracks which ColBERT index is associated with each ontology."
+  [state {:keys [type body]}]
+  (case type
+    :evolutionary/colbert-indexed
+    (assoc state (:ontology-id body)
+           {:colbert-index-id (:index-id body)
+            :index-name (:index-name body)
+            :colbert-fields (vec (:colbert-fields body))
+            :document-count (:document-count body)
+            :indexed-at (:indexed-at body)})
+
+    :evolutionary/colbert-index-updated
+    (update state (:ontology-id body) merge
+            {:colbert-index-id (:index-id body)
+             :updated-at (:updated-at body)})
+
+    ;; Pass through unchanged
+    state))
+
+(defreadmodel :ontology ontology-colbert-indexes
+  {:events ontology-colbert-events :version 1}
+  [state event] (ontology-colbert-indexes* state event))
+
+;; =============================================================================
+;; Ontology-ColBERT Query Helpers
+;; =============================================================================
+
+(defn get-colbert-index-for-ontology
+  "Get the ColBERT index-id and metadata associated with an ontology.
+
+   Returns nil if no ColBERT index exists for this ontology."
+  [ctx ontology-id]
+  (get (rmp/project ctx :ontology/ontology-colbert-indexes
+                    {:tags #{[:ontology ontology-id]}})
+       ontology-id))
+
+(defn list-ontology-colbert-indexes
+  "List all ontology-to-ColBERT index mappings."
+  [ctx]
+  (rmp/project ctx :ontology/ontology-colbert-indexes))
+
+;; =============================================================================
+;; Ontology-Embedding State (Phase 8 Evolutionary Integration - RRF Support)
+;; =============================================================================
+
+(def ontology-embedding-events
+  "Events that track ontology embedding state."
+  #{:evolutionary/concepts-embedded
+    :evolutionary/concepts-embedding-updated})
+
+(defn- ontology-embedding-state*
+  "Reducer for ontology-embedding-state read model.
+   Tracks which concepts have been embedded for each ontology."
+  [state {:keys [type body]}]
+  (case type
+    :evolutionary/concepts-embedded
+    (assoc state (:ontology-id body)
+           {:embedded? true
+            :build-id (:build-id body)
+            :embedded-count (:embedded-count body)
+            :embedding-fields (vec (:embedding-fields body))
+            :model-id (:model-id body)
+            :embedded-at (:embedded-at body)})
+
+    :evolutionary/concepts-embedding-updated
+    (update state (:ontology-id body)
+            (fn [existing]
+              (merge existing
+                     {:embedded? true
+                      :embedded-count (:total-embedded-count body)
+                      :embedding-fields (vec (:embedding-fields body))
+                      :updated-at (:updated-at body)})))
+
+    ;; Pass through unchanged
+    state))
+
+(defreadmodel :ontology ontology-embedding-state
+  {:events ontology-embedding-events :version 1}
+  [state event] (ontology-embedding-state* state event))
+
+;; =============================================================================
+;; Ontology-Embedding Query Helpers
+;; =============================================================================
+
+(defn get-embedding-state-for-ontology
+  "Get the embedding state for an ontology.
+
+   Returns nil if no embeddings exist for this ontology.
+   Returns map with:
+     {:embedded? true
+      :embedded-count N
+      :embedding-fields [:label :description ...]
+      :model-id \"...\"
+      :embedded-at \"...\"}"
+  [ctx ontology-id]
+  (get (rmp/project ctx :ontology/ontology-embedding-state
+                    {:tags #{[:ontology ontology-id]}})
+       ontology-id))
+
+(defn ontology-has-embeddings?
+  "Check if an ontology has been embedded (ready for RRF search)."
+  [ctx ontology-id]
+  (boolean (:embedded? (get-embedding-state-for-ontology ctx ontology-id))))
+
+(defn list-ontology-embedding-states
+  "List all ontology embedding states."
+  [ctx]
+  (rmp/project ctx :ontology/ontology-embedding-state))
+
+(defn get-embedded-ontologies
+  "Get all ontology-ids that have embeddings."
+  [ctx]
+  (->> (list-ontology-embedding-states ctx)
+       (filter (fn [[_id state]] (:embedded? state)))
+       (map first)
+       set))

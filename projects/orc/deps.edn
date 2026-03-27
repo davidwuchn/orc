@@ -1,0 +1,16 @@
+{:paths []
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}
+
+        obneyai/grain-core-v2 {:git/url "https://github.com/ObneyAI/grain.git"
+                               :git/sha "0f8b404ffac9f20ce477f903eee1a74ecf01bd83"
+                               :deps/root "projects/grain-core-v2"}
+
+        orc/orc-service       {:local/root "../../components/orc-service"}
+        orc/gepa              {:local/root "../../components/gepa"}
+        orc/evaluation        {:local/root "../../components/evaluation"}
+        orc/colbert           {:local/root "../../components/colbert"}
+        orc/ontology          {:local/root "../../components/ontology"}
+        orc/mcp-sheet-builder {:local/root "../../components/mcp-sheet-builder"}}
+
+ :aliases {:test {:extra-paths []
+                  :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}}}}}

@@ -1,4 +1,0 @@
-dspy==3.0.3
-litellm==1.75.3
-litellm[proxy]==1.75.3
-sentence-transformers>=2.2.0

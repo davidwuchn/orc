@@ -1,147 +1,80 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
-This is a Clojure/ClojureScript full-stack application using the **Polylith** architecture with the **Grain** framework for event sourcing. The top-level namespace is `ai.obney.workshop`.
+ORC (Orchestrated Research Chains) is a behavior-tree-based workflow execution engine built on the Grain event-sourcing framework. It provides composable primitives for building, optimizing, and evaluating LLM-powered workflows.
 
-## Build & Development Commands
+**Top namespace**: `ai.obney.orc`
 
-### Backend (Clojure)
+This is a **library** — no web layer, no auth, no database config. Consumers pull it in as a git dep and provide their own Grain infrastructure (event store, cache, web server).
 
-```bash
-# Start nREPL server (port 7888 default)
-./scripts/nrepl.sh
-./scripts/nrepl.sh 8888   # custom port
+## Components
 
-# Start services via Docker (PostgreSQL + LocalStack)
-docker-compose up -d
-
-# Start the backend service
-# 1. Connect to REPL
-# 2. Evaluate development/src/repl_stuff.clj
-# 3. Evaluate the `do` form on line 10 to start
-
-# Create a new Grain service component
-bb scripts/create_component.bb <component-name>
-
-# Run Polylith commands
-clojure -M:poly <command>
-```
-
-### Frontend (ClojureScript)
-
-```bash
-cd ui/web-app
-
-npm install              # Install dependencies
-npm run dev              # Development server (port 8080)
-npm run build:dev        # Build for local backend
-npm run build:staging    # Build for staging
-npm run build:prod       # Build for production
-```
+| Component | Purpose |
+|-----------|---------|
+| **orc-service** | Core behavior tree execution engine, DSL for workflow building, event-sourced state |
+| **gepa** | LLM instruction optimization with Pareto frontier selection |
+| **evaluation** | LLM-as-judge evaluation with grounding, reasoning, completeness judges |
+| **colbert** | Late-interaction retrieval via Python ColBERT bridge |
+| **ontology** | Three-layer concept graph with embeddings and pattern discovery |
+| **mcp-sheet-builder** | Dynamic workflow generation from MCP tool schemas |
 
 ## Architecture
 
-### Polylith Structure
+Built on **Grain v2** (event sourcing + CQRS):
+- `defcommand` — validate and emit events
+- `defreadmodel` — project events into queryable state
+- `defquery` — compose read models, return data
+- `defprocessor` — event-driven side effects (auto-registered)
+- `defperiodic` — scheduled trigger events (auto-registered)
 
-- **bases/**: Entry points (web-api)
-- **components/**: Business logic modules with interface/core separation
-- **projects/**: Deployable artifacts
-- **development/**: REPL development environment
-- **ui/web-app/**: ClojureScript frontend
+## Development Setup
 
-### Grain Framework (Event Sourcing)
-
-The backend uses Grain, an event-sourcing framework. Key concepts:
-
-- **Commands**: Validate and emit events (`defcommand`)
-- **Queries**: Read from event-sourced read models (`defquery`)
-- **Events**: Immutable facts created with `->event`
-- **Read Models**: Reduce events into queryable state (multimethod + reducer)
-- **Todo Processors**: React to events and emit follow-up events
-- **Schemas**: Malli schemas registered with `defschemas`
-
-### Component Pattern
-
-Each service component follows this structure:
+```bash
+# Start nREPL
+clj -M:dev -m nrepl.cmdline --port 7888
 ```
-components/service-name/
-├── src/ai/obney/workshop/service_name/
-│   ├── interface.clj           # Public API
-│   ├── interface/schemas.clj   # Malli schemas
+
+## Running Tests
+
+```bash
+clj -M:poly test                    # changed bricks only
+clj -M:poly test :all-bricks        # all bricks
+clj -M:poly test brick:orc-service  # specific brick
+```
+
+## Consumer Usage
+
+Add to your project's `deps.edn`:
+
+```clojure
+obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
+             :git/sha "..."
+             :deps/root "projects/orc"}
+```
+
+Then require components:
+
+```clojure
+(require '[ai.obney.orc.orc-service.interface :as orc])
+(require '[ai.obney.orc.gepa.interface :as gepa])
+```
+
+## Polylith Structure
+
+```
+components/{service}/
+├── src/ai/obney/orc/{service}/
+│   ├── interface.clj              # Public API
+│   ├── interface/schemas.clj      # Malli schemas
 │   └── core/
-│       ├── commands.clj        # Command handlers
-│       ├── queries.clj         # Query handlers
-│       ├── read_models.clj     # Event projections
-│       └── todo_processors.clj # Event reactions
+│       ├── commands.clj           # defcommand handlers
+│       ├── read_models.clj        # defreadmodel projections
+│       ├── queries.clj            # defquery handlers
+│       └── todo_processors.clj    # defprocessor side effects
+└── test/ai/obney/orc/{service}/
 ```
 
-### Frontend Architecture
+## Skills
 
-- **UIx**: React wrapper for ClojureScript
-- **si-frame/re-frame**: State management
-- **ShadCN**: UI components (compiled from TypeScript to `/gen/`)
-- **Reitit**: Client-side routing
-
-Frontend store structure:
-```
-ui/web-app/src/store/feature/
-├── events.cljs   # Event handlers (reg-event-db, reg-event-fx)
-├── subs.cljs     # Subscriptions (reg-sub)
-└── effects.cljs  # Side effects (reg-fx, API calls)
-```
-
-## Key Patterns
-
-### Command Handler
-```clojure
-(defcommand :namespace command-name
-  [{{:keys [field]} :command :keys [event-store]}]
-  (if (valid?)
-    {:command-result/events [(->event {:type :ns/event-type :tags #{[:entity id]} :body {...}})]}
-    {::anom/category ::anom/not-found ::anom/message "..."}))
-```
-
-### Query Handler
-```clojure
-(defquery :namespace query-name
-  [{{:keys [id]} :query :keys [event-store]}]
-  {:query/result (rm/get-entity event-store id)})
-```
-
-### Read Model
-```clojure
-(defmulti entities* (fn [_state event] (:event/type event)))
-(defmethod entities* :ns/created [state event] (assoc state (:id event) {...}))
-(defmethod entities* :default [state _] state)
-(defn entities [init events] (reduce entities* init events))
-```
-
-### Frontend Component
-```clojure
-(defui component [{:keys [current-match]}]
-  (let [data (use-subscribe [::subs/data])
-        ctx (context/use-context)]
-    (use-effect (fn [] (rf/dispatch [::events/load (:api/client ctx)]) js/undefined) [])
-    ($ :div {:class "..."} ...)))
-```
-
-## Environment
-
-LocalStack emulates AWS services (KMS, S3) locally. Configure in `config.edn`:
-- `:localstack/enabled true` - Use LocalStack
-- `:localstack/endpoint "http://localhost:4566"` - LocalStack URL
-
-## Available Claude Code Skills
-
-Use `/skill-name` to invoke:
-- `/grain-command-handler` - Create command handlers
-- `/grain-query-handler` - Create query handlers
-- `/grain-read-model` - Create read models
-- `/grain-schema` - Define Malli schemas
-- `/grain-todo-processor` - Create event reactors
-- `/grain-ui-component` - Create UIx components
-- `/grain-reframe` - Create re-frame events/subs/effects
-- `/nrepl-connect` - Connect to running nREPL on port 7888
+Use `/grain-command-handler`, `/grain-read-model`, `/grain-query-handler`, `/grain-todo-processor`, `/grain-schema`, `/grain-service` for building new features following established patterns.

@@ -1,52 +1,23 @@
-{:aliases  {:dev {:extra-paths ["development/src" "development/resources"]
+{:aliases {:dev {:extra-paths ["development/src"]
 
-                  :extra-deps {org.clojure/clojure {:mvn/version "1.12.0"}
+                 :extra-deps {org.clojure/clojure {:mvn/version "1.12.0"}
 
-                               clj-http/clj-http {:mvn/version "3.13.1"}
+                              obneyai/grain-core-v2 {:git/url "https://github.com/ObneyAI/grain.git"
+                                                     :git/sha "0f8b404ffac9f20ce477f903eee1a74ecf01bd83"
+                                                     :deps/root "projects/grain-core-v2"}
 
-                               obneyai/grain-core                               {:git/url "https://github.com/ObneyAI/grain.git"
-                                                                                 :sha "452b5c2bcba72e386c81c7a68f5b3774d3d46f09"
-                                                                                 :deps/root "projects/grain-core"}
+                              ;; Components
+                              orc/orc-service       {:local/root "components/orc-service"}
+                              orc/gepa              {:local/root "components/gepa"}
+                              orc/evaluation        {:local/root "components/evaluation"}
+                              orc/colbert           {:local/root "components/colbert"}
+                              orc/ontology          {:local/root "components/ontology"}
+                              orc/mcp-sheet-builder {:local/root "components/mcp-sheet-builder"}
+                              orc/grain-test-utils  {:local/root "components/grain-test-utils"}}}
 
-                               obneyai/grain-event-store-postgres-v2            {:git/url "https://github.com/ObneyAI/grain.git"
-                                                                                 :sha "452b5c2bcba72e386c81c7a68f5b3774d3d46f09"
-                                                                                 :deps/root "projects/grain-event-store-postgres-v2"}
+           :test {:extra-paths []}
 
-                               obneyai/grain-dspy-extensions                    {:git/url "https://github.com/ObneyAI/grain.git"
-                                                                                 :sha "452b5c2bcba72e386c81c7a68f5b3774d3d46f09"
-                                                                                 :deps/root "projects/grain-dspy-extensions"}
-
-                               obneyai/grain-mulog-aws-cloudwatch-emf-publisher {:git/url "https://github.com/ObneyAI/grain.git"
-                                                                                 :sha "452b5c2bcba72e386c81c7a68f5b3774d3d46f09"
-                                                                                 :deps/root "projects/grain-mulog-aws-cloudwatch-emf-publisher"}
-
-                               ;; DJL for sentence embeddings (no Python needed)
-                               ai.djl/api                                        {:mvn/version "0.31.1"}
-                               ai.djl.huggingface/tokenizers                     {:mvn/version "0.31.1"}
-                               ai.djl.pytorch/pytorch-engine                     {:mvn/version "0.31.1"}
-
-                               ;; Foundation Components
-                               poly/email                                       {:local/root "components/email"}
-                               poly/email-ses                                   {:local/root "components/email-ses"}
-                               poly/crypto                                      {:local/root "components/crypto"}
-                               poly/crypto-kms                                  {:local/root "components/crypto-kms"}
-                               poly/jwt                                         {:local/root "components/jwt"}
-                               poly/url-presigner                               {:local/root "components/url-presigner"}
-                               poly/url-presigner-aws                           {:local/root "components/url-presigner-aws"}
-                               poly/file-store                                  {:local/root "components/file-store"}
-                               poly/file-store-s3                               {:local/root "components/file-store-s3"}
-                               poly/langfuse                                    {:local/root "components/langfuse"}
-
-                               ;; Services
-                               poly/user-service                                {:local/root "components/user-service"}
-                               poly/crm-service                                 {:local/root "components/crm-service"}
-                               poly/sheet-service                               {:local/root "components/sheet-service"}
-
-                               ;; Bases
-                               poly/web-api                                     {:local/root "bases/web-api"}}}
-
-            :test {:extra-paths ["components/sheet-service/test"]}
-
-            :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
-                   :extra-deps {polylith/clj-poly {:mvn/version "0.2.22"}}}}}
-
+           :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
+                  :extra-deps {polylith/clj-poly {:mvn/version "0.2.22"}}
+                  :jvm-opts ["--add-opens=java.base/java.nio=ALL-UNNAMED"
+                             "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"]}}}
