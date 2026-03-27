@@ -1,0 +1,2 @@
+# Python dependencies are managed per-feature:
+# ColBERT: ./scripts/setup-colbert.sh

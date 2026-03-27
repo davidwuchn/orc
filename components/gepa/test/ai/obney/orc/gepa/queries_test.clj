@@ -77,7 +77,7 @@
             opt-id (start-optimization! ctx sheet-id)
             cand-id (create-candidate! ctx opt-id
                       {"instruction" "Be helpful"} [nil])
-            result (qry/get-candidate
+            result (qry/gepa-get-candidate
                      (assoc ctx :query {:optimization-id opt-id
                                         :candidate-id cand-id}))]
         (is (contains? result :query/result))
@@ -89,7 +89,7 @@
     (tu/with-test-context [ctx]
       (let [sheet-id (random-uuid)
             opt-id (start-optimization! ctx sheet-id)
-            result (qry/get-candidate
+            result (qry/gepa-get-candidate
                      (assoc ctx :query {:optimization-id opt-id
                                         :candidate-id (random-uuid)}))]
         (is (= ::anom/not-found (::anom/category result))))))
@@ -101,7 +101,7 @@
             cand-id (create-candidate! ctx opt-id
                       {"instruction" "Be helpful"} [nil])
             _ (record-evaluation! ctx opt-id cand-id [0.8 0.9] 2)
-            result (qry/get-candidate
+            result (qry/gepa-get-candidate
                      (assoc ctx :query {:optimization-id opt-id
                                         :candidate-id cand-id}))]
         (is (= :evaluated (get-in result [:query/result :status])))
@@ -117,7 +117,7 @@
       (let [sheet-id (random-uuid)
             opt-id-1 (start-optimization! ctx sheet-id)
             opt-id-2 (start-optimization! ctx sheet-id)
-            result (qry/list-optimizations
+            result (qry/gepa-list-optimizations
                      (assoc ctx :query {:sheet-id sheet-id}))]
         (is (contains? result :query/result))
         (is (= 2 (get-in result [:query/result :total])))
@@ -134,7 +134,7 @@
             _ (record-evaluation! ctx opt-id-1 cand-id [0.8 0.9] 2)
             _ (complete-optimization! ctx opt-id-1)
             ;; Query for completed only
-            result (qry/list-optimizations
+            result (qry/gepa-list-optimizations
                      (assoc ctx :query {:sheet-id sheet-id
                                         :status :completed}))]
         (is (= 1 (get-in result [:query/result :total])))
@@ -147,7 +147,7 @@
             _ (start-optimization! ctx sheet-id)
             _ (start-optimization! ctx sheet-id)
             _ (start-optimization! ctx sheet-id)
-            result (qry/list-optimizations
+            result (qry/gepa-list-optimizations
                      (assoc ctx :query {:sheet-id sheet-id
                                         :limit 2}))]
         (is (= 2 (count (get-in result [:query/result :optimizations]))))
@@ -163,7 +163,7 @@
     (tu/with-test-context [ctx]
       (let [sheet-id (random-uuid)
             opt-id (start-optimization! ctx sheet-id)
-            result (qry/get-optimization-state
+            result (qry/gepa-get-optimization-state
                      (assoc ctx :query {:optimization-id opt-id}))]
         (is (contains? result :query/result))
         (is (= opt-id (get-in result [:query/result :optimization-id])))
@@ -171,7 +171,7 @@
 
   (testing "returns not-found for unknown optimization"
     (tu/with-test-context [ctx]
-      (let [result (qry/get-optimization-state
+      (let [result (qry/gepa-get-optimization-state
                      (assoc ctx :query {:optimization-id (random-uuid)}))]
         (is (= ::anom/not-found (::anom/category result)))))))
 
@@ -186,7 +186,7 @@
             opt-id (start-optimization! ctx sheet-id)
             _ (create-candidate! ctx opt-id {"instruction" "A"} [nil])
             _ (create-candidate! ctx opt-id {"instruction" "B"} [nil])
-            result (qry/get-population
+            result (qry/gepa-get-population
                      (assoc ctx :query {:optimization-id opt-id}))]
         (is (contains? result :query/result))
         (is (= 2 (get-in result [:query/result :total])))
@@ -205,7 +205,7 @@
             cand-2 (create-candidate! ctx opt-id {"instruction" "B"} [nil])
             _ (record-evaluation! ctx opt-id cand-1 [0.5 0.6] 2)
             _ (record-evaluation! ctx opt-id cand-2 [0.8 0.9] 2)
-            result (qry/get-best-candidate
+            result (qry/gepa-get-best-candidate
                      (assoc ctx :query {:optimization-id opt-id}))]
         (is (contains? result :query/result))
         (is (= cand-2 (get-in result [:query/result :candidate-id]))))))
@@ -214,7 +214,7 @@
     (tu/with-test-context [ctx]
       (let [sheet-id (random-uuid)
             opt-id (start-optimization! ctx sheet-id)
-            result (qry/get-best-candidate
+            result (qry/gepa-get-best-candidate
                      (assoc ctx :query {:optimization-id opt-id}))]
         (is (= ::anom/not-found (::anom/category result)))))))
 

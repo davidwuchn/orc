@@ -89,7 +89,7 @@
             (is (= "overridden" (get-in result [:outputs "output"]))))
 
           ;; Verify original blackboard unchanged
-          (let [bb (sheet/get-blackboard-by-key (:event-store ctx) sheet-id)]
+          (let [bb (sheet/get-blackboard-by-key ctx sheet-id)]
             (is (= "original" (get-in bb ["input" :value])))))))))
 
 (deftest execute-timeout-test

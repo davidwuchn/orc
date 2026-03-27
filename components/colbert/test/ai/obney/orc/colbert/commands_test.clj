@@ -39,25 +39,26 @@
   [ctx & {:keys [index-id index-name]
           :or {index-id (random-uuid)
                index-name "test-index"}}]
-  (es/append (:event-store ctx)
-    {:tenant-id (:tenant-id ctx)
-     :events [(->event {:type :colbert/index-created
-                         :tags #{[:index index-id]}
-                         :body {:index-id index-id
-                                :index-name index-name
-                                :index-path "/tmp/test-index"
-                                :documents ["Doc 1" "Doc 2"]
-                                :document-ids ["id1" "id2"]
-                                :document-metadatas nil
-                                :document-count 2
-                                :passage-count 2
-                                :model-name "colbert-ir/colbertv2.0"
-                                :config {:split-documents? true
-                                         :max-document-length 256
-                                         :use-faiss? false}
-                                :created-at "2024-01-01T00:00:00Z"
-                                :duration-ms 100}})]})
-  index-id)
+  (let [result (es/append (:event-store ctx)
+                 {:tenant-id (:tenant-id ctx)
+                  :events [(->event {:type :colbert/index-created
+                                      :tags #{[:index index-id]}
+                                      :body {:index-id index-id
+                                             :index-name index-name
+                                             :index-path "/tmp/test-index"
+                                             :documents ["Doc 1" "Doc 2"]
+                                             :document-ids ["id1" "id2"]
+                                             :document-count 2
+                                             :passage-count 2
+                                             :model-name "colbert-ir/colbertv2.0"
+                                             :config {:split-documents? true
+                                                      :max-document-length 256
+                                                      :use-faiss? false}
+                                             :created-at "2024-01-01T00:00:00Z"
+                                             :duration-ms 100}})]})]
+    (when (::anom/category result)
+      (throw (ex-info "seed-index! failed" result)))
+    index-id))
 
 ;; =============================================================================
 ;; Delete Index Command Tests

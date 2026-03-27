@@ -105,11 +105,13 @@
 
 (defn make-concept-data
   "Create concept data for testing."
-  [& {:keys [uri label description scope broader indicators]
-      :or {scope :custom
+  [& {:keys [ontology-id uri label description scope broader indicators]
+      :or {ontology-id (random-uuid)
+           scope :custom
            broader []
            indicators []}}]
-  {:uri uri
+  {:ontology-id ontology-id
+   :uri uri
    :label label
    :description description
    :scope scope

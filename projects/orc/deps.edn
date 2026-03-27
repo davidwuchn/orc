@@ -10,7 +10,8 @@
         orc/evaluation        {:local/root "../../components/evaluation"}
         orc/colbert           {:local/root "../../components/colbert"}
         orc/ontology          {:local/root "../../components/ontology"}
-        orc/mcp-sheet-builder {:local/root "../../components/mcp-sheet-builder"}}
+        orc/mcp-sheet-builder {:local/root "../../components/mcp-sheet-builder"}
+        orc/langfuse          {:local/root "../../components/langfuse"}}
 
  :aliases {:test {:extra-paths []
                   :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}}}}}

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-ORC (Orchestrated Research Chains) is a behavior-tree-based workflow execution engine built on the Grain event-sourcing framework. It provides composable primitives for building, optimizing, and evaluating LLM-powered workflows.
+ORC (Orchestrator) is a behavior-tree-based workflow execution engine built on the Grain event-sourcing framework. It provides composable primitives for building, optimizing, and evaluating LLM-powered workflows.
 
 **Top namespace**: `ai.obney.orc`
 
@@ -77,4 +77,10 @@ components/{service}/
 
 ## Skills
 
-Use `/grain-command-handler`, `/grain-read-model`, `/grain-query-handler`, `/grain-todo-processor`, `/grain-schema`, `/grain-service` for building new features following established patterns.
+### ORC Domain
+- `/orc-workflow` — Build a behavior tree workflow using the DSL
+- `/orc-optimize` — Set up GEPA prompt optimization for a workflow
+- `/orc-evaluate` — Set up LLM-as-judge evaluation
+
+### Grain Framework
+- `/grain-command-handler`, `/grain-read-model`, `/grain-query-handler`, `/grain-todo-processor`, `/grain-schema`, `/grain-service` — Framework patterns for building new features

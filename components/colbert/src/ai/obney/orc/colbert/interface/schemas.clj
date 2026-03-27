@@ -223,6 +223,10 @@
     [:training-data-path :string]
     [:config {:optional true} [:map-of :keyword :any]]]
 
+   :colbert/regenerate-index
+   [:map
+    [:index-id :uuid]]
+
    :colbert/prepare-training-data
    [:map
     [:raw-data [:or

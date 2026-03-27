@@ -11,6 +11,8 @@
             [ai.obney.grain.query-processor.interface :as qp]
             [ai.obney.grain.pubsub.interface :as pubsub]
             [ai.obney.grain.todo-processor-v2.interface :as tp]
+            [ai.obney.grain.kv-store.interface :as kv]
+            [ai.obney.grain.kv-store-lmdb.interface :as lmdb]
             [ai.obney.grain.time.interface :as time]
             [ai.obney.orc.mcp-sheet-builder.interface :as mcp]
             [dscloj.core :as dscloj]))
@@ -28,7 +30,12 @@
         event-store (es/start {:conn {:type :in-memory}
                                :event-pubsub ps
                                :logger nil})
+        cache-dir (str "/tmp/mcp-async-test-" (random-uuid))
+        cache (kv/start (lmdb/->KV-Store-LMDB {:storage-dir cache-dir :db-name "test"}))
+        tenant-id (random-uuid)
         base-ctx {:event-store event-store
+                  :cache cache
+                  :tenant-id tenant-id
                   :command-registry (cp/global-command-registry)
                   :query-registry (qp/global-query-registry)
                   :call-tool-fn call-tool-fn
@@ -51,6 +58,8 @@
     (tp/stop processor))
   (when-let [ps (:event-pubsub ctx)]
     (pubsub/stop ps))
+  (when-let [cache (:cache ctx)]
+    (kv/stop cache))
   (when-let [event-store (:event-store ctx)]
     (es/stop event-store)))
 

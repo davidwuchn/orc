@@ -26,7 +26,7 @@
             (is (= :sheet/version-published (h/get-event-type pub-result))))
 
           ;; Verify sheet state
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (= 1 (:published-version sheet)))
             (is (false? (:draft-dirty? sheet)))))))))
 
@@ -124,21 +124,21 @@
           (h/run-and-apply! ctx (h/make-publish-version-command sheet-id))
 
           ;; Verify not dirty after publish
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (false? (:draft-dirty? sheet))))
 
           ;; Make a change
           (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id seq-id "Modified"))
 
           ;; Should now be dirty
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (true? (:draft-dirty? sheet))))
 
           ;; Publish again
           (h/run-and-apply! ctx (h/make-publish-version-command sheet-id))
 
           ;; Should be clean again
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (false? (:draft-dirty? sheet)))))))))
 
 ;; =============================================================================
@@ -157,12 +157,12 @@
 
         ;; Set to published mode
         (h/run-and-apply! ctx (h/make-set-execution-mode-command sheet-id :published))
-        (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+        (let [sheet (sheet/get-sheet ctx sheet-id)]
           (is (= :published (:execution-mode sheet))))
 
         ;; Set back to draft mode
         (h/run-and-apply! ctx (h/make-set-execution-mode-command sheet-id :draft))
-        (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+        (let [sheet (sheet/get-sheet ctx sheet-id)]
           (is (= :draft (:execution-mode sheet))))))))
 
 (deftest set-execution-mode-requires-published-version-test
@@ -195,7 +195,7 @@
           (h/run-and-apply! ctx (h/make-set-node-name-command sheet-id seq-id "Modified"))
 
           ;; Verify dirty
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (true? (:draft-dirty? sheet))))
 
           ;; Revert to v1 - should stash current draft
@@ -207,7 +207,7 @@
             (is (= :sheet/draft-reverted (-> events second :event/type))))
 
           ;; Verify stash exists
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (true? (:has-stash? sheet)))))))))
 
 (deftest revert-without-dirty-draft-no-stash-test
@@ -229,7 +229,7 @@
           (is (= :sheet/draft-reverted (-> events first :event/type))))
 
         ;; No stash should exist
-        (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+        (let [sheet (sheet/get-sheet ctx sheet-id)]
           (is (not (:has-stash? sheet))))))))
 
 (deftest revert-to-nonexistent-version-fails-test
@@ -279,7 +279,7 @@
             (is (= :sheet/stash-restored (h/get-event-type restore-result))))
 
           ;; Stash should be consumed
-          (let [sheet (sheet/get-sheet (:event-store ctx) sheet-id)]
+          (let [sheet (sheet/get-sheet ctx sheet-id)]
             (is (not (:has-stash? sheet)))))))))
 
 (deftest restore-stash-without-stash-fails-test

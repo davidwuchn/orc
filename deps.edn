@@ -6,6 +6,13 @@
                                                      :git/sha "0f8b404ffac9f20ce477f903eee1a74ecf01bd83"
                                                      :deps/root "projects/grain-core-v2"}
 
+                              obneyai/grain-control-plane {:git/url "https://github.com/ObneyAI/grain.git"
+                                                           :git/sha "0f8b404ffac9f20ce477f903eee1a74ecf01bd83"
+                                                           :deps/root "projects/grain-control-plane"}
+
+                              ;; Base
+                              orc/orc-dev           {:local/root "bases/orc-dev"}
+
                               ;; Components
                               orc/orc-service       {:local/root "components/orc-service"}
                               orc/gepa              {:local/root "components/gepa"}
@@ -13,9 +20,14 @@
                               orc/colbert           {:local/root "components/colbert"}
                               orc/ontology          {:local/root "components/ontology"}
                               orc/mcp-sheet-builder {:local/root "components/mcp-sheet-builder"}
+                              orc/langfuse          {:local/root "components/langfuse"}
                               orc/grain-test-utils  {:local/root "components/grain-test-utils"}}}
 
-           :test {:extra-paths []}
+           :test {:extra-paths ["components/orc-service/test"
+                                "components/gepa/test"
+                                "components/colbert/test"
+                                "components/ontology/test"
+                                "components/mcp-sheet-builder/test"]}
 
            :poly {:main-opts ["-m" "polylith.clj.core.poly-cli.core"]
                   :extra-deps {polylith/clj-poly {:mvn/version "0.2.22"}}

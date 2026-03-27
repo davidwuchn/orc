@@ -15,7 +15,8 @@
             [ai.obney.orc.ontology.core.classifier :as classifier]
             [ai.obney.orc.ontology.core.commands :as cmd]
             [ai.obney.orc.ontology.core.retrieval :as retrieval]
-            [ai.obney.orc.ontology.test-helpers :as h]))
+            [ai.obney.orc.ontology.test-helpers :as h]
+            [ai.obney.orc.ontology.interface.schemas]))
 
 ;; =============================================================================
 ;; Static Ontology Tests

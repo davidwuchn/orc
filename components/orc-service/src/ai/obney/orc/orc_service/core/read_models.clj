@@ -98,8 +98,8 @@
     :sheet/judge-declared})
 
 (def sheet-events
-  "Events that affect sheet read model (includes draft-dirty tracking)"
-  (clojure.set/union sheet-core-events draft-dirty-events))
+  "Events that affect sheet read model (includes draft-dirty tracking and versioning)"
+  (clojure.set/union sheet-core-events draft-dirty-events version-events))
 
 (def all-sheet-events
   "All events for a complete sheet view"
