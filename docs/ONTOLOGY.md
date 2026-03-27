@@ -300,13 +300,13 @@ After executing an ORC sheet, classify and record failures:
 (defn record-evaluation-failures [{:keys [inputs ctx]}]
   (let [result (ontology-cmd/ontology-classify-evaluation
                  (assoc ctx :command
-                   {:trace-id (get inputs "trace-id")
-                    :sheet-id (get inputs "sheet-id")
-                    :node-id (get inputs "node-id")
-                    :evaluation-result (get inputs "evaluation-result")
+                   {:trace-id (:trace-id inputs)
+                    :sheet-id (:sheet-id inputs)
+                    :node-id (:node-id inputs)
+                    :evaluation-result (:evaluation-result inputs)
                     :auto-record? true}))]  ;; Auto-emit weakness events
-    {"recorded-count" (-> result :command-result/data :recorded-weaknesses)
-     "primary-failure" (-> result :command-result/data :classification :primary-failure-uri)}))
+    {:recorded-count (-> result :command-result/data :recorded-weaknesses)
+     :primary-failure (-> result :command-result/data :classification :primary-failure-uri)}))
 ```
 
 ### Workflow Definition
@@ -329,8 +329,8 @@ After executing an ORC sheet, classify and record failures:
   (sheet/sequence "main"
     (sheet/code "record-failures"
       :fn "my.module/record-evaluation-failures"
-      :reads ["trace-id" "sheet-id" "node-id" "evaluation-result"]
-      :writes ["recorded-count" "primary-failure"])))
+      :reads [:trace-id :sheet-id :node-id :evaluation-result]
+      :writes [:recorded-count :primary-failure])))
 ```
 
 ## Behavior Tree Integration Guide
@@ -349,11 +349,11 @@ Pass ontology data as initial inputs when executing a sheet:
 
 ;; Load ontology data at execution time
 (sheet/execute ctx sheet-id
-  {"ontology-concepts" (ontology/get-static-concepts {:scope :failure})
-   "problem-type" "problem:Classification"
-   "failure-patterns" (ontology/find-failure-patterns event-store
-                        {:problem-type "problem:Classification"})
-   "source-text" user-input})
+  {:ontology-concepts (ontology/get-static-concepts {:scope :failure})
+   :problem-type "problem:Classification"
+   :failure-patterns (ontology/find-failure-patterns event-store
+                       {:problem-type "problem:Classification"})
+   :source-text user-input})
 ```
 
 Nodes can then read these via `:reads`:
@@ -361,8 +361,8 @@ Nodes can then read these via `:reads`:
 ```clojure
 (sheet/llm "classify-with-context"
   :instruction "Classify the input. Known failure patterns: {{failure-patterns}}"
-  :reads ["source-text" "failure-patterns"]
-  :writes ["classification"])
+  :reads [:source-text :failure-patterns]
+  :writes [:classification])
 ```
 
 #### Pattern B: Code Node Ontology Lookup
@@ -373,7 +373,7 @@ Code nodes can query ontologies directly during execution:
 (defn search-ontology-for-context
   "Code node executor that searches ontology for relevant context."
   [{:keys [inputs]}]
-  (let [problem-type (get inputs "problem-type")
+  (let [problem-type (:problem-type inputs)
         ;; Build graph from static concepts
         graph (ontology/concepts->graph (ontology/get-static-concepts))
         ;; BFS expansion from problem type
@@ -385,14 +385,14 @@ Code nodes can query ontologies directly during execution:
                              (take 10)
                              (map #(str "- " (:uri %) " (score: " (:score %) ")"))
                              (clojure.string/join "\n")))]
-    {"ontology-context" context-str
-     "related-concepts" related}))
+    {:ontology-context context-str
+     :related-concepts related}))
 
 ;; In workflow definition
 (sheet/code "fetch-ontology-context"
   :fn "my.ns/search-ontology-for-context"
-  :reads ["problem-type"]
-  :writes ["ontology-context" "related-concepts"])
+  :reads [:problem-type]
+  :writes [:ontology-context :related-concepts])
 ```
 
 #### Pattern C: LLM Instruction with Ontology Context
@@ -404,8 +404,8 @@ Prepare ontology context in a code node, then use it in an LLM instruction:
   ;; Step 1: Fetch ontology context
   (sheet/code "prepare-context"
     :fn "my.ns/search-ontology-for-context"
-    :reads ["problem-type"]
-    :writes ["ontology-context"])
+    :reads [:problem-type]
+    :writes [:ontology-context])
 
   ;; Step 2: LLM uses the context
   (sheet/llm "classify"
@@ -415,8 +415,8 @@ Prepare ontology context in a code node, then use it in an LLM instruction:
 {{ontology-context}}
 
 Analyze the evaluation and identify which failure concepts apply."
-    :reads ["evaluation" "ontology-context"]
-    :writes ["failure-classification"]))
+    :reads [:evaluation :ontology-context]
+    :writes [:failure-classification]))
 ```
 
 #### Pattern D: Automatic Context Injection (Recommended)
@@ -427,8 +427,8 @@ The `:context` parameter on LLM nodes automates ontology injection - no code nod
 (sheet/llm "analyze-with-ontology"
   :model "google/gemini-2.5-flash"
   :instruction "Analyze this lead and identify qualification factors."
-  :reads ["lead-data"]
-  :writes ["analysis"]
+  :reads [:lead-data]
+  :writes [:analysis]
   :context {:problem-type "problem:Classification"
             :domain "sales"
             :include #{:patterns :failures :related}
@@ -515,51 +515,51 @@ Search multiple ontology scopes simultaneously using parallel branches:
   ;; Branch 1: Search failure ontology
   (sheet/code "search-failures"
     :fn "my.ns/search-failure-ontology"
-    :reads ["evaluation"]
-    :writes ["failure-matches"])
+    :reads [:evaluation]
+    :writes [:failure-matches])
 
   ;; Branch 2: Search success patterns
   (sheet/code "search-success"
     :fn "my.ns/search-success-ontology"
-    :reads ["evaluation"]
-    :writes ["success-matches"])
+    :reads [:evaluation]
+    :writes [:success-matches])
 
   ;; Branch 3: Search problem types
   (sheet/code "search-problems"
     :fn "my.ns/search-problem-ontology"
-    :reads ["evaluation"]
-    :writes ["problem-matches"]))
+    :reads [:evaluation]
+    :writes [:problem-matches]))
 
 ;; After parallel completes, merge results
 (sheet/code "merge-ontology-results"
   :fn "my.ns/merge-results"
-  :reads ["failure-matches" "success-matches" "problem-matches"]
-  :writes ["combined-ontology-context"])
+  :reads [:failure-matches :success-matches :problem-matches]
+  :writes [:combined-ontology-context])
 ```
 
 **Example executor for parallel search:**
 
 ```clojure
 (defn search-failure-ontology [{:keys [inputs]}]
-  (let [evaluation (get inputs "evaluation")
-        feedback (get-in evaluation ["dimensions" 0 "feedback"])
+  (let [evaluation (:evaluation inputs)
+        feedback (get-in evaluation [:dimensions 0 :feedback])
         ;; Semantic search for similar failures
         matches (ontology/semantic-search-concepts event-store feedback
                   :scope :failure :limit 5)]
-    {"failure-matches" matches}))
+    {:failure-matches matches}))
 
 (defn search-success-ontology [{:keys [inputs]}]
-  (let [evaluation (get inputs "evaluation")
+  (let [evaluation (:evaluation inputs)
         ;; Find patterns from high-performing trees
         patterns (ontology/find-success-patterns event-store
                    {:min-success-rate 0.8 :limit 5})]
-    {"success-matches" patterns}))
+    {:success-matches patterns}))
 
 (defn merge-results [{:keys [inputs]}]
-  (let [failures (get inputs "failure-matches")
-        successes (get inputs "success-matches")
-        problems (get inputs "problem-matches")]
-    {"combined-ontology-context"
+  (let [failures (:failure-matches inputs)
+        successes (:success-matches inputs)
+        problems (:problem-matches inputs)]
+    {:combined-ontology-context
      {:failures-to-avoid failures
       :patterns-to-use successes
       :problem-context problems}}))

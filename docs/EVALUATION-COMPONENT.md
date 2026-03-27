@@ -146,8 +146,8 @@ Judges are defined at the workflow level using `sheet/judges`, paralleling how `
   ;; Nodes reference judges by name
   (sheet/llm "analyze"
     :instruction "Analyze the input..."
-    :reads ["input"]
-    :writes ["output"]
+    :reads [:input]
+    :writes [:output]
     :judges ["my-grounding" "my-completeness" "my-reasoning"]))
 ```
 
@@ -253,9 +253,9 @@ A function that evaluates trace data and returns a result map. Judges follow the
 ```clojure
 (defn my-judge
   [{:keys [inputs]}]
-  (let [trace-data (get inputs "trace-data")]
+  (let [trace-data (get inputs :trace-data)]
     ;; ... evaluate trace-data ...
-    {"result-key" {:score 0.8 :feedback "..."}}))
+    {:result-key {:score 0.8 :feedback "..."}}))
 ```
 
 Built-in judges:
@@ -280,7 +280,7 @@ A prompt template that defines evaluation criteria. Each rubric includes:
           ...
 
           ## Required Output (JSON)
-          {\"score\": <float>, \"grounded_claims\": [...], ...}"}
+          {\"score\": <float>, \"grounded-claims\": [...], ...}"}
 ```
 
 ---
@@ -293,8 +293,8 @@ Detects hallucinations by checking if claims are supported by input context.
 
 **Output fields:**
 - `score`: 0.0-1.0
-- `grounded_claims`: List of claims supported by inputs
-- `ungrounded_claims`: List of unsupported claims (hallucinations)
+- `grounded-claims`: List of claims supported by inputs
+- `ungrounded-claims`: List of unsupported claims (hallucinations)
 - `feedback`: Actionable improvement suggestions
 
 **Example:**
@@ -306,10 +306,10 @@ Detects hallucinations by checking if claims are supported by input context.
 
 (judges/with-mock-llm
   (judges/evaluate-single :grounding trace))
-;; => {"grounding-result"
+;; => {:grounding-result
 ;;     {:score 0.4
-;;      :grounded_claims ["gym hours mentioned"]
-;;      :ungrounded_claims ["24/7 claim" "free parking claim"]
+;;      :grounded-claims ["gym hours mentioned"]
+;;      :ungrounded-claims ["24/7 claim" "free parking claim"]
 ;;      :feedback "Contains hallucinations: 24/7 and parking not in FAQ"}}
 ```
 
@@ -319,8 +319,8 @@ Evaluates whether the LLM followed its given instruction.
 
 **Output fields:**
 - `score`: 0.0-1.0
-- `requirements_met`: List of instruction requirements satisfied
-- `requirements_missed`: List of requirements not satisfied
+- `requirements-met`: List of instruction requirements satisfied
+- `requirements-missed`: List of requirements not satisfied
 - `feedback`: Suggestions for better compliance
 
 **Example:**
@@ -331,10 +331,10 @@ Evaluates whether the LLM followed its given instruction.
    :instruction "Return JSON format only"})
 
 (judges/evaluate-single :instruction-following trace)
-;; => {"instruction-result"
+;; => {:instruction-result
 ;;     {:score 0.4
-;;      :requirements_met ["mentions correct data"]
-;;      :requirements_missed ["JSON format requirement"]
+;;      :requirements-met ["mentions correct data"]
+;;      :requirements-missed ["JSON format requirement"]
 ;;      :feedback "Response is prose, not JSON. Format as {...}"}}
 ```
 
@@ -344,8 +344,8 @@ Evaluates the coherence and quality of reasoning.
 
 **Output fields:**
 - `score`: 0.0-1.0
-- `reasoning_strengths`: Aspects of reasoning that were good
-- `reasoning_weaknesses`: Logical gaps or unclear elements
+- `reasoning-strengths`: Aspects of reasoning that were good
+- `reasoning-weaknesses`: Logical gaps or unclear elements
 - `feedback`: Suggestions for clearer reasoning
 
 ### 4. Completeness Judge (20% weight)
@@ -354,8 +354,8 @@ Evaluates whether all aspects of the task were addressed.
 
 **Output fields:**
 - `score`: 0.0-1.0
-- `aspects_covered`: Aspects that were addressed
-- `aspects_missing`: Aspects that should have been included
+- `aspects-covered`: Aspects that were addressed
+- `aspects-missing`: Aspects that should have been included
 - `feedback`: Suggestions for better coverage
 
 ---
@@ -504,9 +504,9 @@ The evaluation component provides pre-built ORC sheets for running evaluations w
 
 ;; Execute on a trace
 (sheet/execute ctx judge-id
-  {"trace-data" {:inputs {...}
-                 :response "..."
-                 :instruction "..."}})
+  {:trace-data {:inputs {...}
+                :response "..."
+                :instruction "..."}})
 ```
 
 Available: `grounding-judge-sheet`, `instruction-judge-sheet`, `reasoning-judge-sheet`, `completeness-judge-sheet`
@@ -521,12 +521,12 @@ Runs all four judges in parallel, then aggregates.
 
 ;; Execute
 (def result (sheet/execute ctx suite-id
-              {"trace-data" {:inputs {:context "..."}
-                             :response "..."
-                             :instruction "..."}}))
+              {:trace-data {:inputs {:context "..."}
+                            :response "..."
+                            :instruction "..."}}))
 
 ;; Access results
-(get-in result [:outputs "aggregate-result"])
+(get-in result [:outputs :aggregate-result])
 ;; => {:aggregate-score 0.78
 ;;     :feedback-summary "..."
 ;;     :dimensions [...]}
@@ -540,7 +540,7 @@ Process multiple traces with parallel execution.
 (def batch-id (sheet/build-workflow! ctx (eval/batch-evaluation-suite)))
 
 (sheet/execute ctx batch-id
-  {"traces" [trace1 trace2 trace3 ...]})
+  {:traces [trace1 trace2 trace3 ...]})
 ```
 
 ### Selective Judge Suite
@@ -645,14 +645,14 @@ For complex domain-specific validation, create a custom judge function:
 ;; Custom judge with domain-specific criteria
 (defn my-completeness-judge
   [{:keys [inputs]}]
-  (let [trace-data (get inputs "trace-data")
+  (let [trace-data (get inputs :trace-data)
         custom-rubric {:name "Domain Completeness"
                        :prompt "Evaluate if response includes: company name,
                                 budget range, timeline, decision maker.
                                 Score 0.25 for each present element.
                                 ..."}
         prompt (judges/render-rubric-prompt custom-rubric trace-data)]
-    {"completeness-result" (judges/call-llm-judge prompt ...)}))
+    {:completeness-result (judges/call-llm-judge prompt ...)}))
 ```
 
 Or reference a custom evaluation sheet via the `:custom` judge type:
@@ -765,12 +765,12 @@ Or reference a custom evaluation sheet via the `:custom` judge type:
 ;; Execute on a trace - fully traced in Grain event store
 (def result
   (sheet/execute ctx suite-id
-    {"trace-data" {:inputs {:lead-data {:name "John" :company "Acme"}}
-                   :response "Lead score: 85/100. Reason: ..."
-                   :instruction "Analyze the lead and score 0-100"}}))
+    {:trace-data {:inputs {:lead-data {:name "John" :company "Acme"}}
+                  :response "Lead score: 85/100. Reason: ..."
+                  :instruction "Analyze the lead and score 0-100"}}))
 
 ;; Result includes full execution trace
-(get-in result [:outputs "aggregate-result"])
+(get-in result [:outputs :aggregate-result])
 ;; => {:aggregate-score 0.82
 ;;     :feedback-summary "Good (82%): All dimensions performing well"
 ;;     :dimensions [{:name "Source Grounding" :score 0.9 ...} ...]}

@@ -169,8 +169,8 @@ FALLBACK:  ORC → libpython-clj → DSPy (Python) → LLMs
 ### 2. Execute Phase (`sheet/execute`)
 
 ```clojure
-(sheet/execute ctx sheet-id {"input" "hello"})
-;; => {:status :success :outputs {"output" "result"} :duration-ms 1234}
+(sheet/execute ctx sheet-id {:input "hello"})
+;; => {:status :success :outputs {:output "result"} :duration-ms 1234}
 ```
 
 **What happens:**
@@ -203,10 +203,10 @@ FALLBACK:  ORC → libpython-clj → DSPy (Python) → LLMs
 
 **Structure:**
 ```clojure
-{"key-name" {:key "key-name"
-             :schema [:vector :string]
-             :value ["item1" "item2"]
-             :version 3}}
+{:key-name {:key :key-name
+            :schema [:vector :string]
+            :value ["item1" "item2"]
+            :version 3}}
 ```
 
 **Input Gathering:**
@@ -233,20 +233,20 @@ FALLBACK:  ORC → libpython-clj → DSPy (Python) → LLMs
 ;; Define executor function
 (defn my-processor
   [{:keys [inputs]}]
-  (let [input-val (get inputs "input-key")]
-    {"output-key" (process input-val)}))
+  (let [input-val (:input-key inputs)]
+    {:output-key (process input-val)}))
 
 ;; Reference in workflow
 (sheet/code "process-step"
   :fn "my.ns/my-processor"
-  :reads ["input-key"]
-  :writes ["output-key"])
+  :reads [:input-key]
+  :writes [:output-key])
 ```
 
 **Key points:**
-- Function receives `{:inputs {"key" value}}` map
-- Function returns `{"output-key" value}` map
-- Keys are strings (not keywords)
+- Function receives `{:inputs {:key value}}` map
+- Function returns `{:output-key value}` map
+- Keys are keywords
 - Multiple outputs supported
 
 ---
@@ -349,8 +349,8 @@ items: [x, y, z]
  :started-at inst
  :completed-at inst
  :duration-ms 450
- :inputs {"key" value}
- :outputs {"key" value}
+ :inputs {:key value}
+ :outputs {:key value}
  :error nil}
 ```
 

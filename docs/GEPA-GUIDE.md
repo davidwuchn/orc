@@ -140,8 +140,8 @@ Evaluate a single candidate instruction on one example.
 (sheet/evaluate-candidate context sheet-id
   [:grounding :instruction-following]
   {:instruction "Answer concisely."}
-  {:inputs {"question" "What is 2+2?"}})
-;; => {:score 0.85 :feedback "..." :outputs {"answer" "4"}}
+  {:inputs {:question "What is 2+2?"}})
+;; => {:score 0.85 :feedback "..." :outputs {:answer "4"}}
 ```
 
 #### `manual-evaluation-loop`
@@ -196,7 +196,7 @@ Each judge returns:
 ```clojure
 {:score 0.85          ;; 0.0 - 1.0
  :feedback "..."      ;; Actionable improvement suggestions
- :details {...}}      ;; Judge-specific details (grounded_claims, etc.)
+ :details {...}}      ;; Judge-specific details (grounded-claims, etc.)
 ```
 
 ---
@@ -205,7 +205,7 @@ Each judge returns:
 
 ### Critical Pattern: Dynamic Instructions
 
-For GEPA to optimize a workflow's instruction, the instruction must be **passed as input** rather than hardcoded. This is achieved by including `"instruction"` in the `:reads` vector.
+For GEPA to optimize a workflow's instruction, the instruction must be **passed as input** rather than hardcoded. This is achieved by including `:instruction` in the `:reads` vector.
 
 #### Wrong Pattern (Static Instruction)
 
@@ -219,8 +219,8 @@ For GEPA to optimize a workflow's instruction, the instruction must be **passed 
   (sheet/llm "answer"
     :model "google/gemini-2.0-flash-001"
     :instruction "Answer the question."  ;; Static, can't be changed by GEPA
-    :reads ["question"]
-    :writes ["answer"]))
+    :reads [:question]
+    :writes [:answer]))
 ```
 
 #### Correct Pattern (Dynamic Instruction)
@@ -236,11 +236,11 @@ For GEPA to optimize a workflow's instruction, the instruction must be **passed 
   (sheet/llm "answer"
     :model "google/gemini-2.0-flash-001"
     :instruction "Follow the instruction provided in the 'instruction' field to answer the question."
-    :reads ["question" "instruction"]  ;; CRITICAL: include instruction in reads
-    :writes ["answer"]))
+    :reads [:question :instruction]  ;; CRITICAL: include instruction in reads
+    :writes [:answer]))
 ```
 
-**Why this works:** When `"instruction"` is in `:reads`, the executor includes it in the LLM's context. GEPA passes candidate instructions as input values, which then appear in the prompt context for the LLM to follow.
+**Why this works:** When `:instruction` is in `:reads`, the executor includes it in the LLM's context. GEPA passes candidate instructions as input values, which then appear in the prompt context for the LLM to follow.
 
 ### Complete Example Workflow
 
@@ -257,8 +257,8 @@ For GEPA to optimize a workflow's instruction, the instruction must be **passed 
     (sheet/llm "answer"
       :model "google/gemini-2.0-flash-001"
       :instruction "Follow the instruction provided in the 'instruction' field to answer the question in the 'question' field."
-      :reads ["question" "instruction"]
-      :writes ["answer"])))
+      :reads [:question :instruction]
+      :writes [:answer]))
 
 ;; Build the workflow
 (def sheet-id (sheet/build-workflow! context qa-workflow))
@@ -307,8 +307,8 @@ For GEPA to optimize a workflow's instruction, the instruction must be **passed 
     (sheet/llm "answer"
       :model "google/gemini-2.0-flash-001"
       :instruction "Follow the instruction in 'instruction' to answer the question."
-      :reads ["question" "instruction"]
-      :writes ["answer"])))
+      :reads [:question :instruction]
+      :writes [:answer]))
 
 (def sheet-id (sheet/build-workflow! context qa-workflow))
 
@@ -438,8 +438,8 @@ Each judge is an LLM-as-judge that evaluates trace data:
 
 ```clojure
 ;; Trace data structure passed to judges
-{:inputs {"question" "What is 2+2?"}    ;; What was sent to LLM
- :outputs {"answer" "4"}                 ;; What LLM returned
+{:inputs {:question "What is 2+2?"}    ;; What was sent to LLM
+ :outputs {:answer "4"}                 ;; What LLM returned
  :instruction "Answer concisely."}       ;; The instruction being evaluated
 ```
 
@@ -467,13 +467,13 @@ Rubrics are defined in `evaluation/core/rubrics.clj`. Each rubric provides:
 
 ;; Evaluate a single trace
 (def trace-data
-  {:inputs {"question" "What is 2+2?"}
-   :outputs {"answer" "4"}
+  {:inputs {:question "What is 2+2?"}
+   :outputs {:answer "4"}
    :instruction "Answer math questions"})
 
 ;; Single judge
 (eval/evaluate-single :grounding trace-data)
-;; => {:score 0.95 :feedback "All claims grounded..." :grounded_claims [...]}
+;; => {:score 0.95 :feedback "All claims grounded..." :grounded-claims [...]}
 
 ;; All judges with aggregation
 (eval/evaluate-trace trace-data)
@@ -520,8 +520,8 @@ Every workflow execution creates a `:sheet/execution-traced` event:
  :completed-at #inst "..."
  :duration-ms 1234
  :status :success
- :input-snapshot {"question" "What is 2+2?" "instruction" "..."}
- :output-snapshot {"answer" "4"}
+ :input-snapshot {:question "What is 2+2?" :instruction "..."}
+ :output-snapshot {:answer "4"}
  :node-traces [{:node-id #uuid "..." :duration-ms 100 :status :success}]
  :error nil}
 ```
@@ -572,7 +572,7 @@ You can extract training data from past executions:
   (->> traces
        (filter #(= :success (:status %)))
        (map (fn [trace]
-              {:inputs (dissoc (:input-snapshot trace) "instruction")
+              {:inputs (dissoc (:input-snapshot trace) :instruction)
                :expected (:output-snapshot trace)}))
        (take 20)
        vec))
@@ -590,7 +590,7 @@ For targeted improvement, find examples that scored poorly:
   (for [trace traces]
     (let [trace-data {:inputs (:input-snapshot trace)
                       :outputs (:output-snapshot trace)
-                      :instruction (get (:input-snapshot trace) "instruction")}
+                      :instruction (get (:input-snapshot trace) :instruction)}
           result (eval/evaluate-trace trace-data)]
       (assoc trace :eval-score (:score result)
                    :eval-feedback (:feedback result)))))
@@ -695,9 +695,9 @@ Create deterministic executors for testing without real LLM calls:
 (defn mock-qa-executor
   "Echoes instruction and question in the answer."
   [{:keys [inputs]}]
-  (let [question (get inputs "question")
-        instruction (get inputs "instruction" "default")]
-    {"answer" (str "Instruction: " instruction " | Question: " question)}))
+  (let [question (get inputs :question)
+        instruction (get inputs :instruction "default")]
+    {:answer (str "Instruction: " instruction " | Question: " question)}))
 ```
 
 ### Mock Judges
@@ -706,8 +706,8 @@ Bind `*use-mock-llm*` to avoid real LLM calls during evaluation:
 
 ```clojure
 (binding [judges/*use-mock-llm* true]
-  (let [trace-data {:inputs {"question" "What is 2+2?"}
-                    :outputs {"answer" "4"}
+  (let [trace-data {:inputs {:question "What is 2+2?"}
+                    :outputs {:answer "4"}
                     :instruction "Answer accurately."}
         result (eval/evaluate-trace trace-data)]
     (is (number? (:score result)))
@@ -729,28 +729,28 @@ Bind `*use-mock-llm*` to avoid real LLM calls during evaluation:
             node-id (-> node-result :command-result/events first :node-id)
 
             ;; Declare GEPA-compatible blackboard
-            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "question" :string))
-            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "instruction" :string))
-            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "answer" :string))
+            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :question :string))
+            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :instruction :string))
+            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :answer :string))
 
             ;; Configure node with instruction in reads
             _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id
-                                      ["question" "instruction"]  ;; instruction in reads!
-                                      ["answer"]))
+                                      [:question :instruction]  ;; instruction in reads!
+                                      [:answer]))
             _ (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node-id :code
                                       :fn "my-app.test/mock-qa-executor"))]
 
         ;; Verify instruction is in reads
         (let [nodes (sheet/get-nodes-for-sheet (:event-store ctx) sheet-id)
               node (first (filter #(= :leaf (:type %)) nodes))]
-          (is (some #{"instruction"} (:reads node))))
+          (is (some #{:instruction} (:reads node))))
 
         ;; Execute with dynamic instruction
         (let [result (sheet/execute ctx sheet-id
-                       {"question" "test?" "instruction" "Be concise."})]
+                       {:question "test?" :instruction "Be concise."})]
           (is (= :success (:status result)))
           (is (clojure.string/includes?
-                (get (:outputs result) "answer")
+                (get (:outputs result) :answer)
                 "Be concise.")))))))
 ```
 
@@ -805,8 +805,8 @@ pip install git+https://github.com/gepa-ai/gepa.git
 
 #### 2. "Instruction not being used"
 Check that:
-- `"instruction"` is in the blackboard schema
-- `"instruction"` is in the `:reads` vector of the LLM node
+- `:instruction` is in the blackboard schema
+- `:instruction` is in the `:reads` vector of the LLM node
 - The node's static instruction tells the LLM to follow the dynamic instruction
 
 #### 3. "All scores are 0"
@@ -830,7 +830,7 @@ Add logging to see what's happening:
 (let [result (sheet/evaluate-candidate context sheet-id
                [:grounding :instruction-following]
                {:instruction "Test instruction"}
-               {:inputs {"question" "What is 2+2?"}})]
+               {:inputs {:question "What is 2+2?"}})]
   (println "Score:" (:score result))
   (println "Feedback:" (:feedback result))
   (println "Outputs:" (:outputs result)))

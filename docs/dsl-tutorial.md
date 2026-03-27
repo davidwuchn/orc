@@ -59,13 +59,13 @@ The ORC DSL offers several advantages over imperative code:
     (sheet/llm "generate-greeting"
       :model "google/gemini-2.0-flash-001"
       :instruction "Generate a friendly greeting for the given name."
-      :reads ["input-name"]
-      :writes ["greeting"])))
+      :reads [:input-name]
+      :writes [:greeting])))
 
 ;; Build and execute
 (defn run-hello [ctx name]
   (let [sheet-id (sheet/build-workflow! ctx hello-workflow)]
-    (sheet/execute ctx sheet-id {"input-name" name})))
+    (sheet/execute ctx sheet-id {:input-name name})))
 ```
 
 ### Running a Workflow
@@ -76,10 +76,10 @@ The ORC DSL offers several advantages over imperative code:
 (def sheet-id (sheet/build-workflow! ctx my-workflow))
 
 ;; 3. Execute with inputs
-(def result (sheet/execute ctx sheet-id {"input-key" "value"}))
+(def result (sheet/execute ctx sheet-id {:input-key "value"}))
 
 ;; 4. Check the outputs
-(:outputs result)  ;; => {"output-key" "result value"}
+(:outputs result)  ;; => {:output-key "result value"}
 (:status result)   ;; => :success or :failure
 ```
 
@@ -103,7 +103,7 @@ The **blackboard** is shared state that nodes read from and write to. It's defin
 
 **Key rules:**
 - All node inputs/outputs must be declared in the blackboard
-- Keys are strings at runtime (but keywords in schema definition)
+- Keys are keywords at runtime (matching schema definition)
 - Schema validation is optional but recommended
 
 ### Nodes
@@ -187,7 +187,7 @@ Try children in order until one succeeds. Also known as "selector" in behavior t
   ;; Try the preferred approach first
   (sheet/sequence "preferred-path"
     (sheet/condition "check-available"
-      :check {:key "premium-api" :op :equals :value true})
+      :check {:key :premium-api :op :equals :value true})
     (sheet/llm "use-premium" ...))
 
   ;; Fall back to alternative
@@ -218,9 +218,9 @@ Iterate over a collection, executing children for each item.
 
 ```clojure
 (sheet/map-each "process-items"
-  :from "items"              ;; Source collection key
-  :as "current-item"         ;; Key for current item
-  :into "processed-items"    ;; Output collection key
+  :from :items               ;; Source collection key
+  :as :current-item          ;; Key for current item
+  :into :processed-items     ;; Output collection key
   :parallel 5                ;; Max concurrent (default 1)
 
   ;; Children run for each item
@@ -249,8 +249,8 @@ Execute an LLM call with structured input/output.
 - summary: Brief overview (2-3 sentences)
 - keyPoints: List of 3-5 key takeaways
 - sentiment: Overall tone (positive/negative/neutral)"
-  :reads ["input-data" "context"]
-  :writes ["analysis"]
+  :reads [:input-data :context]
+  :writes [:analysis]
   :retry {:max-attempts 3 :backoff-ms [100 500 1000]})
 ```
 
@@ -272,7 +272,7 @@ Provide these fields:
 - score: Number 0-100
 - qualified: Boolean
 - reason: Brief explanation"
-:writes ["lead-assessment"]
+:writes [:lead-assessment]
 ```
 
 The response is automatically parsed and stored to the specified blackboard key.
@@ -284,8 +284,8 @@ Execute a Clojure function.
 ```clojure
 (sheet/code "calculate-score"
   :fn "my-app.scoring/compute-weighted-score"
-  :reads ["raw-scores" "weights"]
-  :writes ["final-score"])
+  :reads [:raw-scores :weights]
+  :writes [:final-score])
 ```
 
 **Function signature:**
@@ -294,19 +294,19 @@ Execute a Clojure function.
 (defn compute-weighted-score
   "Code executor functions receive a map with :inputs and return a map of outputs."
   [{:keys [inputs]}]
-  (let [raw-scores (get inputs "raw-scores")
-        weights (get inputs "weights")
+  (let [raw-scores (:raw-scores inputs)
+        weights (:weights inputs)
         score (calculate raw-scores weights)]
     ;; Return a map of output-key -> value
-    {"final-score" score}))
+    {:final-score score}))
 ```
 
 **Key points:**
 - `:fn` is the fully-qualified function name as a string
-- Function receives `{:inputs {"key" value ...}}`
-- Function returns `{"output-key" value ...}`
+- Function receives `{:inputs {:key value ...}}`
+- Function returns `{:output-key value ...}`
 - Multiple outputs can be written from a single function
-- Inputs and outputs are strings (not keywords)
+- Inputs and outputs use keyword keys
 
 ### condition
 
@@ -314,13 +314,13 @@ Static boolean check on blackboard values.
 
 ```clojure
 (sheet/condition "check-premium-user"
-  :check {:key "user-tier" :op :equals :value "premium"})
+  :check {:key :user-tier :op :equals :value "premium"})
 
 (sheet/condition "check-high-score"
-  :check {:key "score" :op :gt :value 80})
+  :check {:key :score :op :gt :value 80})
 
 (sheet/condition "check-has-data"
-  :check {:key "items" :op :not-empty})
+  :check {:key :items :op :not-empty})
 ```
 
 **Supported operators:**
@@ -349,7 +349,7 @@ Use LLM to evaluate a yes/no question.
 (sheet/llm-condition "is-urgent?"
   :model "google/gemini-2.0-flash-001"
   :instruction "Is this message urgent, time-sensitive, or requiring immediate attention? Answer yes or no."
-  :reads ["message-content"])
+  :reads [:message-content])
 ```
 
 **Parameters:**
@@ -457,9 +457,9 @@ See `development/src/lead_qualification_demo.clj` for the full working implement
         (sheet/sequence "qualification-track"
 
           (sheet/map-each "qualify-leads"
-            :from "leads"
-            :as "current-lead"
-            :into "qualified-leads"
+            :from :leads
+            :as :current-lead
+            :into :qualified-leads
             :parallel 5
 
             (sheet/sequence "lead-qualification-pipeline"
@@ -473,14 +473,14 @@ See `development/src/lead_qualification_demo.clj` for the full working implement
 - budgetSignals: Any indicators of budget (explicit or implicit)
 - decisionMakers: Identified stakeholders and their roles
 - urgencyIndicators: Signals about timeline pressure"
-                :reads ["current-lead"]
-                :writes ["lead-analysis"])
+                :reads [:current-lead]
+                :writes [:lead-analysis])
 
               ;; Phase 2: Code - ICP Matching
               (sheet/code "match-icp"
                 :fn "lead-qualification-demo/match-ideal-customer-profile"
-                :reads ["current-lead" "lead-analysis"]
-                :writes ["icp-match"])
+                :reads [:current-lead :lead-analysis]
+                :writes [:icp-match])
 
               ;; Phase 3: Parallel BANT Scoring
               (sheet/parallel "bant-scoring"
@@ -491,44 +491,44 @@ See `development/src/lead_qualification_demo.clj` for the full working implement
                   :instruction "Score this lead's budget fit from 0.0 to 1.0.
 Consider: explicit budget mentions, company size, typical spend for their industry.
 Return just the score as a decimal number."
-                  :reads ["current-lead" "lead-analysis"]
-                  :writes ["budget-score"])
+                  :reads [:current-lead :lead-analysis]
+                  :writes [:budget-score])
 
                 (sheet/llm "score-need"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score the urgency of this lead's need from 0.0 to 1.0.
 Consider: pain point severity, current workarounds, cost of inaction.
 Return just the score as a decimal number."
-                  :reads ["current-lead" "lead-analysis"]
-                  :writes ["need-score"])
+                  :reads [:current-lead :lead-analysis]
+                  :writes [:need-score])
 
                 (sheet/llm "score-authority"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score this contact's decision-making authority from 0.0 to 1.0.
 Consider: job title, role in evaluation process, organizational level.
 Return just the score as a decimal number."
-                  :reads ["current-lead" "lead-analysis"]
-                  :writes ["authority-score"])
+                  :reads [:current-lead :lead-analysis]
+                  :writes [:authority-score])
 
                 (sheet/llm "score-timeline"
                   :model "google/gemini-2.5-flash"
                   :instruction "Score timeline alignment from 0.0 to 1.0.
 Consider: stated timeline, fiscal year cycles, competing priorities.
 Return just the score as a decimal number."
-                  :reads ["current-lead" "lead-analysis"]
-                  :writes ["timeline-score"]))
+                  :reads [:current-lead :lead-analysis]
+                  :writes [:timeline-score]))
 
               ;; Phase 4: Code - Composite Scoring
               (sheet/code "compute-composite-score"
                 :fn "lead-qualification-demo/compute-bant-composite"
-                :reads ["budget-score" "need-score" "authority-score" "timeline-score" "icp-match"]
-                :writes ["composite-score" "is-qualified"])
+                :reads [:budget-score :need-score :authority-score :timeline-score :icp-match]
+                :writes [:composite-score :is-qualified])
 
               ;; Phase 5: Conditional - Only recommend products for qualified leads
               (sheet/fallback "product-recommendation-gate"
                 (sheet/sequence "if-qualified"
                   (sheet/condition "check-qualified"
-                    :check {:key "is-qualified" :op :equals :value true})
+                    :check {:key :is-qualified :op :equals :value true})
                   (sheet/llm "recommend-products"
                     :model "google/gemini-2.5-flash"
                     :instruction "Based on this lead's profile and needs, recommend 1-3 products.
@@ -536,20 +536,20 @@ For each recommendation provide:
 - productId: ID from the product catalog
 - fitScore: 0.0-1.0 how well it matches their needs
 - rationale: Why this product fits"
-                    :reads ["current-lead" "lead-analysis" "products"]
-                    :writes ["product-recommendations"]))
+                    :reads [:current-lead :lead-analysis :products]
+                    :writes [:product-recommendations]))
 
                 ;; Else: Not qualified, skip recommendations
                 (sheet/code "skip-products"
                   :fn "lead-qualification-demo/empty-recommendations"
                   :reads []
-                  :writes ["product-recommendations"]))
+                  :writes [:product-recommendations]))
 
               ;; Phase 6: Code - Sales Rep Assignment
               (sheet/code "assign-rep"
                 :fn "lead-qualification-demo/assign-sales-rep"
-                :reads ["current-lead" "composite-score" "sales-reps"]
-                :writes ["assigned-rep"]))))
+                :reads [:current-lead :composite-score :sales-reps]
+                :writes [:assigned-rep]))))
 
         ;; =====================================
         ;; OUTREACH TRACK
@@ -564,20 +564,20 @@ For each recommendation provide:
 - bestTiming: morning, afternoon, or evening
 - tone: formal, conversational, or technical
 - frequency: high, medium, or low touch"
-            :reads ["leads"]
-            :writes ["comm-preferences"])
+            :reads [:leads]
+            :writes [:comm-preferences])
 
           ;; Phase 2: Code - Hard Filtering
           (sheet/code "filter-leads"
             :fn "lead-qualification-demo/filter-contactable-leads"
-            :reads ["leads"]
-            :writes ["filtered-leads"])
+            :reads [:leads]
+            :writes [:filtered-leads])
 
           ;; Phase 3: Map-Each - Content Personalization
           (sheet/map-each "personalize-content"
-            :from "filtered-leads"
-            :as "current-lead"
-            :into "personalized-content"
+            :from :filtered-leads
+            :as :current-lead
+            :into :personalized-content
             :parallel 5
 
             (sheet/sequence "content-pipeline"
@@ -591,8 +591,8 @@ Keep it under 200 words, professional but warm.
 Include a clear call-to-action for a demo.
 
 Return: subject, opening, body, cta, fullEmail"
-                :reads ["current-lead" "comm-preferences"]
-                :writes ["current-content"])
+                :reads [:current-lead :comm-preferences]
+                :writes [:current-content])
 
               ;; Phase 4: Parallel A/B Variants
               (sheet/parallel "ab-variants"
@@ -600,27 +600,27 @@ Return: subject, opening, body, cta, fullEmail"
                   :model "google/gemini-2.5-flash"
                   :instruction "Rewrite this email with emphasis on ROI and cost savings.
 Keep the same structure but focus on financial benefits."
-                  :reads ["current-content"]
-                  :writes ["email-variant-a"])
+                  :reads [:current-content]
+                  :writes [:email-variant-a])
 
                 (sheet/llm "variant-b"
                   :model "google/gemini-2.5-flash"
                   :instruction "Rewrite this email with emphasis on efficiency and time savings.
 Keep the same structure but focus on productivity benefits."
-                  :reads ["current-content"]
-                  :writes ["email-variant-b"]))))
+                  :reads [:current-content]
+                  :writes [:email-variant-b]))))
 
           ;; Phase 5: Code - Campaign Assignment
           (sheet/code "assign-campaigns"
             :fn "lead-qualification-demo/assign-to-campaigns"
-            :reads ["personalized-content" "comm-preferences"]
-            :writes ["ready-for-outreach"])))
+            :reads [:personalized-content :comm-preferences]
+            :writes [:ready-for-outreach])))
 
       ;; === COMBINE RESULTS ===
       (sheet/code "combine-results"
         :fn "lead-qualification-demo/combine-final-results"
-        :reads ["qualified-leads" "ready-for-outreach"]
-        :writes ["final-results"]))))
+        :reads [:qualified-leads :ready-for-outreach]
+        :writes [:final-results]))))
 ```
 
 ### DSL Features Demonstrated
@@ -650,9 +650,9 @@ Combine parallel tracks with parallel processing within each track:
 (sheet/parallel "outer"
   (sheet/sequence "track-1"
     (sheet/map-each "process"
-      :from "items-1"
-      :as "item"
-      :into "results-1"
+      :from :items-1
+      :as :item
+      :into :results-1
       :parallel 10  ;; 10 concurrent workers
       (sheet/parallel "multi-score"
         (sheet/llm "score-a" ...)
@@ -673,21 +673,21 @@ Gracefully handle failures with fallback alternatives:
   (sheet/sequence "primary"
     (sheet/code "call-primary-api"
       :fn "myapp/call-premium-api"
-      :reads ["data"]
-      :writes ["result"]))
+      :reads [:data]
+      :writes [:result]))
 
   ;; Fallback to secondary
   (sheet/sequence "secondary"
     (sheet/code "call-fallback-api"
       :fn "myapp/call-basic-api"
-      :reads ["data"]
-      :writes ["result"]))
+      :reads [:data]
+      :writes [:result]))
 
   ;; Last resort: use cached data
   (sheet/code "use-cache"
     :fn "myapp/get-cached-result"
-    :reads ["data"]
-    :writes ["result"]))
+    :reads [:data]
+    :writes [:result]))
 ```
 
 ### LLM-Driven Routing
@@ -700,14 +700,14 @@ Use `llm-condition` for intelligent routing:
     (sheet/llm-condition "is-complaint?"
       :model "google/gemini-2.0-flash-001"
       :instruction "Is this message a complaint or expressing frustration?"
-      :reads ["message"])
+      :reads [:message])
     (sheet/llm "complaint-response" ...))
 
   (sheet/sequence "handle-question"
     (sheet/llm-condition "is-question?"
       :model "google/gemini-2.0-flash-001"
       :instruction "Is this message asking a question?"
-      :reads ["message"])
+      :reads [:message])
     (sheet/llm "answer-question" ...))
 
   ;; Default: general response
@@ -721,17 +721,17 @@ Pattern for reducing results after map-each:
 ```clojure
 (sheet/sequence "process-and-aggregate"
   (sheet/map-each "score-items"
-    :from "items"
-    :as "current-item"
-    :into "scored-items"
+    :from :items
+    :as :current-item
+    :into :scored-items
     :parallel 10
     (sheet/llm "score" ...))
 
   ;; Aggregate the results
   (sheet/code "aggregate-scores"
     :fn "myapp/compute-aggregate-stats"
-    :reads ["scored-items"]
-    :writes ["stats" "top-items" "summary"]))
+    :reads [:scored-items]
+    :writes [:stats :top-items :summary]))
 ```
 
 ### Retry Configuration
@@ -742,8 +742,8 @@ Configure retries for unreliable operations:
 (sheet/llm "external-api-call"
   :model "google/gemini-2.5-flash"
   :instruction "..."
-  :reads ["input"]
-  :writes ["output"]
+  :reads [:input]
+  :writes [:output]
   :retry {:max-attempts 3
           :backoff-ms [100 500 2000]})  ;; Exponential backoff
 ```
@@ -785,8 +785,8 @@ Use `sheet/judges` parallel to `sheet/blackboard`:
   (sheet/llm "analyze-lead"
     :model "google/gemini-2.5-flash"
     :instruction "Analyze this lead for sales qualification..."
-    :reads ["lead-data"]
-    :writes ["analysis"]
+    :reads [:lead-data]
+    :writes [:analysis]
     :judges ["analysis-completeness" "analysis-grounding" "analysis-reasoning"]))
 ```
 
@@ -881,12 +881,12 @@ Multiple nodes can reference the same judge definition:
 
   (sheet/sequence "main"
     (sheet/llm "step-1"
-      :reads ["input-1"]
-      :writes ["output-1"]
+      :reads [:input-1]
+      :writes [:output-1]
       :judges ["common-grounding"])
     (sheet/llm "step-2"
-      :reads ["output-1"]
-      :writes ["output-2"]
+      :reads [:output-1]
+      :writes [:output-2]
       :judges ["common-grounding"])))
 ```
 
@@ -970,7 +970,7 @@ Every `execute` call returns trace metadata:
 
 result
 ;; => {:status :success              ; or :failure, :timeout
-;;     :outputs {"key" value ...}    ; Final blackboard state
+;;     :outputs {:key value ...}     ; Final blackboard state
 ;;     :duration-ms 1234             ; Total execution time
 ;;     :trace-id #uuid "..."         ; Unique trace identifier
 ;;     :executed-version 1}          ; If running published version
@@ -988,8 +988,8 @@ Each trace contains comprehensive execution data:
  :completed-at #inst "2025-01-18T..."
  :duration-ms 2500
  :status :success                     ; :success, :failure, :timeout
- :input-snapshot {"leads" [...]}      ; Initial blackboard
- :output-snapshot {"results" [...]}   ; Final blackboard
+ :input-snapshot {:leads [...]}       ; Initial blackboard
+ :output-snapshot {:results [...]}    ; Final blackboard
  :error nil                           ; Error message if failed
  :node-traces [...]                   ; Per-node execution details
 }
@@ -1011,8 +1011,8 @@ Each node execution is captured with full context:
  :started-at #inst "..."
  :completed-at #inst "..."
  :duration-ms 450
- :inputs {"current-lead" {...}}      ; Node inputs
- :outputs {"lead-analysis" {...}}    ; Node outputs
+ :inputs {:current-lead {...}}       ; Node inputs
+ :outputs {:lead-analysis {...}}     ; Node outputs
  :error nil}
 ```
 
@@ -1209,7 +1209,7 @@ The ORC UI provides rich visualization tools:
 (first failed-nodes)
 ;; => {:node-name "score-budget"
 ;;     :error "Rate limit exceeded"
-;;     :inputs {"current-lead" {...}}
+;;     :inputs {:current-lead {...}}
 ;;     ...}
 
 ;; 4. Check if it's a pattern
@@ -1245,9 +1245,9 @@ Builds or updates a workflow. **Idempotent** - same definition = no changes.
 
 #### `sheet/execute`
 ```clojure
-(sheet/execute ctx sheet-id {"input-key" value})
+(sheet/execute ctx sheet-id {:input-key value})
 ;; => {:status :success/:failure
-;;     :outputs {"output-key" value}
+;;     :outputs {:output-key value}
 ;;     :error "..." (if failed)}
 ```
 
@@ -1362,7 +1362,7 @@ Saves a sheet directly to a .clj file.
 
 2. **Provide context in reads**
 ```clojure
-:reads ["current-item" "user-preferences" "historical-data"]
+:reads [:current-item :user-preferences :historical-data]
 ```
 
 3. **Use appropriate models**
@@ -1383,28 +1383,28 @@ Saves a sheet directly to a .clj file.
 ;; Standard pattern
 (defn my-function
   [{:keys [inputs]}]
-  (let [input-a (get inputs "input-a")
-        input-b (get inputs "input-b")
+  (let [input-a (:input-a inputs)
+        input-b (:input-b inputs)
         result (process input-a input-b)]
-    {"output-key" result}))
+    {:output-key result}))
 
 ;; Multiple outputs
 (defn compute-stats
   [{:keys [inputs]}]
-  (let [items (get inputs "items")
+  (let [items (:items inputs)
         stats (calculate-stats items)]
-    {"mean" (:mean stats)
-     "median" (:median stats)
-     "count" (count items)}))
+    {:mean (:mean stats)
+     :median (:median stats)
+     :count (count items)}))
 
 ;; Filtering pattern
 (defn filter-items
   [{:keys [inputs]}]
-  (let [items (get inputs "items")
-        criteria (get inputs "criteria")
+  (let [items (:items inputs)
+        criteria (:criteria inputs)
         filtered (filter #(matches? % criteria) items)]
-    {"filtered-items" (vec filtered)
-     "removed-count" (- (count items) (count filtered))}))
+    {:filtered-items (vec filtered)
+     :removed-count (- (count items) (count filtered))}))
 ```
 
 ### Testing Workflows
@@ -1416,12 +1416,12 @@ Saves a sheet directly to a .clj file.
 ;; Test happy path
 (let [result (sheet/execute ctx sheet-id sample-input)]
   (assert (= :success (:status result)))
-  (assert (some? (get-in result [:outputs "expected-key"]))))
+  (assert (some? (get-in result [:outputs :expected-key]))))
 
 ;; Test edge cases
 (let [result (sheet/execute ctx sheet-id edge-case-input)]
   (assert (= :success (:status result)))
-  (assert (= expected-value (get-in result [:outputs "key"]))))
+  (assert (= expected-value (get-in result [:outputs :key]))))
 
 ;; Test error handling
 (let [result (sheet/execute ctx sheet-id invalid-input)]

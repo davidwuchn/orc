@@ -68,18 +68,18 @@ The orc-service component is the core of ORC's behavior tree execution engine. I
     (sheet/llm "greet"
       :model "google/gemini-2.0-flash-001"
       :instruction "Generate a friendly greeting for the given name."
-      :reads ["name"]
-      :writes ["greeting"])))
+      :reads [:name]
+      :writes [:greeting])))
 
 ;; 2. Build the workflow (stores in event store)
 (def sheet-id (sheet/build-workflow! ctx hello-workflow))
 
 ;; 3. Execute with inputs
-(def result (sheet/execute ctx sheet-id {"name" "Alice"}))
+(def result (sheet/execute ctx sheet-id {:name "Alice"}))
 
 ;; 4. Check outputs
 (:status result)   ;; => :success
-(:outputs result)  ;; => {"greeting" "Hello Alice! ..."}
+(:outputs result)  ;; => {:greeting "Hello Alice! ..."}
 ```
 
 ### Running in the REPL
@@ -90,7 +90,7 @@ The orc-service component is the core of ORC's behavior tree execution engine. I
 
 ;; Build and execute
 (def sheet-id (sheet/build-workflow! ctx my-workflow))
-(sheet/execute ctx sheet-id {"input" "value"})
+(sheet/execute ctx sheet-id {:input "value"})
 ```
 
 ---
@@ -167,9 +167,9 @@ Iterate over a collection.
 
 ```clojure
 (sheet/map-each "process-items"
-  :collection-key "items"
-  :item-key "current-item"
-  :result-key "processed-items"
+  :collection-key :items
+  :item-key :current-item
+  :result-key :processed-items
   :parallel 3               ;; Optional parallelism
   (sheet/llm "process" ...))
 ```
@@ -184,8 +184,8 @@ Call an LLM.
 (sheet/llm "analyze"
   :model "google/gemini-2.0-flash-001"
   :instruction "Analyze the input and provide insights."
-  :reads ["input-data"]
-  :writes ["analysis"])
+  :reads [:input-data]
+  :writes [:analysis])
 ```
 
 **Options:**
@@ -205,8 +205,8 @@ Execute a Clojure function.
 ```clojure
 (sheet/code "transform"
   :fn "my-app.executors/transform-data"
-  :reads ["input"]
-  :writes ["output"])
+  :reads [:input]
+  :writes [:output])
 ```
 
 #### `condition`
@@ -215,8 +215,8 @@ Check a boolean expression on the blackboard.
 
 ```clojure
 (sheet/condition "check-valid"
-  :expression "valid?"    ;; Blackboard key that holds boolean
-  :reads ["valid?"])
+  :expression :valid?    ;; Blackboard key that holds boolean
+  :reads [:valid?])
 ```
 
 #### `llm-condition`
@@ -227,7 +227,7 @@ Use an LLM for yes/no decisions.
 (sheet/llm-condition "is-spam"
   :model "google/gemini-2.0-flash-001"
   :question "Is this message spam?"
-  :reads ["message"])
+  :reads [:message])
 ```
 
 ---
@@ -334,11 +334,11 @@ sheet/execute(ctx, sheet-id, inputs)
 ### Execution Result
 
 ```clojure
-(def result (sheet/execute ctx sheet-id {"input" "value"}))
+(def result (sheet/execute ctx sheet-id {:input "value"}))
 
 result
 ;; => {:status :success           ;; :success, :failure, :timeout
-;;     :outputs {"key" "value"}   ;; Final blackboard state
+;;     :outputs {:key "value"}    ;; Final blackboard state
 ;;     :duration-ms 1234          ;; Total execution time
 ;;     :trace-id #uuid "..."}     ;; Unique trace identifier
 ```
@@ -383,7 +383,7 @@ The orc-service uses Grain's event store for persistence and observability.
 
 ;; Get blackboard schema
 (sheet/get-blackboard-by-key event-store sheet-id)
-;; => {"input" {:schema :string} "output" {:schema [:map ...]}}
+;; => {:input {:schema :string} :output {:schema [:map ...]}}
 
 ;; Get execution trace
 (sheet/get-trace event-store trace-id)
@@ -439,8 +439,8 @@ Code nodes execute Clojure functions. The function receives an inputs map and re
 ```clojure
 (defn my-executor
   [{:keys [inputs]}]
-  (let [input-val (get inputs "input-key")]
-    {"output-key" (process input-val)}))
+  (let [input-val (:input-key inputs)]
+    {:output-key (process input-val)}))
 ```
 
 ### Full Context
@@ -454,7 +454,7 @@ Executors receive the full execution context:
   ;; context: Grain context with :event-store
   ;; node-id: UUID of this node
   ;; sheet-id: UUID of the workflow
-  {"result" (compute inputs)})
+  {:result (compute inputs)})
 ```
 
 ### Registering Executors
@@ -464,8 +464,8 @@ Reference executors by fully-qualified function name:
 ```clojure
 (sheet/code "process"
   :fn "my-app.executors/my-executor"
-  :reads ["input"]
-  :writes ["output"])
+  :reads [:input]
+  :writes [:output])
 ```
 
 ---
@@ -500,9 +500,9 @@ Create deterministic executors for testing:
 ```clojure
 (defn mock-qa-executor
   [{:keys [inputs]}]
-  (let [question (get inputs "question")
-        instruction (get inputs "instruction")]
-    {"answer" (str "Mock answer for: " question)}))
+  (let [question (:question inputs)
+        instruction (:instruction inputs)]
+    {:answer (str "Mock answer for: " question)}))
 ```
 
 ### Verifying Events
@@ -514,7 +514,7 @@ Create deterministic executors for testing:
           event-store (:event-store ctx)
 
           ;; Execute
-          result (sheet/execute ctx sheet-id {"input" "test"})
+          result (sheet/execute ctx sheet-id {:input "test"})
 
           ;; Query events (must materialize!)
           events (into [] (es/read event-store
@@ -556,8 +556,8 @@ Make workflows optimizable by GEPA (Genetic-Pareto Prompt Optimizer).
     (sheet/llm "answer"
       :model "google/gemini-2.0-flash-001"
       :instruction "Follow the instruction in the 'instruction' field."
-      :reads ["question" "instruction"]  ;; <-- instruction in reads!
-      :writes ["answer"])))
+      :reads [:question :instruction]  ;; <-- instruction in reads!
+      :writes [:answer])))
 ```
 
 ### Running GEPA Optimization

@@ -238,15 +238,15 @@ Complete reference of all `:sheet/*` event types.
         :sheet-id #uuid "sheet-123"
         :status :success
         :duration-ms 2500
-        :input-snapshot {"question" "What is 2+2?"}
-        :output-snapshot {"answer" "4"}
+        :input-snapshot {:question "What is 2+2?"}
+        :output-snapshot {:answer "4"}
         :node-traces [{:node-id #uuid "node-456"
                        :node-name "answer"
                        :node-type :leaf
                        :status :success
                        :duration-ms 423
-                       :inputs {"question" "What is 2+2?"}
-                       :outputs {"answer" "4"}}]}}
+                       :inputs {:question "What is 2+2?"}
+                       :outputs {:answer "4"}}]}}
 ```
 
 ---
@@ -423,14 +423,14 @@ The `test-helpers` namespace provides factory functions:
 (h/run-and-apply! ctx (h/make-create-node-command sheet-id :leaf))
 
 ;; Set node I/O
-(h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id ["input"] ["output"]))
+(h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id [:input] [:output]))
 
 ;; Set executor
 (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node-id :code
                         :fn "my-app.test/mock-executor"))
 
 ;; Declare blackboard key
-(h/run-and-apply! ctx (h/make-declare-key-command sheet-id "key-name" :string))
+(h/run-and-apply! ctx (h/make-declare-key-command sheet-id :key-name :string))
 
 ;; Query
 (h/run-query ctx (h/make-get-trace-query trace-id))
@@ -452,18 +452,18 @@ The `test-helpers` namespace provides factory functions:
           node-id (-> node-result :command-result/events first :node-id)
 
           ;; Configure
-          _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "input" :string))
-          _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id "output" :string))
-          _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id ["input"] ["output"]))
+          _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+          _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
+          _ (h/run-and-apply! ctx (h/make-set-node-io-command sheet-id node-id [:input] [:output]))
           _ (h/run-and-apply! ctx (h/make-set-node-executor-command sheet-id node-id :code
                                     :fn "my-app.test/echo-executor"))
 
           ;; Execute
-          result (sheet/execute ctx sheet-id {"input" "test-value"})]
+          result (sheet/execute ctx sheet-id {:input "test-value"})]
 
       ;; Verify execution
       (is (= :success (:status result)))
-      (is (= "test-value" (get-in result [:outputs "output" "input"])))
+      (is (= "test-value" (get-in result [:outputs :output :input])))
 
       ;; Verify events
       (let [events (into [] (es/read event-store

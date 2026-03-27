@@ -51,7 +51,7 @@ Restart Claude Code after creating this file.
 (def result (msb/build-sheet-from-mcp! ctx {:preset :langfuse}))
 
 ;; Execute it
-(sheet/execute ctx (:sheet-id result) {"query" "How do I trace LLM calls?"})
+(sheet/execute ctx (:sheet-id result) {:query "How do I trace LLM calls?"})
 ```
 
 ### 3. Using MCP Tools in Other Projects
@@ -170,7 +170,7 @@ llm             : Call LLM via DSCloj
                   Reads blackboard keys -> LLM -> Writes outputs
 
 code            : Call Clojure function
-                  Function: {:inputs {...}} -> {"output" value}
+                  Function: {:inputs {...}} -> {:output value}
 
 condition       : Check blackboard value
                   Operators: :equals :gt :lt :contains :exists
@@ -188,18 +188,18 @@ The **blackboard** is the single source of truth for data flow:
 
 ```clojure
 ;; Blackboard entry structure
-{"key-name" {:key "key-name"
-             :schema [:string {:description "..."}]
-             :value "current value"
-             :version 3}}  ;; Increments on each write
+{:key-name {:key :key-name
+            :schema [:string {:description "..."}]
+            :value "current value"
+            :version 3}}  ;; Increments on each write
 ```
 
 **Data flows through nodes:**
 ```
-Node A (writes "result")  ->  Blackboard  ->  Node B (reads "result")
+Node A (writes :result)  ->  Blackboard  ->  Node B (reads :result)
          |                       |                |
    {:outputs          version increments    {:inputs
-    {"result" val}}                          {"result" val}}
+    {:result val}}                          {:result val}}
 ```
 
 ### Execution Example
@@ -213,16 +213,16 @@ Node A (writes "result")  ->  Blackboard  ->  Node B (reads "result")
   (sheet/llm "answer-question"
     :model "google/gemini-2.5-flash"
     :instruction "Answer the question concisely"
-    :reads ["question"]
-    :writes ["answer"]))
+    :reads [:question]
+    :writes [:answer]))
 
 ;; Build it
 (def sheet-id (sheet/build-workflow! ctx workflow))
 
 ;; Execute it
-(sheet/execute ctx sheet-id {"question" "What is Langfuse?"})
+(sheet/execute ctx sheet-id {:question "What is Langfuse?"})
 ;; => {:status :success
-;;     :outputs {"answer" "Langfuse is an observability platform..."}
+;;     :outputs {:answer "Langfuse is an observability platform..."}
 ;;     :duration-ms 1234}
 ```
 
@@ -282,8 +282,8 @@ The `repl-researcher` node implements the **RLM (Research Language Model)** patt
 (sheet/repl-researcher "research"
   :model "google/gemini-2.5-flash"
   :instruction "Research how to trace LLM calls in Langfuse"
-  :reads ["question"]           ;; Blackboard keys (metadata only)
-  :writes ["answer"]            ;; Output key for final result
+  :reads [:question]           ;; Blackboard keys (metadata only)
+  :writes [:answer]            ;; Output key for final result
   :mcp-tools ["searchLangfuseDocs" "getLangfuseDocsPage"]
   :max-iterations 10)
 ```
@@ -417,7 +417,7 @@ FINAL_ANSWER? -> return {:status :success :outputs {...}}
 ;;  :analysis {...}}
 
 ;; 2. Execute the sheet
-(sheet/execute ctx (:sheet-id result) {"query" "How do I trace LLM calls?"})
+(sheet/execute ctx (:sheet-id result) {:query "How do I trace LLM calls?"})
 ```
 
 ### Advanced: REPL Researcher for Adaptive Tool Use
@@ -431,7 +431,7 @@ FINAL_ANSWER? -> return {:status :success :outputs {...}}
     {:max-iterations 5}))
 
 ;; Execute - the LLM will generate code, call tools, iterate
-(sheet/execute ctx (:sheet-id researcher) {"question" "What is tracing?"})
+(sheet/execute ctx (:sheet-id researcher) {:question "What is tracing?"})
 ```
 
 ### Production Workflow
@@ -452,7 +452,7 @@ FINAL_ANSWER? -> return {:status :success :outputs {...}}
                          |
 +------------------------v------------------------------------+
 | 3. EXECUTE (many times with different inputs)               |
-|    (sheet/execute ctx sheet-id {"query" "..."})             |
+|    (sheet/execute ctx sheet-id {:query "..."})             |
 |    Returns: {:status :success :outputs {...}}               |
 +-------------------------------------------------------------+
 ```
@@ -614,11 +614,11 @@ Export MCP-generated sheets as **standalone `.clj` files** that work with only `
   "Generated executor for MCP tool: searchDocs"
   [{:keys [inputs context]}]
   (let [mcp-session (:mcp-session context)
-        tool-args {"query" (get inputs "query")}]
+        tool-args {"query" (get inputs :query)}]
     (if mcp-session
       (let [result (mcp-client/call-tool mcp-session "searchDocs" tool-args)]
-        {"searchDocs-result" result})
-      {"searchDocs-result" {:mock true :tool "searchDocs" :args tool-args}})))
+        {:searchDocs-result result})
+      {:searchDocs-result {:mock true :tool "searchDocs" :args tool-args}})))
 
 ;; ... more executors ...
 
@@ -642,8 +642,8 @@ Export MCP-generated sheets as **standalone `.clj` files** that work with only `
                :children [{:node-type :leaf
                            :executor :code
                            :fn "my-research-executors/call-searchDocs"  ;; Points to exported executors
-                           :reads ["query"]
-                           :writes ["searchDocs-result"]}
+                           :reads [:query]
+                           :writes [:searchDocs-result]}
                           ...]}})
 
 (defn build!
@@ -688,7 +688,7 @@ In any project with `orc-service`:
 
 ;; 4. Execute with MCP session in context
 (sheet/execute ctx sheet-id
-  {"query" "How do traces work?"}
+  {:query "How do traces work?"}
   :context {:mcp-session my-mcp-connection})
 ```
 
@@ -733,7 +733,7 @@ What if you want to:
 
 ;; Resolve and call
 (let [executor (msb/get-executor "searchDocs")]
-  (executor {:inputs {"query" "test"}
+  (executor {:inputs {:query "test"}
              :context {:mcp-session my-conn}}))
 
 ;; List all loaded executors

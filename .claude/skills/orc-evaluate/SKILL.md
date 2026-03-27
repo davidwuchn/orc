@@ -53,15 +53,15 @@ Attach judges to workflow nodes for automatic scoring during execution:
 
   ;; Define judge configurations
   (orc/judges
-    {"grounding"    {:type :grounding :weight 0.5}
-     "completeness" {:type :completeness :weight 0.5}})
+    {:grounding    {:type :grounding :weight 0.5}
+     :completeness {:type :completeness :weight 0.5}})
 
   ;; Attach judges to a node
   (orc/llm "answer"
     :instruction "Answer the question thoroughly."
-    :reads ["question"]
-    :writes ["answer"]
-    :judges ["grounding" "completeness"]))
+    :reads [:question]
+    :writes [:answer]
+    :judges [:grounding :completeness]))
 ```
 
 When executed with tracing enabled, each judged node produces evaluation scores in the trace.

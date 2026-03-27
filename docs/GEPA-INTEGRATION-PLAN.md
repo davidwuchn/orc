@@ -410,13 +410,13 @@ Current infrastructure:
     (sheet/llm "analyze-failures"
       :model "anthropic/claude-sonnet-4"
       :instruction "Analyze why the current instruction failed on these examples..."
-      :reads ["current-instruction" "failure-examples"]
-      :writes ["mutation-reasoning"])
+      :reads [:current-instruction :failure-examples]
+      :writes [:mutation-reasoning])
 
     (sheet/llm "propose-improvement"
       :instruction "Based on the analysis, propose an improved instruction..."
-      :reads ["current-instruction" "mutation-reasoning"]
-      :writes ["proposed-instruction"])))
+      :reads [:current-instruction :mutation-reasoning]
+      :writes [:proposed-instruction])))
 ```
 
 **Files to create:**
@@ -474,8 +474,8 @@ Current infrastructure:
 
   (sheet/llm "merge-instructions"
     :instruction "Analyze these top-performing instructions and synthesize a combined instruction that captures the best patterns..."
-    :reads ["top-instructions" "performance-stats"]
-    :writes ["merged-instruction"]))
+    :reads [:top-instructions :performance-stats]
+    :writes [:merged-instruction]))
 ```
 
 **Files to create:**

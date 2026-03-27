@@ -70,7 +70,7 @@ Every sheet execution automatically captures detailed traces.
 
 ```clojure
 ;; Execute a sheet
-(def result (sheet/execute ctx my-sheet {"input-key" "value"}))
+(def result (sheet/execute ctx my-sheet {:input-key "value"}))
 
 ;; The execution emits a :sheet/execution-traced event containing:
 {:trace-id #uuid "..."
@@ -79,13 +79,13 @@ Every sheet execution automatically captures detailed traces.
  :completed-at #inst "2024-..."
  :duration-ms 1234
  :status :success  ;; or :failure, :timeout
- :input-snapshot {"input-key" "value"}
- :output-snapshot {"output-key" "result"}
+ :input-snapshot {:input-key "value"}
+ :output-snapshot {:output-key "result"}
  :node-traces [{:node-id #uuid "..."
                 :node-name "analyze"
                 :node-type :leaf
-                :inputs {"input-key" "value"}
-                :outputs {"output-key" "result"}
+                :inputs {:input-key "value"}
+                :outputs {:output-key "result"}
                 :duration-ms 456
                 :status :success}]}
 ```
@@ -123,7 +123,7 @@ Run reference-free evaluation using LLM-as-judge patterns.
 
 ;; Run evaluation suite
 (def eval-result (sheet/execute ctx (eval/evaluation-suite)
-                   {"traces" traces}))
+                   {:traces traces}))
 
 ;; Result contains ScoreWithFeedback for each trace:
 ;; {:score 0.75
@@ -269,8 +269,8 @@ Inject learned context into LLM node instructions.
 (sheet/llm "analyze-lead"
   :model "google/gemini-2.5-flash"
   :instruction "Analyze the lead and provide a qualification score..."
-  :reads ["lead-data"]
-  :writes ["lead-score"]
+  :reads [:lead-data]
+  :writes [:lead-score]
   :context {:problem-type "Classification"
             :domain "sales"})
 ```
@@ -358,7 +358,7 @@ Run the feedback loop manually for development and testing:
 
 ;; 1. Execute a sheet and capture trace
 (def result (sheet/execute ctx lead-qualifier-sheet
-              {"lead-data" sample-lead}))
+              {:lead-data sample-lead}))
 (def trace-id (get-in result [:trace :trace-id]))
 
 ;; 2. Extract trace for evaluation
@@ -368,14 +368,14 @@ Run the feedback loop manually for development and testing:
 
 ;; 3. Run evaluation
 (def eval-result (sheet/execute ctx (eval/evaluation-suite)
-                   {"traces" traces}))
+                   {:traces traces}))
 
 ;; 4. Classify and auto-record to ontology
 (cp/run-command! ctx :ontology/classify-evaluation
   {:trace-id trace-id
    :sheet-id (:sheet-id result)
    :node-id (-> traces first :node-id)
-   :evaluation-result (-> eval-result :outputs (get "results") first)
+   :evaluation-result (-> eval-result :outputs (get :results) first)
    :auto-record? true})
 
 ;; 5. Verify learning was recorded
@@ -389,7 +389,7 @@ Run the feedback loop manually for development and testing:
 
 ;; 7. Next execution will include this context automatically
 (def improved-result (sheet/execute ctx lead-qualifier-sheet
-                       {"lead-data" another-lead}))
+                       {:lead-data another-lead}))
 ```
 
 ### Batch Evaluation Workflow
@@ -405,10 +405,10 @@ Evaluate multiple historical traces:
 
 ;; Run batch evaluation
 (def batch-result (sheet/execute ctx (eval/batch-evaluation-suite)
-                    {"traces" traces}))
+                    {:traces traces}))
 
 ;; Analyze results
-(let [results (get-in batch-result [:outputs "results"])
+(let [results (get-in batch-result [:outputs :results])
       scores (map :aggregate-score results)]
   {:count (count scores)
    :avg (/ (reduce + scores) (count scores))

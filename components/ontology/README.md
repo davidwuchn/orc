@@ -96,8 +96,8 @@ Add the `:context` parameter to LLM nodes for automatic ontology injection:
 (sheet/llm "classify"
   :model "google/gemini-2.5-flash"
   :instruction "Classify the input..."
-  :reads ["input"]
-  :writes ["classification"]
+  :reads [:input]
+  :writes [:classification]
   :context {:problem-type "problem:Classification"
             :include-patterns true
             :include-failures true})
