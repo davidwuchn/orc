@@ -45,7 +45,7 @@
 
   ;; Define a function for the code node to resolve
   (defn my-upper [{:keys [inputs]}]
-    {"output" (.toUpperCase (str (get inputs "input")))})
+    {:output (.toUpperCase (str (:input inputs)))})
 
   ;; Build a workflow using the DSL
   ;; See docs/dsl-tutorial.md for the full node reference
@@ -54,14 +54,14 @@
       (orc/blackboard {:input :string :output :string})
       (orc/code "upper"
         :fn "dev/my-upper"
-        :reads ["input"]
-        :writes ["output"])))
+        :reads [:input]
+        :writes [:output])))
 
   (def sheet-id (orc/build-workflow! (ctx) my-workflow))
 
   ;; Execute it
-  (orc/execute (ctx) sheet-id {"input" "hello from orc"})
-  ;; => {:status :success, :outputs {"input" "hello from orc", "output" "HELLO FROM ORC"}, ...}
+  (orc/execute (ctx) sheet-id {:input "hello from orc"})
+  ;; => {:status :success, :outputs {:input "hello from orc", :output "HELLO FROM ORC"}, ...}
 
   ;; LLM node example (requires :dscloj-provider configured)
   (def llm-workflow
@@ -69,8 +69,8 @@
       (orc/blackboard {:name :string :greeting :string})
       (orc/llm "greet"
         :instruction "Generate a friendly one-sentence greeting for the given name."
-        :reads ["name"]
-        :writes ["greeting"])))
+        :reads [:name]
+        :writes [:greeting])))
 
   (stop!)
 
