@@ -199,4 +199,4 @@ ORC is a library — consumers provide:
 
 ## License
 
-Proprietary. Copyright ObneyAI.
+MIT. See [LICENSE](LICENSE).
