@@ -1,0 +1,13 @@
+{:env "dev"
+
+ ;; DSCloj LLM Provider
+ ;; Options: :openrouter, :anthropic, :openai
+ :dscloj-provider "openrouter"
+
+ ;; Langfuse Observability (optional)
+ ;; Set keys here or via environment variables:
+ ;;   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
+ ;; :langfuse/public-key ""
+ ;; :langfuse/secret-key ""
+ ;; :langfuse/host "https://cloud.langfuse.com"
+ }

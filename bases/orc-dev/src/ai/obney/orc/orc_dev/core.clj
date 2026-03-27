@@ -37,7 +37,8 @@
             [ai.obney.orc.mcp-sheet-builder.interface.schemas]
             [ai.obney.orc.langfuse.interface]
 
-            [integrant.core :as ig]))
+            [integrant.core :as ig]
+            [config.core :refer [env]]))
 
 ;; =============================================================================
 ;; Integrant System
@@ -72,7 +73,8 @@
               :event-pubsub (ig/ref ::event-pubsub)
               :command-registry (cp/global-command-registry)
               :query-registry (qp/global-query-registry)
-              :dscloj-provider :openrouter}})
+              :dscloj-provider (when-let [p (:dscloj-provider env)]
+                                 (keyword p))}})
 
 ;; =============================================================================
 ;; Integrant Lifecycle
