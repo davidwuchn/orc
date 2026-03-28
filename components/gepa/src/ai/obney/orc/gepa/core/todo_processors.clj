@@ -26,6 +26,7 @@
             [ai.obney.orc.gepa.core.reflection :as reflection]
             [ai.obney.orc.gepa.core.proposer :as proposer]
             [ai.obney.orc.gepa.core.sampler :as sampler]
+            [ai.obney.orc.gepa.core.optimization :as optimization]
             [ai.obney.orc.orc-service.interface :as sheet]
             [ai.obney.grain.command-processor-v2.interface :as command-processor]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
@@ -57,7 +58,7 @@
         ;; Filter for LLM nodes - type :leaf with :executor :llm, or :llm-condition
         llm-nodes (filter (fn [node]
                             (or (and (= :leaf (:type node))
-                                     (= :llm (:executor node)))
+                                     (#{:ai :llm} (:executor node)))
                                 (= :llm-condition (:type node))))
                           nodes)
         ;; Build instruction map: {node-name -> instruction}
@@ -467,8 +468,10 @@
             ;; Get validation set from stored datasets
             valset (rm/get-valset context optimization-id)
 
-            ;; Get metric function from context or use default
-            metric-fn (or (:gepa/metric-fn context) default-metric-fn)
+            ;; Get metric function from registry, context, or use default
+            metric-fn (or (optimization/get-metric-fn optimization-id)
+                          (:gepa/metric-fn context)
+                          default-metric-fn)
 
             ;; Evaluate: Execute workflow on each validation example
             ;; If valset is empty or workflow execution fails, fall back to simulated scores
@@ -548,7 +551,7 @@
              :scores scores})
 
         ;; Check budget
-        budget-exhausted? (rm/budget-exhausted? event-store optimization-id)]
+        budget-exhausted? (rm/budget-exhausted? context optimization-id)]
 
     (if budget-exhausted?
       ;; Complete the optimization
@@ -655,8 +658,10 @@
         ;; Get trainset for subsample evaluation
         trainset (rm/get-trainset context optimization-id)
 
-        ;; Get metric function
-        metric-fn (or (:gepa/metric-fn context) default-metric-fn)
+        ;; Get metric function from registry, context, or use default
+        metric-fn (or (optimization/get-metric-fn optimization-id)
+                      (:gepa/metric-fn context)
+                      default-metric-fn)
 
         ;; Get parent instructions
         parent-candidate (rm/get-candidate context optimization-id parent-id)
@@ -815,7 +820,7 @@
 
       ;; REJECTED: Try another mutation
       ;; Check budget first, then propose another mutation
-      (let [budget-exhausted? (rm/budget-exhausted? event-store optimization-id)]
+      (let [budget-exhausted? (rm/budget-exhausted? context optimization-id)]
         (if budget-exhausted?
           ;; Budget exhausted - complete the optimization
           (do

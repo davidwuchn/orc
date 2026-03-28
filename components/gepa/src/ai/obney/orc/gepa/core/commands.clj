@@ -45,9 +45,9 @@
    Emits two events:
    1. :gepa/optimization-started - Metadata about the optimization
    2. :gepa/datasets-stored - Full trainset and valset for evaluation"
-  [{{:keys [sheet-id trainset valset config]} :command
+  [{{:keys [sheet-id trainset valset config optimization-id]} :command
     :keys [event-store] :as ctx}]
-  (let [optimization-id (random-uuid)
+  (let [optimization-id (or optimization-id (random-uuid))
         merged-config (merge-config (or config {}))
         now (time/now)
         ;; Normalize trainset/valset to use string keys for JSON compatibility

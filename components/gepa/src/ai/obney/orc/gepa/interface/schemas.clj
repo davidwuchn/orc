@@ -266,6 +266,7 @@
 (defschemas commands
   {:gepa/start-optimization
    [:map
+    [:optimization-id {:optional true} :uuid]
     [:sheet-id :uuid]
     [:trainset [:vector [:map-of :string :any]]]
     [:valset [:vector [:map-of :string :any]]]

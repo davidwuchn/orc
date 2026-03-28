@@ -815,10 +815,12 @@
   (let [new-tick-id (or tick-id (random-uuid))]
     (if inputs
       ;; Snapshot-based execution: build full snapshot for isolation
-      (let [snapshot (runtime/build-execution-snapshot
+      (let [instruction-overrides (:gepa/patched-instructions context)
+            snapshot (runtime/build-execution-snapshot
                        context sheet-id
                        :use-version use-version
-                       :force-draft force-draft)]
+                       :force-draft force-draft
+                       :instruction-overrides instruction-overrides)]
         (if (::anom/category snapshot)
           snapshot ;; Return anomaly if snapshot building failed
           {:command-result/events

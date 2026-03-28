@@ -31,6 +31,29 @@
     (swap! completion-registry dissoc optimization-id)))
 
 ;; =============================================================================
+;; Metric Function Registry (for async processors)
+;; =============================================================================
+
+(defonce ^:private metric-fn-registry (atom {}))
+
+(defn register-metric-fn!
+  "Register a metric function for an optimization-id.
+   Called by optimize! so async todo processors can look it up."
+  [optimization-id metric-fn]
+  (swap! metric-fn-registry assoc optimization-id metric-fn))
+
+(defn get-metric-fn
+  "Get the registered metric function for an optimization-id.
+   Returns nil if not registered (processors fall back to default-metric-fn)."
+  [optimization-id]
+  (get @metric-fn-registry optimization-id))
+
+(defn unregister-metric-fn!
+  "Remove a metric function from the registry (cleanup after optimization)."
+  [optimization-id]
+  (swap! metric-fn-registry dissoc optimization-id))
+
+;; =============================================================================
 ;; Command Processing Helper
 ;; =============================================================================
 
@@ -105,6 +128,10 @@
                           (assoc context :gepa/metric-fn effective-metric-fn)
                           context)
 
+        ;; Register metric function for async processors
+        _ (when effective-metric-fn
+            (register-metric-fn! optimization-id effective-metric-fn))
+
         ;; Register for completion if blocking
         completion-promise (when block?
                              (register-completion! optimization-id))
@@ -126,6 +153,7 @@
     (if (::anom/category cmd-result)
       ;; Command failed
       (do
+        (unregister-metric-fn! optimization-id)
         (when block?
           (swap! completion-registry dissoc optimization-id))
         cmd-result)
@@ -136,6 +164,7 @@
         (let [result (deref completion-promise timeout-ms ::timeout)
               duration-ms (- (System/currentTimeMillis) start-time)]
           (swap! completion-registry dissoc optimization-id)
+          (unregister-metric-fn! optimization-id)
           (if (= result ::timeout)
             {:optimization-id optimization-id
              :status :timeout

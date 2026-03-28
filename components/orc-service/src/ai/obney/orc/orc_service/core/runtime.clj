@@ -101,7 +101,7 @@
      :version-number - Version number if using published version (nil for draft)
 
    Or returns an anomaly map if the sheet/version is not found."
-  [context sheet-id & {:keys [use-version force-draft]}]
+  [context sheet-id & {:keys [use-version force-draft instruction-overrides]}]
   (let [event-store (:event-store context)
         sheet (rm/get-sheet context sheet-id)]
     (cond
@@ -132,12 +132,14 @@
         (if-not root-id
           {:cognitect.anomalies/category :cognitect.anomalies/not-found
            :cognitect.anomalies/message "Sheet has no root node"}
-          {:sheet-id sheet-id
-           :sheet-name (:name sheet)
-           :nodes-by-id nodes-by-id
-           :root-node-id root-id
-           :blackboard-entries blackboard-entries
-           :version-number version-number})))))
+          (cond-> {:sheet-id sheet-id
+                   :sheet-name (:name sheet)
+                   :nodes-by-id nodes-by-id
+                   :root-node-id root-id
+                   :blackboard-entries blackboard-entries
+                   :version-number version-number}
+            (seq instruction-overrides)
+            (assoc :instruction-overrides instruction-overrides)))))))
 
 ;; =============================================================================
 ;; Completion Registry (for sync callers waiting on async execution)

@@ -866,12 +866,14 @@
                              bb-entries
                              inputs)]
       (assoc state (:tick-id event)
-             {:sheet-id (:sheet-id event)
-              :nodes-by-id (:nodes-by-id snapshot)
-              :root-node-id (:root-node-id snapshot)
-              :blackboard blackboard
-              :version-number (:version-number snapshot)
-              :options (:options event)}))
+             (cond-> {:sheet-id (:sheet-id event)
+                      :nodes-by-id (:nodes-by-id snapshot)
+                      :root-node-id (:root-node-id snapshot)
+                      :blackboard blackboard
+                      :version-number (:version-number snapshot)
+                      :options (:options event)}
+               (:instruction-overrides snapshot)
+               (assoc :instruction-overrides (:instruction-overrides snapshot)))))
     ;; No snapshot - legacy tick, no context stored
     state))
 

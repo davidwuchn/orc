@@ -28,6 +28,18 @@
   [ctx _sheet-id tick-id]
   (rm/get-tick-blackboard ctx tick-id))
 
+(defn- resolve-instruction-overrides
+  "Get GEPA instruction overrides for a tick, if any."
+  [ctx tick-id]
+  (:instruction-overrides (rm/get-tick-execution-context ctx tick-id)))
+
+(defn- apply-instruction-override
+  "If instruction overrides exist for this node's name, apply them."
+  [node overrides]
+  (if-let [override (and overrides (:name node) (get overrides (:name node)))]
+    (assoc node :instruction override)
+    node))
+
 (defn- make-bb-write-event
   "Create a tick-scoped blackboard write event (isolated per execution)."
   [_event-store sheet-id tick-id key value _blackboard]
@@ -103,7 +115,9 @@
         node-id (:node-id event)
         event-inputs (:inputs event)
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
-        node (get nodes-by-id node-id)]
+        overrides (resolve-instruction-overrides context tick-id)
+        node (-> (get nodes-by-id node-id)
+                 (apply-instruction-override overrides))]
     (when (= :leaf (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             ;; Merge event inputs into blackboard (e.g., map-each item values)
@@ -175,7 +189,9 @@
         node-id (:node-id event)
         event-inputs (:inputs event)
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
-        node (get nodes-by-id node-id)]
+        overrides (resolve-instruction-overrides context tick-id)
+        node (-> (get nodes-by-id node-id)
+                 (apply-instruction-override overrides))]
     (when (= :repl-researcher (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             blackboard (reduce (fn [bb [k v]]
