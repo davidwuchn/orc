@@ -145,10 +145,10 @@
 
    Returns {:output map :trace-id uuid :score double :success? bool}."
   [context sheet-id instructions input metric-fn]
-  (let [;; Build input map from the example
+  (let [;; Build input map from the example — use keyword keys to match blackboard
         input-map (if (map? input)
-                    (into {} (map (fn [[k v]] [(name k) v]) input))
-                    {"input" input})
+                    (into {} (map (fn [[k v]] [(keyword k) v]) input))
+                    {:input input})
         ;; Execute the workflow
         result (try
                  (sheet/execute
