@@ -20,6 +20,7 @@
             [litellm.router :as litellm-router]
             [clojure.string :as str]
             [cheshire.core :as json]
+            [malli.core :as m]
             [ai.obney.orc.orc-service.core.observability :as obs]
             [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]))
 
@@ -276,15 +277,28 @@
    {}
    raw-outputs))
 
+(defn- schema-field-type
+  "Extract :field-type from a Malli schema's properties, if present.
+   E.g., [:vector {:field-type :image} :string] → :image"
+  [schema]
+  (when (and schema (vector? schema))
+    (try
+      (:field-type (m/properties schema))
+      (catch Exception _ nil))))
+
 (defn- build-field
   "Build a DSCloj field definition from a blackboard key and its entry.
    Now uses Malli schemas directly instead of legacy field types.
 
    If the Malli schema has a :description property (e.g., [:string {:description \"...\"}]),
    it will be used as the field description, combined with type info.
-   This aligns with Python DSPy's InputField(desc=\"...\") pattern."
+   This aligns with Python DSPy's InputField(desc=\"...\") pattern.
+
+   If the Malli schema has a :field-type property (e.g., [:vector {:field-type :image} :string]),
+   it will be set as :type on the DSCloj field definition, enabling multimodal support."
   [key-name blackboard-entry]
   (let [schema (:schema blackboard-entry)
+        field-type (schema-field-type schema)
         ;; Extract custom description from Malli schema properties
         custom-desc (extract-schema-description schema)
         type-desc (when schema (malli-schema->description schema))
@@ -305,10 +319,11 @@
                       ;; Fallback when no schema
                       :else
                       (str "Blackboard key: " key-name))]
-    {:name key-name
-     :original-key key-name  ;; Keep original for mapping back
-     :spec (or schema :any)  ;; Use the Malli schema directly
-     :description description}))
+    (cond-> {:name key-name
+             :original-key key-name  ;; Keep original for mapping back
+             :spec (or schema :any)  ;; Use the Malli schema directly
+             :description description}
+      field-type (assoc :type field-type))))
 
 ;; =============================================================================
 ;; Module Builder
@@ -383,15 +398,18 @@
 
    Args:
      node - The leaf node with :reads
-     blackboard - Map of key -> {:key, :type, :value, :version}
+     blackboard - Map of key -> {:key, :schema, :value, :version}
 
    Returns a map of keyword -> value for DSCloj (using sanitized names).
-   Complex values are serialized as JSON for better LLM understanding."
+   Complex values are serialized as JSON for better LLM understanding.
+   Values with :field-type in their schema properties (e.g., :image) are
+   passed through raw — they should not be JSON-serialized."
   [node blackboard]
   (reduce (fn [acc key-name]
             (if-let [entry (get blackboard key-name)]
               (let [value (:value entry)
-                    serialized (serialize-for-llm value)]
+                    ft (schema-field-type (:schema entry))
+                    serialized (if ft value (serialize-for-llm value))]
                 (assoc acc key-name serialized))
               acc))
           {}
@@ -499,9 +517,12 @@
     provider))
 
 (defn- outputs-have-nil?
-  "Check if any output values are nil."
+  "Check if any output values are nil, including nested maps where all values are nil."
   [outputs]
-  (some nil? (vals outputs)))
+  (some (fn [v]
+          (or (nil? v)
+              (and (map? v) (every? nil? (vals v)))))
+        (vals outputs)))
 
 (defn execute-ai
   "Execute a leaf node using DSCloj AI.
@@ -535,7 +556,7 @@
         effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking
         ;; Disable validation since we serialize complex inputs to JSON strings
-        dscloj-options (assoc options :with-metadata? true :validate? false)
+        dscloj-options (assoc options :validate? false)
         ;; Retry config - defaults to 1 retry with 500ms delay
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
@@ -555,12 +576,13 @@
                                   (debug-predict-with-raw-response effective-provider dscloj-module inputs dscloj-options)
                                   (dscloj/predict effective-provider dscloj-module inputs dscloj-options))
                          _ (println "[DEBUG executor] DSCloj result:" (pr-str result))
-                         raw-outputs (:outputs result)
+                         ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
+                         raw-outputs (or (:outputs result) result)
                          _ (println "[DEBUG executor] Raw (flattened) outputs:" (pr-str raw-outputs))
                          ;; Reassemble flattened outputs back into nested structure
                          outputs (reassemble-flattened-outputs raw-outputs output-mapping)]
                      (println "[DEBUG executor] Reassembled outputs:" (pr-str outputs))
-                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (:model result)}))]
+                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (or (:model result) (:model node))}))]
     (try
       (loop [attempt 0]
         (let [{:keys [outputs usage model]} (try-once)]
@@ -654,7 +676,7 @@
         effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking
         ;; Disable validation since inputs may be JSON serialized
-        dscloj-options (assoc options :with-metadata? true :validate? false)]
+        dscloj-options (assoc options :validate? false)]
     (try
       (let [response (dscloj/predict effective-provider module input-values dscloj-options)
             ;; Response now has {:outputs {...} :usage {...} :model "..."}
@@ -808,7 +830,7 @@
                         :context bb-metadata
                         :history (or (build-iteration-history history) "None")
                         :tools (str/join ", " mcp-tools)}
-                dscloj-options (assoc options :with-metadata? true :validate? false)
+                dscloj-options (assoc options :validate? false)
 
                 ;; Generate code
                 llm-result (dscloj/predict effective-provider module inputs dscloj-options)

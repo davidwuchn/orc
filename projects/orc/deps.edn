@@ -11,7 +11,10 @@
         orc/colbert           {:local/root "../../components/colbert"}
         orc/ontology          {:local/root "../../components/ontology"}
         orc/mcp-sheet-builder {:local/root "../../components/mcp-sheet-builder"}
-        orc/langfuse          {:local/root "../../components/langfuse"}}
+        orc/langfuse          {:local/root "../../components/langfuse"}
+
+        ;; LLM Providers
+        litellm/bedrock       {:local/root "../../../litellm-clj/contrib/bedrock"}}
 
  :aliases {:test {:extra-paths []
                   :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}}}}}
