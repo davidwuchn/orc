@@ -55,6 +55,7 @@
   #{:gepa/optimization-started
     :gepa/candidate-created
     :gepa/candidate-evaluated
+    :gepa/subsample-evaluated
     :gepa/optimization-completed
     :gepa/optimization-failed})
 
@@ -394,6 +395,9 @@
                   new-best?
                   (assoc :best-score aggregate-score
                          :best-candidate-id candidate-id))))
+
+          :gepa/subsample-evaluated
+          (update opt :total-metric-calls + (or (:metric-calls event) 0))
 
           :gepa/optimization-completed
           (assoc opt
