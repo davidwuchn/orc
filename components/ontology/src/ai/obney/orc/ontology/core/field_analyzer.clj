@@ -12,7 +12,9 @@
    - analyze-schema-fields: Helper for schema introspection
    - sample-field-values: Helper for sampling data"
   (:require [clojure.string :as str]
-            [malli.core :as m]))
+            [clojure.set :as set]
+            [malli.core :as m]
+            [com.brunobonacci.mulog :as mu]))
 
 ;; =============================================================================
 ;; Schema Introspection Helpers
@@ -397,12 +399,12 @@
           semantic-found (filterv #(contains? all-keys %) colbert-semantic-fields)
 
           ;; Filter out known non-semantic fields
-          other-keys (clojure.set/difference all-keys
-                                              colbert-semantic-fields
-                                              colbert-non-semantic-fields)
+          other-keys (set/difference all-keys
+                                     colbert-semantic-fields
+                                     colbert-non-semantic-fields)
 
           ;; For other keys, check if they look semantic based on sample values
-          additional-semantic
+          additional-semantic-strings
           (->> other-keys
                (filter (fn [k]
                          (let [values (keep k sample)
@@ -414,15 +416,34 @@
                                    20))))) ;; avg length > 20 chars
                vec)
 
-          colbert-fields (vec (concat semantic-found additional-semantic))
+          ;; Also detect vector-of-strings fields (like :skills, :knowledge)
+          additional-semantic-vectors
+          (->> other-keys
+               (filter (fn [k]
+                         (let [values (keep k sample)
+                               vector-vals (filter sequential? values)
+                               non-empty-vectors (filter seq vector-vals)]
+                           (and (seq vector-vals)
+                                (> (/ (count vector-vals) (max 1 (count values))) 0.5)
+                                ;; Check if non-empty vectors contain strings
+                                (seq non-empty-vectors)  ;; At least some non-empty
+                                (every? (fn [v] (every? string? v))
+                                        non-empty-vectors)))))
+               vec)
+
+          colbert-fields (vec (concat semantic-found
+                                      additional-semantic-strings
+                                      additional-semantic-vectors))
 
           ;; Build reasoning
           reasoning (into {}
                           (concat
                            (for [f semantic-found]
                              [f "Known semantic field type"])
-                           (for [f additional-semantic]
-                             [f "String field with substantial average length"])))]
+                           (for [f additional-semantic-strings]
+                             [f "String field with substantial average length"])
+                           (for [f additional-semantic-vectors]
+                             [f "Vector of strings field"])))]
 
       {:colbert-fields (if (seq colbert-fields)
                          colbert-fields
@@ -431,20 +452,71 @@
                     reasoning
                     {:default "Using default fields"})})))
 
-(defn detect-embedding-fields
-  "Detect which fields from concepts should be used for embedding.
+(defn detect-embedding-fields-heuristic
+  "Detect embedding fields using heuristics (no LLM).
 
-   Delegates to detect-colbert-fields for consistency - the same semantic fields
-   that are good for ColBERT token-level matching are also good for MiniLM
-   dense embeddings.
+   Uses detect-colbert-fields logic - suitable when LLM is unavailable
+   or for performance-critical paths.
 
    Args:
      concepts - Vector of concept maps
 
    Returns:
      {:embedding-fields [:label :description ...]
-      :reasoning {:field-name \"reason\" ...}}"
+      :reasoning {:field-name \"reason\" ...}
+      :method :heuristic}"
   [concepts]
   (let [{:keys [colbert-fields reasoning]} (detect-colbert-fields concepts)]
     {:embedding-fields colbert-fields
-     :reasoning (assoc reasoning :method :delegated-to-colbert)}))
+     :reasoning reasoning
+     :method :heuristic}))
+
+(defn detect-embedding-fields
+  "Detect which fields from concepts should be used for embedding.
+
+   When called with ctx (2-arity), uses LLM-driven ORC workflow to analyze
+   field samples and determine which are semantically meaningful. Falls back
+   to heuristics if workflow execution fails or ctx is not provided.
+
+   The LLM approach:
+   - Analyzes actual sample values, not just field names
+   - Works with any datasource without hardcoded field lists
+   - Provides reasoning for each decision
+
+   Args:
+     concepts - Vector of concept maps (1-arity, uses heuristics)
+     ctx - Context with :event-store for sheet execution (2-arity, uses LLM)
+     concepts - Vector of concept maps
+
+   Returns:
+     {:embedding-fields [:label :description ...]
+      :reasoning {:field-name \"reason\" ...}
+      :confidence-scores {:field-name 0.95 ...}  ;; Only with LLM
+      :method :llm|:heuristic}"
+  ([concepts]
+   ;; Fallback to heuristics when no context available
+   (detect-embedding-fields-heuristic concepts))
+
+  ([ctx concepts]
+   (if (nil? ctx)
+     (detect-embedding-fields-heuristic concepts)
+     (try
+       ;; Lazy require to avoid circular dependency
+       (require '[ai.obney.orc.ontology.core.field-analyzer-workflow :as faw])
+       (let [analyze-schema (resolve 'ai.obney.orc.ontology.core.field-analyzer-workflow/analyze-schema)
+             ;; Sample up to 10 concepts for analysis
+             sample-data (vec (take 10 concepts))
+             ;; Use nil schema - workflow will infer from data
+             result (analyze-schema ctx nil nil sample-data :confidence-threshold 0.6)]
+         (if (:error result)
+           (do
+             (mu/log ::llm-workflow-failed :error (:error result) :trace-id (:trace-id result))
+             (detect-embedding-fields-heuristic concepts))
+           {:embedding-fields (:embeddable-fields result)
+            :reasoning (:reasoning result)
+            :confidence-scores (:confidence-scores result)
+            :trace-id (:trace-id result)
+            :method :llm}))
+       (catch Exception e
+         (mu/log ::llm-workflow-exception :error (.getMessage e))
+         (detect-embedding-fields-heuristic concepts))))))

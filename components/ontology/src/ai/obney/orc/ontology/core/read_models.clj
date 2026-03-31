@@ -359,14 +359,17 @@
 
 (defmethod concept-embeddings* :ontology/concept-embedded
   [state event]
-  (assoc state (:uri event)
-         {:uri (:uri event)
-          :concept-id (:concept-id event)
-          :embedding (:embedding event)
-          :text-embedded (:text-embedded event)
-          :field-source (:field-source event)
-          :model-id (:model-id event)
-          :embedded-at (str (:embedded-at event))}))
+  ;; v3 event store flattens body fields to top level
+  (let [{:keys [uri concept-id embedding text-embedded field-source model-id embedded-at ontology-id]} event]
+    (assoc state uri
+           {:uri uri
+            :concept-id concept-id
+            :ontology-id ontology-id
+            :embedding embedding
+            :text-embedded text-embedded
+            :field-source field-source
+            :model-id model-id
+            :embedded-at (str embedded-at)})))
 
 (defmethod concept-embeddings* :default [state _] state)
 

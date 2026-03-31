@@ -175,11 +175,12 @@
 
    :ontology/concept-embedded
    [:map
-    [:concept-id :uuid]
-    [:uri :string]                        ;; "failure:Hallucination"
+    [:uri :string]                        ;; "failure:Hallucination" or "onet:11-1011.00"
+    [:ontology-id {:optional true} :uuid] ;; Links to evolutionary ontology
+    [:concept-id {:optional true} :uuid]  ;; Legacy individual concept ID
     [:text-embedded :string]              ;; Source text that was embedded
     [:field-source :string]               ;; "label+description" or "triggers"
-    [:embedding [:vector :double]]        ;; 384-dim vector
+    [:embedding [:vector :double]]        ;; 384-dim vector (MUST be :double, not Float)
     [:model-id :string]
     [:embedded-at :string]]
 
