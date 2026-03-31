@@ -462,7 +462,8 @@
      opts: {:embedding-fields nil     ;; Auto-detect if nil
             :auto-detect? true        ;; Use field analyzer
             :model-id nil             ;; Use default MiniLM
-            :batch-size 32}           ;; Process in batches
+            :batch-size 32            ;; Process in batches
+            :ctx nil}                 ;; Context for LLM field detection
 
    Returns:
      {:embedded-count N
@@ -470,7 +471,7 @@
       :model-id \"sentence-transformers/all-MiniLM-L6-v2\"
       :embeddings [{:uri \"...\" :embedding [...] :text-embedded \"...\"}]
       :skipped-count N}"
-  [concepts {:keys [embedding-fields auto-detect? model-id batch-size]
+  [concepts {:keys [embedding-fields auto-detect? model-id batch-size ctx]
              :or {auto-detect? true
                   model-id default-model-id
                   batch-size 32}}]
@@ -490,9 +491,11 @@
                  (seq embedding-fields)
                  (vec embedding-fields)
 
-                 ;; Auto-detect from concepts
+                 ;; Auto-detect from concepts (LLM if ctx available, heuristic otherwise)
                  auto-detect?
-                 (let [detected (fa/detect-embedding-fields concepts)]
+                 (let [detected (if ctx
+                                  (fa/detect-embedding-fields ctx concepts)
+                                  (fa/detect-embedding-fields concepts))]
                    (:embedding-fields detected))
 
                  ;; Fallback
