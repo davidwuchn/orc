@@ -397,7 +397,7 @@
                          :best-candidate-id candidate-id))))
 
           :gepa/subsample-evaluated
-          (update opt :total-metric-calls + (or (:metric-calls event) 0))
+          (update opt :total-metric-calls (fnil + 0) (or (:metric-calls event) 0))
 
           :gepa/optimization-completed
           (assoc opt

@@ -563,75 +563,66 @@
 
         ;; Single attempt function
         try-once (fn []
-                   ;; DEBUG: Log what we're sending to DSCloj
-                   (println "\n[DEBUG executor] ========================================")
-                   (println "[DEBUG executor] Node:" (:name node))
-                   (println "[DEBUG executor] Inputs (JSON serialized):" (pr-str inputs))
-                   (println "[DEBUG executor] Flattened outputs:" (pr-str (mapv #(select-keys % [:name :spec]) (:outputs dscloj-module))))
-                   (println "[DEBUG executor] DSCloj prompt preview:")
-                   (println (subs (dscloj/module->prompt dscloj-module) 0 (min 1500 (count (dscloj/module->prompt dscloj-module)))))
-                   (println "[DEBUG executor] ========================================")
-
                    (let [result (if *debug-raw-response*
                                   (debug-predict-with-raw-response effective-provider dscloj-module inputs dscloj-options)
                                   (dscloj/predict effective-provider dscloj-module inputs dscloj-options))
-                         _ (println "[DEBUG executor] DSCloj result:" (pr-str result))
                          ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
                          raw-outputs (or (:outputs result) result)
-                         _ (println "[DEBUG executor] Raw (flattened) outputs:" (pr-str raw-outputs))
                          ;; Reassemble flattened outputs back into nested structure
                          outputs (reassemble-flattened-outputs raw-outputs output-mapping)]
-                     (println "[DEBUG executor] Reassembled outputs:" (pr-str outputs))
-                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (or (:model result) (:model node))}))]
-    (try
-      (loop [attempt 0]
-        (let [{:keys [outputs usage model]} (try-once)]
-          (if (and (outputs-have-nil? outputs)
-                   (< attempt max-retries))
-            (do
-              ;; Log retry attempt
-              (obs/log-retry!
-               {:node-id (:id node)
-                :node-name (:name node)
-                :attempt (inc attempt)
-                :max-attempts (inc max-retries)
-                :reason "nil outputs"
-                :trace-id nil})
-              (Thread/sleep retry-delay-ms)
+                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (or (:model result) (:model node))}))
+
+        ;; Compute backoff delay for a given attempt
+        backoff-for (fn [attempt]
+                      (if (sequential? retry-delay-ms)
+                        (nth retry-delay-ms (min attempt (dec (count retry-delay-ms))))
+                        retry-delay-ms))]
+
+    (loop [attempt 0]
+      (let [{:keys [outputs usage model error]}
+            (try
+              (try-once)
+              (catch Exception e
+                {:error (.getMessage e)}))]
+        (cond
+          ;; Exception — retry with backoff (handles rate limits, transient errors)
+          (and error (< attempt max-retries))
+          (do (obs/log-retry!
+                {:node-id (:id node) :node-name (:name node)
+                 :attempt (inc attempt) :max-attempts (inc max-retries)
+                 :reason error :trace-id nil})
+              (Thread/sleep (backoff-for attempt))
               (recur (inc attempt)))
-            ;; Return result (with or without nils)
-            (let [result {:status :success
-                          :outputs outputs
-                          :duration-ms (- (System/currentTimeMillis) start-time)
-                          :usage usage
-                          :model model}]
-              ;; Log AI execution
-              (obs/log-ai-execution!
-               {:node-id (:id node)
-                :node-name (:name node)
-                :model model
-                :executor :ai
-                :duration-ms (:duration-ms result)
-                :status :success
-                :usage usage
-                :trace-id nil})
-              result))))
-      (catch Exception e
-        (let [result {:status :failure
-                      :error (.getMessage e)
-                      :duration-ms (- (System/currentTimeMillis) start-time)}]
-          ;; Log AI execution failure
-          (obs/log-ai-execution!
-           {:node-id (:id node)
-            :node-name (:name node)
-            :model nil
-            :executor :ai
-            :duration-ms (:duration-ms result)
-            :status :failure
-            :usage nil
-            :trace-id nil
-            :error (.getMessage e)})
-          result)))))
+
+          ;; Exception — retries exhausted
+          error
+          (let [result {:status :failure :error error
+                        :duration-ms (- (System/currentTimeMillis) start-time)}]
+            (obs/log-ai-execution!
+              {:node-id (:id node) :node-name (:name node) :model nil
+               :executor :ai :duration-ms (:duration-ms result)
+               :status :failure :usage nil :trace-id nil :error error})
+            result)
+
+          ;; Nil outputs — retry with backoff (LLM returned empty/unparseable response)
+          (and (outputs-have-nil? outputs) (< attempt max-retries))
+          (do (obs/log-retry!
+                {:node-id (:id node) :node-name (:name node)
+                 :attempt (inc attempt) :max-attempts (inc max-retries)
+                 :reason "nil outputs" :trace-id nil})
+              (Thread/sleep (backoff-for attempt))
+              (recur (inc attempt)))
+
+          ;; Success (or retries exhausted with nil outputs)
+          :else
+          (let [result {:status :success :outputs outputs
+                        :duration-ms (- (System/currentTimeMillis) start-time)
+                        :usage usage :model model}]
+            (obs/log-ai-execution!
+              {:node-id (:id node) :node-name (:name node) :model model
+               :executor :ai :duration-ms (:duration-ms result)
+               :status :success :usage usage :trace-id nil})
+            result))))))
 
 (defn execute-llm-condition
   "Execute an LLM condition node - uses LLM to evaluate a yes/no question.

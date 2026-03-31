@@ -1,9 +1,7 @@
 {:paths []
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
 
-        obneyai/grain-core-v2 {:git/url "https://github.com/ObneyAI/grain.git"
-                               :git/sha "0f8b404ffac9f20ce477f903eee1a74ecf01bd83"
-                               :deps/root "projects/grain-core-v2"}
+        obneyai/grain-core-v2 {:local/root "../../../grain/projects/grain-core-v2"}
 
         orc/orc-service       {:local/root "../../components/orc-service"}
         orc/gepa              {:local/root "../../components/gepa"}

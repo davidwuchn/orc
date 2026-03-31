@@ -155,7 +155,7 @@
                    (patch-workflow-instructions context sheet-id instructions)
                    sheet-id
                    input-map
-                   :timeout-ms 60000)
+                   :timeout-ms 300000)
                  (catch Exception e
                    {:status :failure
                     :error (.getMessage e)
@@ -819,7 +819,6 @@
            :mutation-reason (str "Mutated " component-updated " - passed subsample eval")}))
 
       ;; REJECTED: Try another mutation
-      ;; Check budget first, then propose another mutation
       (let [budget-exhausted? (rm/budget-exhausted? context optimization-id)]
         (if budget-exhausted?
           ;; Budget exhausted - complete the optimization
