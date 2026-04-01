@@ -223,6 +223,25 @@ The ontology component enables:
 | `export-turtle` | Full ontology export |
 | `validate-turtle` | Basic TTL syntax validation |
 
+### Self-Learning
+
+| Function | Description |
+|----------|-------------|
+| `find-self-patterns` | Get tree's own accumulated patterns (strengths/weaknesses with rich context) |
+| `build-actionable-context` | Format self-learned patterns as LLM-injectable context string |
+| `format-rich-pattern` | Format a single pattern with conditions and actions for display |
+
+### Rule Extraction
+
+| Function | Description |
+|----------|-------------|
+| `extract-rules` | Extract condition-action rules from successful episodes using LLM workflow |
+| `get-tree-rules` | Get all extracted rules for a specific tree |
+| `get-all-learned-rules` | Get all rules across all trees |
+| `find-rules-by-problem` | Find rules matching a problem type |
+| `find-rules-by-condition` | Find rules matching specific condition criteria |
+| `learned-rules-statistics` | Get aggregate statistics about extracted rules |
+
 ## Event Schemas
 
 ### Concept Events
@@ -249,7 +268,17 @@ The ontology component enables:
  [:pattern-uri :string]            ;; "success:ValidationLoop"
  [:confidence :double]
  [:evidence-trace-ids [:vector :uuid]]
- [:avg-score :double]]
+ [:avg-score :double]
+ ;; Self-learning fields (domain-agnostic)
+ [:context-conditions {:optional true} [:map-of :keyword :any]]  ;; Flexible state at success
+ [:state-conditions {:optional true} [:map-of :keyword :any]]    ;; Backward compatibility alias
+ [:action-taken {:optional true} [:map
+                                  [:type {:optional true} :string]
+                                  [:target {:optional true} :any]
+                                  [:reason {:optional true} :string]]]
+ [:domain-type {:optional true} :string]           ;; "drone-control", "legal-review", etc.
+ [:expected-outcome {:optional true} :string]      ;; Free-form outcome description
+ [:scenario-context {:optional true} :map]]        ;; Additional scenario metadata
 
 :ontology/tree-weakness-recorded
 [:map
@@ -259,7 +288,15 @@ The ontology component enables:
  [:frequency :double]
  [:severity [:enum :low :medium :high :critical]]
  [:triggers [:vector :string]]
- [:evidence-trace-ids [:vector :uuid]]]
+ [:evidence-trace-ids [:vector :uuid]]
+ ;; Self-learning fields (domain-agnostic)
+ [:failure-context {:optional true} [:map-of :keyword :any]]     ;; Conditions when failure occurred
+ [:failure-conditions {:optional true} [:map-of :keyword :any]]  ;; Backward compatibility alias
+ [:attempted-action {:optional true} [:map
+                                      [:type {:optional true} :string]
+                                      [:target {:optional true} :any]
+                                      [:reason {:optional true} :string]]]
+ [:domain-type {:optional true} :string]]          ;; Domain identifier
 
 :ontology/tree-problem-mapping-created
 [:map
@@ -267,6 +304,24 @@ The ontology component enables:
  [:problem-uri :string]            ;; "problem:Classification"
  [:success-rate :double]
  [:execution-count :int]]
+```
+
+### Learned Rule Events
+
+```clojure
+:ontology/learned-rule-extracted
+[:map
+ [:rule-id :uuid]                  ;; Unique rule identifier
+ [:tree-id :uuid]                  ;; Source tree
+ [:problem-type :string]           ;; Problem category
+ [:domain-type :string]            ;; Domain identifier
+ [:extracted-at :string]           ;; ISO timestamp
+ [:rule [:map
+         [:condition [:map-of :keyword :any]]           ;; {field [operator value]}
+         [:action [:map-of :keyword :any]]              ;; {type, target, parameters}
+         [:confidence :double]                          ;; Rule confidence
+         [:success-rate :double]                        ;; Success rate from evidence
+         [:evidence-episodes [:vector :uuid]]]]]        ;; Source episode trace IDs
 ```
 
 ### Node Learning Events
@@ -598,6 +653,405 @@ Define explicit schemas for ontology data on the blackboard:
                                [:failures-to-avoid [:vector :map]]
                                [:patterns-to-use [:vector :map]]
                                [:problem-context [:vector :map]]]})
+```
+
+## Self-Learning Mode
+
+Enable any workflow tree to learn from its own execution history. This complements the cross-tree pattern aggregation with single-tree accumulation of successes and failures.
+
+### Core Concept
+
+Trees accumulate **strengths** (success patterns) and **weaknesses** (failure patterns) with rich context that can be injected into future LLM prompts. This enables true learning improvement during training - not just abstract pattern labels like "ValidationLoop" but explicit condition-action rules like:
+
+```
+When: battery < 30% AND wind_speed > 15
+Action: Execute precision hover with reduced altitude
+Evidence: Episodes 3, 7, 12 (success rate: 92%)
+```
+
+### Domain-Agnostic Design
+
+The self-learning system works for **ANY domain**. Instead of fixed schemas, it uses flexible maps that preserve domain-specific context:
+
+| Domain | Example Conditions | Example Actions |
+|--------|-------------------|-----------------|
+| **Drone Control** | `{:battery-level 0.25, :wind-speed 18.5, :altitude 150}` | `{:type "hover", :target "reduce-altitude"}` |
+| **Legal Review** | `{:contract-value 500000, :risk-score 0.7, :indemnification-clause? true}` | `{:type "escalate", :target "senior-counsel"}` |
+| **Sales Outreach** | `{:lead-score 85, :days-since-contact 14, :company-size "enterprise"}` | `{:type "outreach", :target "schedule-demo"}` |
+| **Construction** | `{:weather-risk 0.3, :crew-available 12, :materials-ready? true}` | `{:type "schedule", :target "begin-foundation"}` |
+
+### Recording Successes with Rich Context
+
+When a tree execution succeeds, record the conditions and actions that led to success:
+
+```clojure
+(require '[ai.obney.orc.ontology.core.commands :as cmd])
+
+;; Drone control example
+(cmd/ontology-record-tree-strength
+  (assoc ctx :command
+    {:tree-id tree-id
+     :pattern-uri "success:PrecisionHover"
+     :confidence 0.92
+     :evidence-trace-ids [trace-id]
+     :avg-score 0.88
+     ;; NEW: Domain-agnostic rich context
+     :domain-type "drone-control"
+     :context-conditions {:battery-level 0.25
+                          :wind-speed 18.5
+                          :altitude 150
+                          :visibility :good}
+     :action-taken {:type "hover"
+                    :target "reduce-altitude"
+                    :reason "Low battery in windy conditions"}
+     :expected-outcome "stable-hover"
+     :scenario-context {:name "adverse-weather-landing"
+                        :difficulty :hard}}))
+
+;; Legal review example
+(cmd/ontology-record-tree-strength
+  (assoc ctx :command
+    {:tree-id tree-id
+     :pattern-uri "success:RiskEscalation"
+     :confidence 0.85
+     :evidence-trace-ids [trace-id]
+     :avg-score 0.90
+     :domain-type "legal-review"
+     :context-conditions {:contract-value 500000
+                          :risk-score 0.7
+                          :indemnification-clause? true
+                          :jurisdiction "california"}
+     :action-taken {:type "escalate"
+                    :target "senior-counsel"
+                    :reason "High-value contract with significant indemnification"}
+     :expected-outcome "expert-review-completed"}))
+
+;; Sales outreach example
+(cmd/ontology-record-tree-strength
+  (assoc ctx :command
+    {:tree-id tree-id
+     :pattern-uri "success:TimedOutreach"
+     :confidence 0.88
+     :evidence-trace-ids [trace-id]
+     :avg-score 0.85
+     :domain-type "sales-outreach"
+     :context-conditions {:lead-score 85
+                          :days-since-contact 14
+                          :company-size "enterprise"
+                          :previous-engagement :webinar}
+     :action-taken {:type "outreach"
+                    :target "schedule-demo"
+                    :reason "High-scoring lead ready for conversion"}
+     :expected-outcome "demo-scheduled"}))
+```
+
+### Recording Failures with Context
+
+When a tree execution fails, record the conditions and attempted action:
+
+```clojure
+;; Drone control failure
+(cmd/ontology-record-tree-weakness
+  (assoc ctx :command
+    {:tree-id tree-id
+     :failure-uri "failure:UnstableHover"
+     :frequency 0.15
+     :severity :high
+     :triggers ["excessive wind" "low battery"]
+     :evidence-trace-ids [trace-id]
+     ;; NEW: Domain-agnostic failure context
+     :domain-type "drone-control"
+     :failure-context {:battery-level 0.15
+                       :wind-speed 25.0
+                       :altitude 200}
+     :attempted-action {:type "hover"
+                        :target "maintain-position"
+                        :reason "Attempted stable hover"}}))
+
+;; Legal review failure
+(cmd/ontology-record-tree-weakness
+  (assoc ctx :command
+    {:tree-id tree-id
+     :failure-uri "failure:MissedClause"
+     :frequency 0.12
+     :severity :medium
+     :triggers ["complex contract" "time pressure"]
+     :evidence-trace-ids [trace-id]
+     :domain-type "legal-review"
+     :failure-context {:contract-length 150
+                       :time-allocated-minutes 30
+                       :clause-count 45}
+     :attempted-action {:type "review"
+                        :target "full-analysis"
+                        :reason "Attempted comprehensive review"}}))
+```
+
+### Retrieving Self-Patterns
+
+Get patterns accumulated from THIS tree's own execution history:
+
+```clojure
+(require '[ai.obney.orc.ontology.interface :as ontology])
+
+;; Get this tree's accumulated patterns
+(ontology/find-self-patterns event-store tree-id)
+
+;; Returns:
+;; {:tree-id #uuid "..."
+;;  :strengths [{:pattern-uri "success:PrecisionHover"
+;;               :confidence 0.92
+;;               :context-conditions {:battery-level 0.25 :wind-speed 18.5 ...}
+;;               :action-taken {:type "hover" :target "reduce-altitude" ...}
+;;               :expected-outcome "stable-hover"
+;;               :domain-type "drone-control"}
+;;              ...]
+;;  :weaknesses [{:failure-uri "failure:UnstableHover"
+;;                :severity :high
+;;                :failure-context {:battery-level 0.15 :wind-speed 25.0 ...}
+;;                :attempted-action {:type "hover" ...}
+;;                :domain-type "drone-control"}
+;;               ...]
+;;  :pattern-count 5
+;;  :domain-type "drone-control"}
+```
+
+### Building Actionable Context for LLM Injection
+
+Build formatted context that can be directly injected into LLM prompts:
+
+```clojure
+;; Build complete actionable context
+(ontology/build-actionable-context event-store tree-id
+  {:domain-description "Drone flight control in adverse conditions"
+   :max-patterns 5})
+
+;; Returns formatted string for LLM injection:
+;; "## Learned Patterns from Previous Executions
+;;
+;;  ### Successful Actions
+;;
+;;  **Pattern: PrecisionHover** (confidence: 0.92)
+;;  When conditions:
+;;  - battery-level: 0.25
+;;  - wind-speed: 18.5
+;;  - altitude: 150
+;;  Action taken: hover → reduce-altitude
+;;  Reason: Low battery in windy conditions
+;;  Expected outcome: stable-hover
+;;
+;;  ### Failures to Avoid
+;;
+;;  **Failure: UnstableHover** (severity: high)
+;;  Failed when conditions:
+;;  - battery-level: 0.15
+;;  - wind-speed: 25.0
+;;  - altitude: 200
+;;  Attempted: hover → maintain-position
+;;
+;;  ## Guidance
+;;  Based on 5 previous episodes in domain: drone-control"
+```
+
+### Using Self-Learning in Workflows
+
+Inject self-learned context into LLM nodes:
+
+```clojure
+(sheet/workflow "adaptive-drone-control"
+  (sheet/blackboard
+    {:tree-id :uuid
+     :current-conditions :map
+     :self-learning-context :string
+     :decision :map})
+
+  (sheet/sequence "execute"
+    ;; Step 1: Load self-learned patterns
+    (sheet/code "load-self-patterns"
+      :fn "my.ns/load-self-learning-context"
+      :reads [:tree-id]
+      :writes [:self-learning-context])
+
+    ;; Step 2: Make decision with learned context
+    (sheet/llm "decide-action"
+      :model "anthropic/claude-sonnet-4"
+      :instruction "You are controlling a drone. Use the learned patterns to make decisions.
+
+{{self-learning-context}}
+
+Current conditions: {{current-conditions}}
+
+Based on past successes and failures, what action should be taken?"
+      :reads [:self-learning-context :current-conditions]
+      :writes [:decision])))
+```
+
+### Self-Learning vs Cross-Tree Aggregation
+
+| Approach | Use Case | Data Source |
+|----------|----------|-------------|
+| **Self-Learning** | Single tree training/improvement | This tree's own executions |
+| **Cross-Tree** | Transfer learning, few-shot examples | All trees with similar problem-type |
+| **Combined** | Production systems | Both self + aggregated patterns |
+
+Use self-learning when:
+- Training a new workflow through iteration
+- The tree has domain-specific nuances
+- You want the tree to improve from its own mistakes
+
+Use cross-tree aggregation when:
+- Deploying a new tree that should benefit from others' experience
+- Looking for best practices across the system
+- Building few-shot examples
+
+## Rule Extraction
+
+Extract explicit condition-action rules from accumulated successful episodes. Rules are machine-readable patterns that can be injected into future LLM prompts.
+
+### How It Works
+
+1. **Analyze Episodes**: Reads `:ontology/tree-strength-recorded` events with rich context
+2. **Group by Outcome**: Groups episodes by their expected outcome
+3. **Extract Patterns**: Uses LLM to identify condition thresholds and action patterns
+4. **Emit Rules**: Produces `:ontology/learned-rule-extracted` events
+
+### API Usage
+
+```clojure
+(require '[ai.obney.orc.ontology.interface :as ontology])
+
+;; Extract rules from a tree's successful episodes
+(ontology/extract-rules ctx tree-id
+  {:domain-type "drone-control"
+   :domain-description "Autonomous drone flight control for delivery operations"
+   :min-episodes 5})  ;; Require at least 5 episodes
+
+;; Returns:
+;; {:extracted 3
+;;  :analyzed-episodes 12
+;;  :domain-type "drone-control"
+;;  :tree-id #uuid "..."
+;;  :rules [{:condition-description "When battery is low and wind speed is moderate"
+;;           :conditions {:battery-level ["<" 0.3]
+;;                        :wind-speed ["between" 10 20]}
+;;           :action-description "Execute precision hover with reduced altitude"
+;;           :action {:type "hover"
+;;                    :target "reduce-altitude"}
+;;           :confidence 0.92
+;;           :success-rate 0.95
+;;           :evidence-count 5
+;;           :expected-outcome "stable-hover"}
+;;          ...]}
+
+;; If insufficient episodes:
+;; {:skipped true
+;;  :reason "insufficient-episodes"
+;;  :found 3
+;;  :required 5
+;;  :domain-type "drone-control"}
+```
+
+### Querying Learned Rules
+
+```clojure
+;; Get all rules for a specific tree
+(ontology/get-tree-rules event-store tree-id)
+;; => [{:rule-id #uuid "..."
+;;      :condition {:battery-level ["<" 0.3] ...}
+;;      :action {:type "hover" ...}
+;;      :confidence 0.92
+;;      :success-rate 0.95
+;;      :evidence-episodes [#uuid "..." #uuid "..."]
+;;      :problem-type "precision-landing"
+;;      :domain-type "drone-control"
+;;      :extracted-at "2024-01-15T..."}
+;;     ...]
+
+;; Find rules by problem type
+(ontology/find-rules-by-problem event-store "precision-landing")
+;; => [{:tree-id #uuid "..." :rules [...]} ...]
+
+;; Find rules matching specific conditions
+(ontology/find-rules-by-condition event-store
+  {:battery-level ["<" 0.5]})
+;; => [matching rules...]
+
+;; Get aggregate statistics
+(ontology/learned-rules-statistics event-store)
+;; => {:total-rules 45
+;;     :by-domain {"drone-control" 20 "legal-review" 15 "sales" 10}
+;;     :by-problem-type {"precision-landing" 8 "adverse-weather" 12 ...}
+;;     :avg-confidence 0.87
+;;     :avg-success-rate 0.91}
+```
+
+### Rule Structure
+
+Extracted rules follow this structure:
+
+```clojure
+{:rule-id #uuid "..."                    ;; Unique rule identifier
+ :tree-id #uuid "..."                    ;; Tree that generated the rule
+
+ ;; Conditions - when to apply this rule
+ :condition {:battery-level ["<" 0.3]           ;; Less than 30%
+             :wind-speed ["between" 10 20]      ;; Between 10-20 units
+             :visibility ["=" :good]}           ;; Equals :good
+
+ ;; Action - what to do when conditions match
+ :action {:type "hover"
+          :target "reduce-altitude"
+          :parameters {:altitude-reduction 50}}
+
+ ;; Metadata
+ :confidence 0.92                        ;; How confident in this rule
+ :success-rate 0.95                      ;; Success rate in training
+ :evidence-episodes [#uuid "..." ...]    ;; Source episode IDs
+ :problem-type "precision-landing"       ;; Problem category
+ :domain-type "drone-control"            ;; Domain identifier
+ :extracted-at "2024-01-15T10:30:00Z"}   ;; When extracted
+```
+
+### Condition Operators
+
+Rules use a simple operator format for conditions:
+
+| Operator | Example | Meaning |
+|----------|---------|---------|
+| `"<"` | `["<" 0.3]` | Less than 0.3 |
+| `">"` | `[">" 100]` | Greater than 100 |
+| `"<="` | `["<=" 50]` | Less than or equal to 50 |
+| `">="` | `[">=" 0.8]` | Greater than or equal to 0.8 |
+| `"="` | `["=" :good]` | Equals :good |
+| `"between"` | `["between" 10 20]` | Between 10 and 20 (inclusive) |
+| `"in"` | `["in" [:a :b :c]]` | One of the values |
+
+### Using Extracted Rules
+
+Inject extracted rules into LLM prompts:
+
+```clojure
+(defn format-rules-for-prompt [rules]
+  (->> rules
+       (map (fn [{:keys [condition-description action-description
+                         confidence success-rate]}]
+              (format "- %s → %s (confidence: %.0f%%, success: %.0f%%)"
+                      condition-description
+                      action-description
+                      (* 100 confidence)
+                      (* 100 success-rate))))
+       (clojure.string/join "\n")))
+
+;; In workflow
+(sheet/llm "decide-with-rules"
+  :instruction "Apply these learned rules:
+
+{{formatted-rules}}
+
+Current situation: {{current-conditions}}
+
+Which rule applies? What action should be taken?"
+  :reads [:formatted-rules :current-conditions]
+  :writes [:decision])
 ```
 
 ## Ontology Lifecycle
@@ -1123,18 +1577,19 @@ Query examples:
 ```
 components/ontology/
 ├── deps.edn
-└── src/ai/obney/workshop/ontology/
+└── src/ai/obney/orc/ontology/
     ├── interface.clj              ;; Public API
     ├── interface/schemas.clj      ;; Malli schemas
     └── core/
         ├── static_ontology.clj    ;; Static concept definitions
-        ├── read_models.clj        ;; Event projections (incl. embeddings)
-        ├── commands.clj           ;; Command handlers (incl. embedding cmds)
+        ├── read_models.clj        ;; Event projections (incl. learned-rules)
+        ├── commands.clj           ;; Command handlers (incl. self-learning)
         ├── queries.clj            ;; Query handlers
         ├── serialization.clj      ;; TTL export
         ├── classifier.clj         ;; Evaluation classification
         ├── graph.clj              ;; BFS, RRF, temporal (Phase 3)
-        ├── retrieval.clj          ;; Few-shot + hybrid retrieval (Phase 3-4)
+        ├── retrieval.clj          ;; Few-shot, hybrid, self-learning retrieval
+        ├── rule_extraction.clj    ;; Rule extraction workflow (Self-Learning)
         └── embedding.clj          ;; DJL embeddings, schema analysis (Phase 4)
 ```
 

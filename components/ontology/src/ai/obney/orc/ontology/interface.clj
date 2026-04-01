@@ -25,7 +25,9 @@
             [ai.obney.orc.ontology.core.field-analyzer :as field-analyzer]
             [ai.obney.orc.ontology.core.field-analyzer-workflow :as fa-workflow]
             [ai.obney.orc.ontology.core.discovery :as discovery]
-            [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers
+            [ai.obney.orc.ontology.core.rule-extraction :as rule-extraction]
+            [ai.obney.orc.ontology.core.commands] ;; Register defcommand handlers for tree profiles
+            [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
             [ai.obney.grain.event-store-v3.interface :as event-store]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]))
 
@@ -405,6 +407,7 @@
    - Success patterns to use
    - Failure patterns to avoid
    - Related concepts for grounding
+   - Self-learning patterns (when enabled)
 
    Args:
      event-store: Grain event store
@@ -412,13 +415,24 @@
        :problem-type - Primary problem being solved
        :required-patterns - Success patterns that should be used
        :user-domain - Domain context (e.g., \"education\", \"healthcare\")
+       :tree-id - Current tree ID for self-learning mode
+       :self-learning? - Enable self-reinforcing learning from tree's own patterns
 
    Returns:
      {:few-shot-trees [...] - Similar successful trees with profiles
-      :recommended-patterns [...] - Success patterns to use
-      :patterns-to-avoid [...] - Common failure patterns
+      :recommended-patterns [...] - Success patterns to use (includes self-patterns when enabled)
+      :patterns-to-avoid [...] - Common failure patterns (includes self-weaknesses when enabled)
       :related-concepts [...] - Neighborhood expansion for context
-      :problem-hierarchy {...} - Problem type with parent/child}"
+      :problem-hierarchy {...} - Problem type with parent/child
+      :self-patterns {...} - Tree's own patterns (when self-learning enabled)}
+
+   Self-learning mode example:
+   ```clojure
+   (build-ontology-context ctx
+     {:problem-type \"problem:PointNavigation\"
+      :tree-id sheet-id
+      :self-learning? true})
+   ```"
   [event-store opts]
   (retrieval/build-ontology-context event-store opts))
 
@@ -1047,3 +1061,167 @@
    ```"
   [ctx ontology-id]
   (rm/get-colbert-index-for-ontology ctx ontology-id))
+
+;; =============================================================================
+;; Self-Learning Retrieval (Domain-Agnostic)
+;; =============================================================================
+
+(defn find-self-patterns
+  "Retrieve patterns from the current tree for self-reinforcing learning.
+
+   Unlike find-success-patterns which aggregates across trees, this returns
+   the patterns accumulated by THIS specific tree. This enables single-tree
+   training scenarios where the tree learns from its own execution history.
+
+   This function is domain-agnostic - works for drone control, legal review,
+   sales outreach, construction planning, or any other domain.
+
+   Args:
+     ctx: System context with :event-store
+     tree-id: UUID of the tree to get patterns for
+     opts: {:min-confidence double} - minimum confidence threshold (default 0.2)
+
+   Returns:
+     {:strengths [{:uri :label :description :confidence :count
+                   :context-conditions :action-taken :domain-type :expected-outcome} ...]
+      :weaknesses [{:uri :description :frequency :severity :triggers
+                    :failure-context :attempted-action :domain-type} ...]}
+
+   Returns nil if tree has no profile or ctx/tree-id is nil.
+
+   Example usage for different domains:
+   ```clojure
+   ;; Drone control
+   (find-self-patterns ctx drone-tree-id {:min-confidence 0.3})
+   ;; => {:strengths [{:context-conditions {:velocity 0.3 :battery 60}
+   ;;                  :action-taken {:type \"stabilize\" :target [0 0 1.0]}
+   ;;                  :domain-type \"drone-control\"}]}
+
+   ;; Legal review
+   (find-self-patterns ctx legal-tree-id {:min-confidence 0.5})
+   ;; => {:strengths [{:context-conditions {:contract-value 1500000 :risk-score 0.3}
+   ;;                  :action-taken {:type \"approve\" :reviewer \"senior-partner\"}
+   ;;                  :domain-type \"legal-review\"}]}
+   ```"
+  [ctx tree-id opts]
+  (retrieval/find-self-patterns ctx tree-id opts))
+
+(defn build-actionable-context
+  "Build complete actionable context combining self-patterns for LLM injection.
+
+   This is the main entry point for generating context that enables
+   true learning improvement during training. Works for any domain.
+
+   Args:
+     ctx: Context with event-store
+     tree-id: Current tree ID
+     problem-type: Problem type URI
+     opts: Options for formatting
+       :max-items - Max patterns to include (default 5)
+       :include-patterns - Include success patterns (default true)
+       :include-failures - Include failure patterns (default true)
+
+   Returns:
+     Map with:
+       :formatted-context - Markdown string for LLM injection
+       :self-patterns - Raw self-pattern data
+       :has-patterns? - Whether any patterns were found
+       :strength-count - Number of strength patterns
+       :weakness-count - Number of weakness patterns
+
+   The formatted-context produces actionable rules like:
+   ```markdown
+   ### Learned Rules from Success Patterns
+   - When battery=15, altitude=2.0: return-home to [0 0 0] (90% success, 5 episodes)
+   - When velocity=0.3, battery=60: navigate to [2 0 1.0] (85% success, 3 episodes)
+
+   ### Patterns to Avoid
+   - **Logical reasoning defects** (frequency: 100%)
+   ```"
+  [ctx tree-id problem-type & [opts]]
+  (retrieval/build-actionable-context ctx tree-id problem-type opts))
+
+;; =============================================================================
+;; Learned Rules API (Self-Learning Read Model)
+;; =============================================================================
+
+(def learned-rule-events
+  "Event types that affect the learned-rules read model"
+  rm/learned-rule-events)
+
+(defn get-tree-rules
+  "Get learned rules for a specific tree.
+
+   Returns vector of rules extracted from successful episodes:
+   [{:rule-id uuid
+     :condition {:field value ...}
+     :action {:type \"action\" :target ...}
+     :confidence 0.92
+     :success-rate 0.95
+     :evidence-episodes [uuid ...]
+     :problem-type \"problem:Navigation\"
+     :domain-type \"drone-control\"
+     :extracted-at \"2024-01-15T...\"}]"
+  [ctx tree-id]
+  (rm/get-tree-rules ctx tree-id))
+
+(defn get-all-learned-rules
+  "Get all learned rules for all trees.
+
+   Returns map of {tree-id -> [rule ...]}"
+  [ctx]
+  (rm/get-all-learned-rules ctx))
+
+(defn find-rules-by-problem
+  "Find rules that were extracted for a specific problem type.
+
+   Returns flat vector of rules across all trees."
+  [ctx problem-type]
+  (rm/find-rules-by-problem ctx problem-type))
+
+(defn find-rules-by-condition
+  "Find rules that match given condition criteria.
+
+   conditions: Map of condition key-value pairs to match
+   Returns rules where all specified conditions are present."
+  [ctx conditions]
+  (rm/find-rules-by-condition ctx conditions))
+
+(defn learned-rules-statistics
+  "Get statistics about learned rules.
+
+   Returns:
+   {:total-rules N
+    :trees-with-rules N
+    :by-problem-type {\"problem:Nav\" 5 ...}
+    :by-domain-type {\"drone-control\" 8 ...}
+    :avg-confidence 0.88
+    :avg-success-rate 0.92}"
+  [ctx]
+  (rm/learned-rules-statistics ctx))
+
+;; =============================================================================
+;; Rule Extraction API (Self-Learning)
+;; =============================================================================
+
+(defn extract-rules
+  "High-level API to extract rules from a tree's successful episodes.
+
+   Domain-agnostic: Works with any domain by accepting domain-type and domain-description.
+
+   Args:
+   - ctx: Context with event-store
+   - tree-id: Tree to analyze
+   - options:
+     - :domain-type - Domain identifier, e.g. 'drone-control', 'legal-review' (required)
+     - :domain-description - Human-readable context for LLM (required)
+     - :min-episodes - Minimum episodes required (default 5)
+
+   Returns map with:
+   - :extracted - count of rules extracted
+   - :analyzed-episodes - count of episodes analyzed
+   - :rules - vector of rule maps (with condition-description and action-description)
+   - :skipped - true if insufficient episodes
+   - :domain-type - Domain that was analyzed"
+  [ctx tree-id opts]
+  (rule-extraction/extract-rules ctx tree-id opts))

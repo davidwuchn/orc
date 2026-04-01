@@ -133,11 +133,27 @@
         (assoc-in [tree-id :tree-id] tree-id)
         (update-in [tree-id :strengths]
                    (fnil conj [])
-                   {:pattern (:pattern-uri event)
-                    :confidence (:confidence event)
-                    :evidence-count (count (:evidence-trace-ids event))
-                    :avg-score (:avg-score event)
-                    :recorded-at (str (:recorded-at event))}))))
+                   ;; Include rich context fields for actionable rule formatting
+                   (cond-> {:pattern (:pattern-uri event)
+                            :confidence (:confidence event)
+                            :evidence-count (count (:evidence-trace-ids event))
+                            :avg-score (:avg-score event)
+                            :recorded-at (str (:recorded-at event))}
+                     ;; Add context conditions (state at success)
+                     (:context-conditions event)
+                     (assoc :context-conditions (:context-conditions event))
+                     ;; Fallback to state-conditions for backward compat
+                     (and (nil? (:context-conditions event)) (:state-conditions event))
+                     (assoc :context-conditions (:state-conditions event))
+                     ;; Add action taken
+                     (:action-taken event)
+                     (assoc :action-taken (:action-taken event))
+                     ;; Add domain type
+                     (:domain-type event)
+                     (assoc :domain-type (:domain-type event))
+                     ;; Add expected outcome
+                     (:expected-outcome event)
+                     (assoc :expected-outcome (:expected-outcome event)))))))
 
 (defmethod tree-profiles* :ontology/tree-weakness-recorded
   [state event]
@@ -146,12 +162,25 @@
         (assoc-in [tree-id :tree-id] tree-id)
         (update-in [tree-id :weaknesses]
                    (fnil conj [])
-                   {:failure (:failure-uri event)
-                    :subtype (:subtype-uri event)
-                    :frequency (:frequency event)
-                    :severity (:severity event)
-                    :triggers (:triggers event)
-                    :recorded-at (str (:recorded-at event))}))))
+                   ;; Include rich context fields for domain-agnostic weakness tracking
+                   (cond-> {:failure (:failure-uri event)
+                            :subtype (:subtype-uri event)
+                            :frequency (:frequency event)
+                            :severity (:severity event)
+                            :triggers (:triggers event)
+                            :recorded-at (str (:recorded-at event))}
+                     ;; Add failure context conditions
+                     (:failure-context event)
+                     (assoc :failure-context (:failure-context event))
+                     ;; Fallback to failure-conditions for backward compat
+                     (and (nil? (:failure-context event)) (:failure-conditions event))
+                     (assoc :failure-context (:failure-conditions event))
+                     ;; Add attempted action
+                     (:attempted-action event)
+                     (assoc :attempted-action (:attempted-action event))
+                     ;; Add domain type
+                     (:domain-type event)
+                     (assoc :domain-type (:domain-type event)))))))
 
 (defmethod tree-profiles* :ontology/tree-problem-mapping-created
   [state event]
@@ -599,3 +628,99 @@
        (filter (fn [[_id state]] (:embedded? state)))
        (map first)
        set))
+
+;; =============================================================================
+;; Learned Rules Projection (Self-Learning)
+;; =============================================================================
+;; Builds per-tree extracted rules from successful episodes
+
+(def learned-rule-events
+  "Events that affect the learned-rules read model"
+  #{:ontology/learned-rule-extracted})
+
+(defmulti learned-rules*
+  "Apply event to learned rules read model.
+   State: {tree-id -> [rule ...]}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod learned-rules* :ontology/learned-rule-extracted
+  [state event]
+  (let [tree-id (:tree-id event)
+        rule {:rule-id (:rule-id event)
+              :condition (get-in event [:rule :condition])
+              :action (get-in event [:rule :action])
+              :confidence (get-in event [:rule :confidence])
+              :success-rate (get-in event [:rule :success-rate])
+              :evidence-episodes (vec (get-in event [:rule :evidence-episodes] []))
+              :problem-type (:problem-type event)
+              :domain-type (:domain-type event)
+              :extracted-at (str (:extracted-at event))}]
+    (update state tree-id (fnil conj []) rule)))
+
+(defmethod learned-rules* :default [state _] state)
+
+(defn learned-rules
+  "Build learned rules from events."
+  [initial-state events]
+  (reduce learned-rules* initial-state events))
+
+(defreadmodel :ontology learned-rules
+  {:events learned-rule-events, :version 1}
+  [state event] (learned-rules* state event))
+
+;; =============================================================================
+;; Learned Rules Query Helpers
+;; =============================================================================
+
+(defn get-tree-rules
+  "Get learned rules for a specific tree."
+  [ctx tree-id]
+  (get (rmp/project ctx :ontology/learned-rules {:tags #{[:tree tree-id]}}) tree-id))
+
+(defn get-all-learned-rules
+  "Get all learned rules for all trees."
+  [ctx]
+  (rmp/project ctx :ontology/learned-rules))
+
+(defn find-rules-by-problem
+  "Find rules that were extracted for a specific problem type."
+  [ctx problem-type]
+  (let [all-rules (get-all-learned-rules ctx)]
+    (->> all-rules
+         vals
+         (apply concat)
+         (filter #(= problem-type (:problem-type %)))
+         vec)))
+
+(defn find-rules-by-condition
+  "Find rules that match given condition criteria.
+
+   conditions: Map of condition key-value pairs to match
+   Returns rules where all specified conditions are present in the rule's condition map."
+  [ctx conditions]
+  (let [all-rules (get-all-learned-rules ctx)]
+    (->> all-rules
+         vals
+         (apply concat)
+         (filter (fn [rule]
+                   (let [rule-conditions (:condition rule)]
+                     (every? (fn [[k v]]
+                               (= v (get rule-conditions k)))
+                             conditions))))
+         vec)))
+
+(defn learned-rules-statistics
+  "Get statistics about learned rules."
+  [ctx]
+  (let [all-rules (get-all-learned-rules ctx)
+        all-rules-flat (apply concat (vals all-rules))]
+    {:total-rules (count all-rules-flat)
+     :trees-with-rules (count all-rules)
+     :by-problem-type (frequencies (map :problem-type all-rules-flat))
+     :by-domain-type (frequencies (keep :domain-type all-rules-flat))
+     :avg-confidence (when (seq all-rules-flat)
+                       (/ (reduce + 0 (map :confidence all-rules-flat))
+                          (count all-rules-flat)))
+     :avg-success-rate (when (seq all-rules-flat)
+                         (/ (reduce + 0 (map :success-rate all-rules-flat))
+                            (count all-rules-flat)))}))
