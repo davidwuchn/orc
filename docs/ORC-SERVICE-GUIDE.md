@@ -108,7 +108,7 @@ Create a named workflow container.
     ...))
 ```
 
-The workflow name is used to generate a deterministic UUID v5, so rebuilding the same workflow produces the same sheet-id.
+The workflow name is used to generate a deterministic UUID v5, so rebuilding the same workflow produces the same sheet-id. A SHA-256 content hash is stored on each build — if the definition hasn't changed, `build-workflow!` is a true no-op (zero events emitted). This makes it safe to call on every application startup.
 
 ### `blackboard`
 
@@ -361,9 +361,10 @@ The orc-service uses Grain's event store for persistence and observability.
 
 | Event Type | When Emitted | Body Fields |
 |------------|--------------|-------------|
-| `:sheet/sheet-created` | `build-workflow!` | `:sheet-id`, `:name` |
-| `:sheet/node-created` | `build-workflow!` | `:sheet-id`, `:node-id`, `:type` |
-| `:sheet/key-declared` | `build-workflow!` | `:sheet-id`, `:key-name`, `:schema` |
+| `:sheet/sheet-created` | `build-workflow!` (first build only) | `:sheet-id`, `:name` |
+| `:sheet/node-created` | `build-workflow!` (first build or change) | `:sheet-id`, `:node-id`, `:type` |
+| `:sheet/key-declared` | `build-workflow!` (first build or change) | `:sheet-id`, `:key-name`, `:schema` |
+| `:sheet/content-hash-set` | `build-workflow!` (first build or change) | `:sheet-id`, `:content-hash` |
 | `:sheet/tree-tick-started` | `execute` start | `:sheet-id`, `:tick-id` |
 | `:sheet/node-execution-started` | Node begins | `:sheet-id`, `:node-id`, `:tick-id` |
 | `:sheet/node-execution-completed` | Node ends | `:sheet-id`, `:node-id`, `:status`, `:duration-ms` |

@@ -111,6 +111,17 @@
   (uuid-v5 sheet-id node-name))
 
 ;; =============================================================================
+;; Content Hashing
+;; =============================================================================
+
+(defn- workflow-content-hash
+  "Compute a deterministic SHA-256 hash of a workflow definition."
+  [workflow-def]
+  (let [digest (MessageDigest/getInstance "SHA-256")
+        bytes (.digest digest (.getBytes (pr-str workflow-def) "UTF-8"))]
+    (apply str (map #(format "%02x" %) bytes))))
+
+;; =============================================================================
 ;; Node Builders (Data Structures)
 ;; =============================================================================
 
@@ -482,14 +493,16 @@
 (defn build-workflow!
   "Idempotent workflow builder. Creates or updates a workflow by name.
 
-   - If a sheet with the same name exists, it is updated in place (same sheet-id)
-   - If not, a new sheet is created with a deterministic ID
+   - If the definition hasn't changed (same content hash): no-op, zero events
+   - If the definition has changed: clears and rebuilds the sheet in place
+   - If the sheet doesn't exist: creates a new one
 
    The workflow name is the identity:
    - Sheet ID is deterministic (v5 UUID from workflow name)
    - Node IDs are deterministic (v5 UUID from sheet-id + node name)
-   - Running this multiple times with the same definition is idempotent
-   - Modifying the definition and re-running updates the existing sheet
+   - A SHA-256 content hash of the workflow definition is stored on the sheet
+   - Unchanged definitions produce zero events (true no-op)
+   - Safe to call on every application startup
 
    Args:
      ctx - Context with :event-store
@@ -500,14 +513,19 @@
   (let [{:keys [workflow-name]} workflow-def
         ;; Deterministic sheet-id from workflow name
         sheet-id (sheet-id-for-name workflow-name)
-        existing (rm/get-sheet-by-name ctx workflow-name)]
+        existing (rm/get-sheet-by-name ctx workflow-name)
+        new-hash (workflow-content-hash workflow-def)]
 
     (if existing
-      ;; Update existing sheet - clear and rebuild content
-      (do
-        (clear-sheet-content! ctx sheet-id)
-        (build-sheet-content! ctx sheet-id workflow-def)
-        sheet-id)
+      (if (= (:content-hash existing) new-hash)
+        ;; No-op: nothing changed
+        sheet-id
+        ;; Update existing sheet - clear and rebuild content
+        (do
+          (clear-sheet-content! ctx sheet-id)
+          (build-sheet-content! ctx sheet-id workflow-def)
+          (h/run-and-apply! ctx (h/make-set-content-hash-command sheet-id new-hash))
+          sheet-id))
 
       ;; Create new sheet with deterministic ID
       (do
@@ -515,6 +533,7 @@
                                 :name workflow-name
                                 :sheet-id sheet-id))
         (build-sheet-content! ctx sheet-id workflow-def)
+        (h/run-and-apply! ctx (h/make-set-content-hash-command sheet-id new-hash))
         sheet-id))))
 
 (defn build-workflow!!

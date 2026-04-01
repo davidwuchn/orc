@@ -116,7 +116,7 @@ Every workflow has three parts:
 - All node `:reads` and `:writes` must be declared in the blackboard
 - Blackboard keys are keywords throughout (schema, reads/writes, execute inputs/outputs)
 - Code node `:fn` must be a namespace-qualified symbol string, not inline code
-- `build-workflow!` is idempotent — same workflow name produces the same sheet-id
+- `build-workflow!` is idempotent — same workflow name produces the same sheet-id, and unchanged definitions are a true no-op (zero events) via content hashing
 - Workflows are versioned — use `orc/publish-version` for production snapshots
 
 ## Judges (optional quality gates)

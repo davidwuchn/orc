@@ -161,10 +161,13 @@ FALLBACK:  ORC → libpython-clj → DSPy (Python) → LLMs
 
 **What happens:**
 1. Generate deterministic sheet-id via UUID v5 from name
-2. If sheet exists: clear and rebuild; else: create new
-3. Emit `:sheet/sheet-created` event
-4. For each blackboard key: emit `:sheet/key-declared`
-5. For each node: emit `:sheet/node-created`, `:sheet/node-executor-set`
+2. Compute SHA-256 content hash of the workflow definition
+3. If sheet exists with matching content hash: **no-op** (return sheet-id, zero events)
+4. If sheet exists with different hash: clear and rebuild, then store new hash
+5. If new: create sheet, build content, store hash
+6. Events emitted on first build/change: `:sheet/sheet-created`, `:sheet/key-declared`, `:sheet/node-created`, `:sheet/node-executor-set`, `:sheet/content-hash-set`
+
+This makes `build-workflow!` safe to call on every application startup — unchanged workflows produce zero events.
 
 ### 2. Execute Phase (`sheet/execute`)
 

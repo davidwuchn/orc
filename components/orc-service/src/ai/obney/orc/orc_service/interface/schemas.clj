@@ -392,6 +392,11 @@
     [:sheet-id :uuid]
     [:key :keyword]]
 
+   :sheet/set-content-hash
+   [:map
+    [:sheet-id :uuid]
+    [:content-hash :string]]
+
    ;; -------------------------------------------------------------------------
    ;; Judge Commands
    ;; -------------------------------------------------------------------------
@@ -558,6 +563,11 @@
    :sheet/sheet-deleted
    [:map
     [:sheet-id :uuid]]
+
+   :sheet/content-hash-set
+   [:map
+    [:sheet-id :uuid]
+    [:content-hash :string]]
 
    ;; -------------------------------------------------------------------------
    ;; Node Events

@@ -420,6 +420,15 @@
    :sheet-id sheet-id
    :key key})
 
+(defn make-set-content-hash-command
+  "Create a set-content-hash command."
+  [sheet-id content-hash]
+  {:command/name :sheet/set-content-hash
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :content-hash content-hash})
+
 ;; =============================================================================
 ;; Factory Functions - Execution Commands
 ;; =============================================================================

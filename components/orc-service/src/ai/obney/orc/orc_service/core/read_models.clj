@@ -24,7 +24,8 @@
     :sheet/draft-stashed
     :sheet/draft-reverted
     :sheet/stash-restored
-    :sheet/execution-mode-set})
+    :sheet/execution-mode-set
+    :sheet/content-hash-set})
 
 (def node-events
   "Events that affect node read model"
@@ -72,7 +73,8 @@
     :sheet/draft-stashed
     :sheet/draft-reverted
     :sheet/stash-restored
-    :sheet/execution-mode-set})
+    :sheet/execution-mode-set
+    :sheet/content-hash-set})
 
 (def draft-dirty-events
   "Events that mark draft as dirty (differs from published)"
@@ -171,6 +173,10 @@
 (defmethod sheets* :sheet/execution-mode-set
   [state event]
   (assoc-in state [(:sheet-id event) :execution-mode] (:mode event)))
+
+(defmethod sheets* :sheet/content-hash-set
+  [state event]
+  (assoc-in state [(:sheet-id event) :content-hash] (:content-hash event)))
 
 (defmethod sheets* :default
   [state event]

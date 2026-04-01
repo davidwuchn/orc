@@ -31,7 +31,7 @@ obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
         :reads [:input]
         :writes [:summary]))))
 
-;; Build it (creates events in the event store)
+;; Build it (idempotent — no-op if definition hasn't changed)
 (orc/build-workflow! ctx my-workflow)
 
 ;; Execute it

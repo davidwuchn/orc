@@ -89,6 +89,22 @@
           :tags #{[:sheet sheet-id]}
           :body {:sheet-id sheet-id}})]})))
 
+(defcommand :sheet set-content-hash
+  {:authorized? authenticated?}
+  "Store a content hash on a sheet for idempotent rebuild detection."
+  [{{:keys [sheet-id content-hash]} :command
+    :as ctx}]
+  (let [sheet (rm/get-sheet ctx sheet-id)]
+    (if-not sheet
+      {::anom/category ::anom/not-found
+       ::anom/message "Sheet not found"}
+      {:command-result/events
+       [(->event
+         {:type :sheet/content-hash-set
+          :tags #{[:sheet sheet-id]}
+          :body {:sheet-id sheet-id
+                 :content-hash content-hash}})]})))
+
 ;; =============================================================================
 ;; Node Commands
 ;; =============================================================================

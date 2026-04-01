@@ -1239,7 +1239,7 @@ Creates a workflow definition. The name is the identity - same name = same sheet
 ;; => sheet-id (UUID)
 ```
 
-Builds or updates a workflow. **Idempotent** - same definition = no changes.
+Builds or updates a workflow. **Idempotent** - a SHA-256 content hash of the workflow definition is stored on the sheet. If the definition hasn't changed since the last build, this is a true no-op (zero events emitted). If the definition has changed, the sheet is cleared and rebuilt with the new content. Safe to call on every application startup.
 
 ### Executing Workflows
 
