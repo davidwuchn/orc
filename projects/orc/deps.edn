@@ -19,4 +19,7 @@
                                :deps/root "contrib/bedrock"}}
 
  :aliases {:test {:extra-paths []
-                  :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}}}}}
+                  :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}
+                               obneyai/grain-control-plane {:git/url "https://github.com/ObneyAI/grain.git"
+                                                            :git/sha "b62a1c5bbf5c63cb5ef187285c0f957fd7289f14"
+                                                            :deps/root "projects/grain-control-plane"}}}}}
