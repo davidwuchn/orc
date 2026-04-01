@@ -816,11 +816,14 @@
     (if inputs
       ;; Snapshot-based execution: build full snapshot for isolation
       (let [instruction-overrides (:gepa/patched-instructions context)
+            sheet-tenant-id (when (not= (:system-tenant-id context) (:tenant-id context))
+                              (:system-tenant-id context))
             snapshot (runtime/build-execution-snapshot
                        context sheet-id
                        :use-version use-version
                        :force-draft force-draft
-                       :instruction-overrides instruction-overrides)]
+                       :instruction-overrides instruction-overrides
+                       :sheet-tenant-id sheet-tenant-id)]
         (if (::anom/category snapshot)
           snapshot ;; Return anomaly if snapshot building failed
           {:command-result/events
@@ -835,7 +838,10 @@
                       (:version-number snapshot) (assoc :version-number (:version-number snapshot))
                       options (assoc :options options))})]}))
       ;; Legacy UI tick: no snapshot, reads live sheet state
-      (let [sheet (rm/get-sheet context sheet-id)
+      (let [read-ctx (if (not= (:system-tenant-id context) (:tenant-id context))
+                       (assoc context :tenant-id (:system-tenant-id context))
+                       context)
+            sheet (rm/get-sheet read-ctx sheet-id)
             root-node-id (:root-node-id sheet)]
         (cond
           (not sheet)
@@ -859,8 +865,11 @@
   "Start a single node tick (for testing or manual execution)."
   [{{:keys [sheet-id node-id tick-id overrides]} :command
     :as ctx}]
-  (let [node (rm/get-node ctx sheet-id node-id)
-        blackboard (rm/get-blackboard-by-key ctx sheet-id)
+  (let [read-ctx (if (not= (:system-tenant-id ctx) (:tenant-id ctx))
+                   (assoc ctx :tenant-id (:system-tenant-id ctx))
+                   ctx)
+        node (rm/get-node read-ctx sheet-id node-id)
+        blackboard (rm/get-blackboard-by-key read-ctx sheet-id)
         ;; Get input values from blackboard (for reads)
         inputs (reduce (fn [acc k]
                          (if-let [entry (get blackboard k)]

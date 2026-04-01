@@ -139,11 +139,11 @@
                            ;; Code executor doesn't need provider
                            (= :code executor-type)
                            (executor/execute-leaf node blackboard nil
-                                                  :context {:event-store event-store})
+                                                  :context context)
                            ;; AI executor with provider
                            provider
                            (executor/execute-leaf node blackboard provider
-                                                  :context {:event-store event-store})
+                                                  :context context)
                            ;; No provider - use mock
                            :else
                            (executor/execute-leaf-mock node blackboard))

@@ -100,10 +100,16 @@
      :blackboard-entries - Map of key-name -> {:key, :schema, :value, :version}
      :version-number - Version number if using published version (nil for draft)
 
+   When :sheet-tenant-id is provided, reads sheet definitions from that tenant
+   instead of the context's :tenant-id. This enables cross-tenant execution where
+   workflows live in a system tenant but executions run in user tenants.
+
    Or returns an anomaly map if the sheet/version is not found."
-  [context sheet-id & {:keys [use-version force-draft instruction-overrides]}]
-  (let [event-store (:event-store context)
-        sheet (rm/get-sheet context sheet-id)]
+  [context sheet-id & {:keys [use-version force-draft instruction-overrides sheet-tenant-id]}]
+  (let [read-ctx (if sheet-tenant-id
+                   (assoc context :tenant-id sheet-tenant-id)
+                   context)
+        sheet (rm/get-sheet read-ctx sheet-id)]
     (cond
       (not sheet)
       {:cognitect.anomalies/category :cognitect.anomalies/not-found
@@ -117,7 +123,7 @@
                              (= :published execution-mode) (:published-version sheet)
                              :else nil)
             version-snapshot (when version-to-use
-                               (rm/get-version context sheet-id version-to-use))
+                               (rm/get-version read-ctx sheet-id version-to-use))
             {:keys [nodes-by-id root-id blackboard-entries version-number]}
             (if version-snapshot
               (let [parsed (parse-snapshot-for-execution (:snapshot version-snapshot))]
@@ -125,9 +131,9 @@
                  :root-id (:root-id parsed)
                  :blackboard-entries (:blackboard parsed)
                  :version-number (:version-number version-snapshot)})
-              {:nodes-by-id (rm/get-nodes-by-id context sheet-id)
+              {:nodes-by-id (rm/get-nodes-by-id read-ctx sheet-id)
                :root-id (:root-node-id sheet)
-               :blackboard-entries (rm/get-blackboard-by-key context sheet-id)
+               :blackboard-entries (rm/get-blackboard-by-key read-ctx sheet-id)
                :version-number nil})]
         (if-not root-id
           {:cognitect.anomalies/category :cognitect.anomalies/not-found
