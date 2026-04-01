@@ -25,47 +25,6 @@
             [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]))
 
 ;; =============================================================================
-;; Debug: Raw LLM Response Capture
-;; =============================================================================
-
-(def ^:dynamic *debug-raw-response*
-  "Set to true to log raw LLM responses before DSCloj parsing."
-  false)
-
-(defn debug-predict-with-raw-response
-  "Wrapper around dscloj/predict that also captures and logs the raw LLM response.
-   Enable by setting *debug-raw-response* to true."
-  [provider module inputs options]
-  ;; First, make a raw litellm call to see what the LLM actually returns
-  (let [prompt (dscloj/module->prompt module)
-        ;; Format inputs - they're already JSON serialized from gather-inputs
-        input-section (str/join "\n\n"
-                                (for [{:keys [name]} (:inputs module)]
-                                  (str "[[ ## " (clojure.core/name name) " ## ]]\n"
-                                       (let [v (get inputs name "")]
-                                         (if (string? v) v (json/generate-string v))))))
-        full-prompt (str prompt "\n\n" input-section)]
-    (println "\n[DEBUG RAW] Full prompt being sent to LLM:")
-    (println "----------------------------------------")
-    (println full-prompt)
-    (println "----------------------------------------")
-
-    ;; Make raw LLM call to see response
-    (try
-      (let [raw-response (litellm-router/completion provider
-                                                    {:messages [{:role :user :content full-prompt}]})
-            raw-content (-> raw-response :choices first :message :content)]
-        (println "\n[DEBUG RAW] Raw LLM response:")
-        (println "----------------------------------------")
-        (println raw-content)
-        (println "----------------------------------------"))
-      (catch Exception e
-        (println "[DEBUG RAW] Failed to get raw response:" (.getMessage e)))))
-
-  ;; Now do the actual DSCloj predict
-  (dscloj/predict provider module inputs options))
-
-;; =============================================================================
 ;; Usage Normalization
 ;; =============================================================================
 
@@ -563,9 +522,7 @@
 
         ;; Single attempt function
         try-once (fn []
-                   (let [result (if *debug-raw-response*
-                                  (debug-predict-with-raw-response effective-provider dscloj-module inputs dscloj-options)
-                                  (dscloj/predict effective-provider dscloj-module inputs dscloj-options))
+                   (let [result (dscloj/predict effective-provider dscloj-module inputs dscloj-options)
                          ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
                          raw-outputs (or (:outputs result) result)
                          ;; Reassemble flattened outputs back into nested structure
