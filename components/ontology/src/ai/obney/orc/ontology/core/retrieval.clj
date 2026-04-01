@@ -18,6 +18,13 @@
             [clojure.string :as str]))
 
 ;; =============================================================================
+;; Forward Declarations
+;; =============================================================================
+
+;; Forward declare functions that are defined later but used earlier
+(declare find-self-patterns format-rich-pattern)
+
+;; =============================================================================
 ;; Configuration
 ;; =============================================================================
 
@@ -431,6 +438,7 @@
    - Success patterns to use
    - Failure patterns to avoid
    - Related concepts for grounding
+   - Self-learning patterns (when enabled)
 
    Args:
      event-store: Grain event store
@@ -438,47 +446,63 @@
        :problem-type - Primary problem being solved
        :required-patterns - Success patterns that should be used
        :user-domain - Domain context (e.g., \"education\", \"healthcare\")
+       :tree-id - Current tree ID for self-learning mode
+       :self-learning? - Enable self-reinforcing learning from tree's own patterns
 
    Returns:
      {:few-shot-trees [...] - Similar successful trees with profiles
       :recommended-patterns [...] - Success patterns to use
       :patterns-to-avoid [...] - Common failure patterns
       :related-concepts [...] - Neighborhood expansion for context
-      :problem-hierarchy {...} - Problem type with parent/child}"
-  [ctx {:keys [problem-type required-patterns user-domain]
-                :as opts}]
-  (let [;; Find similar successful trees
+      :problem-hierarchy {...} - Problem type with parent/child
+      :self-patterns {...} - Tree's own patterns (when self-learning enabled)}"
+  [ctx {:keys [problem-type required-patterns user-domain tree-id self-learning?]
+        :as opts}]
+  (let [;; Self-learning: include tree's own patterns
+        self-patterns (when (and self-learning? tree-id)
+                        (find-self-patterns ctx tree-id {:min-confidence 0.2}))
+
+        ;; Find similar successful trees (very low thresholds to capture all patterns)
         few-shot-trees (when ctx
                          (find-similar-trees ctx
                                              {:problem-type problem-type
                                               :required-patterns required-patterns
-                                              :min-success-rate 0.75
+                                              :min-success-rate 0.0  ;; Accept any tree with problem mapping
                                               :limit 5}))
 
-        ;; Find recommended success patterns
-        recommended-patterns (if ctx
-                               (find-success-patterns ctx
-                                                      {:problem-type problem-type
-                                                       :min-success-rate 0.8
-                                                       :min-confidence 0.7
-                                                       :limit 8})
-                               ;; Fallback to static patterns
-                               (->> (static/get-concepts-by-scope :success)
-                                    (filter #(not= "success:Root" (:uri %)))
-                                    (filter #(not (contains? #{"success:StructuralPattern"
-                                                               "success:InstructionPattern"
-                                                               "success:DataFlowPattern"}
-                                                             (:uri %))))
-                                    (map (fn [c]
-                                           {:pattern-uri (:uri c)
-                                            :label (:label c)
-                                            :description (:description c)
-                                            :avg-confidence 0.5}))))
+        ;; Find recommended success patterns (very low thresholds for bootstrapping)
+        cross-tree-patterns (if ctx
+                              (find-success-patterns ctx
+                                                     {:problem-type problem-type
+                                                      :min-success-rate 0.0  ;; Accept any tree
+                                                      :min-confidence 0.1   ;; Accept low confidence patterns
+                                                      :limit 8})
+                              ;; Fallback to static patterns
+                              (->> (static/get-concepts-by-scope :success)
+                                   (filter #(not= "success:Root" (:uri %)))
+                                   (filter #(not (contains? #{"success:StructuralPattern"
+                                                              "success:InstructionPattern"
+                                                              "success:DataFlowPattern"}
+                                                            (:uri %))))
+                                   (map (fn [c]
+                                          {:pattern-uri (:uri c)
+                                           :label (:label c)
+                                           :description (:description c)
+                                           :avg-confidence 0.5}))))
 
-        ;; Find patterns to avoid
-        patterns-to-avoid (when ctx
-                            (find-patterns-to-avoid ctx
-                                                    {:problem-type problem-type}))
+        ;; Merge self-patterns with cross-tree patterns
+        ;; Self-patterns appear first (most relevant to this tree)
+        recommended-patterns (vec (concat (:strengths self-patterns)
+                                          cross-tree-patterns))
+
+        ;; Find patterns to avoid from cross-tree sources
+        cross-tree-avoid (when ctx
+                           (find-patterns-to-avoid ctx
+                                                   {:problem-type problem-type}))
+
+        ;; Merge self-weaknesses with cross-tree patterns to avoid
+        patterns-to-avoid (vec (concat (:weaknesses self-patterns)
+                                       cross-tree-avoid))
 
         ;; Get related concepts via graph expansion
         related-concepts (when problem-type
@@ -502,13 +526,16 @@
                                                        :label (:label c)})))}))]
 
     {:few-shot-trees (vec few-shot-trees)
-     :recommended-patterns (vec recommended-patterns)
-     :patterns-to-avoid (vec patterns-to-avoid)
+     :recommended-patterns recommended-patterns
+     :patterns-to-avoid patterns-to-avoid
      :related-concepts (vec related-concepts)
      :problem-hierarchy problem-hierarchy
+     :self-patterns self-patterns  ;; Include for debugging/inspection
      :context-metadata {:problem-type problem-type
                         :required-patterns required-patterns
                         :user-domain user-domain
+                        :tree-id tree-id
+                        :self-learning? self-learning?
                         :generated-at (str (java.time.Instant/now))}}))
 
 ;; =============================================================================
@@ -1033,15 +1060,46 @@
                           (when (seq (:broader h))
                             (str "**Category:** " (str/join ", " (map :label (:broader h)))))))))
 
-        ;; Recommended patterns section
+        ;; Recommended patterns section - use rich formatting when available
         _ (when (and (contains? include :patterns)
                      (seq (:recommended-patterns context)))
-            (swap! sections conj
-                   (str "### Recommended Patterns\n"
-                        (->> (:recommended-patterns context)
-                             (take max-items)
-                             (map #(str "- **" (:label %) "**: " (:description %)))
-                             (str/join "\n")))))
+            (let [patterns (:recommended-patterns context)
+                  ;; Check if any patterns have rich context (conditions + actions)
+                  has-rich-context? (some #(and (:context-conditions %) (:action-taken %)) patterns)
+                  ;; Deduplicate patterns by creating a signature from conditions + action type
+                  dedupe-key (fn [p]
+                               (let [conds (:context-conditions p)
+                                     action (:action-taken p)]
+                                 (str (pr-str (sort-by first conds))
+                                      "|" (:type action) "|" (pr-str (:target action)))))
+                  ;; Group by signature and take highest confidence from each group
+                  deduped-patterns (->> patterns
+                                        (filter #(and (:context-conditions %) (:action-taken %)))
+                                        (group-by dedupe-key)
+                                        (map (fn [[_ group]]
+                                               ;; Take highest confidence, sum up evidence counts
+                                               (let [best (apply max-key :confidence group)]
+                                                 (assoc best
+                                                        :count (reduce + 0 (keep :count group))
+                                                        :evidence-episodes (count group)))))
+                                        (sort-by :confidence >)
+                                        vec)
+                  ;; If no rich patterns, use original patterns
+                  final-patterns (if (seq deduped-patterns) deduped-patterns patterns)]
+              (swap! sections conj
+                     (if has-rich-context?
+                       ;; Use actionable rule format with deduplicated patterns
+                       (str "### Learned Rules from Success Patterns\n"
+                            (->> final-patterns
+                                 (take max-items)
+                                 (map format-rich-pattern)
+                                 (str/join "\n")))
+                       ;; Fallback to label/description format
+                       (str "### Recommended Patterns\n"
+                            (->> final-patterns
+                                 (take max-items)
+                                 (map #(str "- **" (:label %) "**: " (:description %)))
+                                 (str/join "\n")))))))
 
         ;; Patterns to avoid section
         _ (when (and (contains? include :failures)
@@ -1084,3 +1142,231 @@
 
     (when (seq @sections)
       (str "## Relevant Knowledge\n\n" (str/join "\n\n" @sections)))))
+
+;; =============================================================================
+;; Self-Learning Retrieval
+;; =============================================================================
+
+(defn find-self-patterns
+  "Retrieve patterns from the current tree for self-reinforcing learning.
+
+   Unlike find-success-patterns which aggregates across trees, this returns
+   the patterns accumulated by THIS specific tree. This enables single-tree
+   training scenarios where the tree learns from its own execution history.
+
+   Args:
+     ctx: System context with :event-store
+     tree-id: UUID of the tree to get patterns for
+     opts: {:min-confidence double} - minimum confidence threshold (default 0.2)
+
+   Returns:
+     {:strengths [{:uri :label :description :confidence :count
+                   :context-conditions :action-taken :domain-type :expected-outcome} ...]
+      :weaknesses [{:uri :description :frequency :severity :triggers
+                    :failure-context :attempted-action :domain-type} ...]}
+
+   Returns nil if tree has no profile or ctx/tree-id is nil."
+  [ctx tree-id {:keys [min-confidence] :or {min-confidence 0.2}}]
+  (when (and ctx tree-id)
+    (let [profiles (rm/get-all-tree-profiles ctx)
+          profile (get profiles tree-id)]
+      (when profile
+        {:strengths (->> (:strengths profile)
+                         (filter #(>= (:confidence %) min-confidence))
+                         (map (fn [s]
+                                (let [concept (static/get-concept-by-uri (:pattern s))
+                                      label-from-uri (when (:pattern s)
+                                                       (-> (:pattern s)
+                                                           (str/replace #"^success:" "")
+                                                           (str/replace #"([A-Z])" " $1")
+                                                           str/trim))]
+                                  (cond-> {:uri (:pattern s)
+                                           :label (or (:label concept) label-from-uri (:pattern s))
+                                           :description (or (:description concept)
+                                                            (str "Learned pattern: " (or label-from-uri (:pattern s))))
+                                           :confidence (:confidence s)
+                                           :avg-score (:avg-score s)
+                                           :count (:evidence-count s)}
+                                    ;; Include rich context for actionable formatting
+                                    (:context-conditions s)
+                                    (assoc :context-conditions (:context-conditions s))
+                                    (:action-taken s)
+                                    (assoc :action-taken (:action-taken s))
+                                    (:domain-type s)
+                                    (assoc :domain-type (:domain-type s))
+                                    (:expected-outcome s)
+                                    (assoc :expected-outcome (:expected-outcome s))))))
+                         vec)
+         :weaknesses (->> (:weaknesses profile)
+                          (map (fn [w]
+                                 (let [concept (static/get-concept-by-uri (:failure w))
+                                       label-from-uri (when (:failure w)
+                                                        (-> (:failure w)
+                                                            (str/replace #"^failure:" "")
+                                                            (str/replace #"([A-Z])" " $1")
+                                                            str/trim))]
+                                   (cond-> {:uri (:failure w)
+                                            :description (or (:description concept)
+                                                             (str "Failure: " (or label-from-uri (:failure w))))
+                                            :frequency (:frequency w)
+                                            :severity (:severity w)
+                                            :triggers (:triggers w)}
+                                     ;; Include rich context for domain-agnostic weakness tracking
+                                     (:failure-context w)
+                                     (assoc :failure-context (:failure-context w))
+                                     (:attempted-action w)
+                                     (assoc :attempted-action (:attempted-action w))
+                                     (:domain-type w)
+                                     (assoc :domain-type (:domain-type w))))))
+                          vec)}))))
+
+;; =============================================================================
+;; Rich Pattern Formatting
+;; =============================================================================
+
+(defn- format-rich-pattern
+  "Format a pattern with its conditions and actions for LLM injection.
+
+   Produces actionable rules like:
+   - When battery=15, position far from home: return-home to [0 0 0] (90% success)
+
+   Falls back to label-based format if rich context not available.
+   Works for any domain (drone, legal, sales, construction, etc.)."
+  [pattern]
+  (let [{:keys [label context-conditions action-taken confidence avg-score count evidence-episodes]} pattern
+
+        ;; Format conditions as readable string
+        conditions-str (when (and context-conditions (seq context-conditions))
+                         (->> context-conditions
+                              (map (fn [[k v]]
+                                     (let [field-name (name k)
+                                           ;; Format value based on type
+                                           value-str (cond
+                                                       (number? v) (if (float? v)
+                                                                     (format "%.1f" (double v))
+                                                                     (str v))
+                                                       (coll? v) (str "[" (str/join " " (map #(if (float? %) (format "%.1f" %) %) v)) "]")
+                                                       :else (str v))]
+                                       (str field-name "=" value-str))))
+                              (str/join ", ")))
+
+        ;; Format action as readable string
+        action-str (when action-taken
+                     (let [{:keys [type target reason]} action-taken
+                           target-str (when target
+                                        (if (coll? target)
+                                          (str "[" (str/join " " (map #(if (float? %) (format "%.1f" %) %) target)) "]")
+                                          (str target)))]
+                       (str type (when target-str (str " to " target-str)))))
+
+        ;; Calculate display score (prefer avg-score, fallback to confidence)
+        score (or avg-score confidence 0.8)
+
+        ;; Use evidence-episodes from deduplication, fallback to count
+        episode-count (or evidence-episodes count)]
+
+    (if (and conditions-str action-str)
+      ;; Rich format with conditions and actions
+      (str "- When " conditions-str ": " action-str
+           (format " (%.0f%% success" (* 100 score))
+           (when (and episode-count (pos? episode-count))
+             (str ", " episode-count " episodes"))
+           ")")
+      ;; Fallback to simple label format
+      (str "- **" label "**"
+           (format " (%.0f%% confidence" (* 100 (or confidence 0.8)))
+           (when (and episode-count (pos? episode-count))
+             (str ", " episode-count " episodes"))
+           ")"))))
+
+;; =============================================================================
+;; Actionable Context Building
+;; =============================================================================
+
+(defn build-actionable-context
+  "Build complete actionable context combining self-patterns for LLM injection.
+
+   This is the main entry point for generating context that enables
+   true learning improvement during training. Works for any domain.
+
+   Args:
+     ctx: Context with event-store
+     tree-id: Current tree ID
+     problem-type: Problem type URI
+     opts: Options for formatting
+       :max-items - Max patterns to include (default 5)
+       :include-patterns - Include success patterns (default true)
+       :include-failures - Include failure patterns (default true)
+
+   Returns:
+     Map with:
+       :formatted-context - Markdown string for LLM injection
+       :self-patterns - Raw self-pattern data
+       :has-patterns? - Whether any patterns were found"
+  [ctx tree-id problem-type & [{:keys [max-items include-patterns include-failures]
+                                  :or {max-items 5 include-patterns true include-failures true}}]]
+  (let [self-patterns (find-self-patterns ctx tree-id {:min-confidence 0.2})
+
+        sections (atom [])
+
+        ;; Learned Strengths section - use rich formatting when available
+        _ (when (and include-patterns (seq (:strengths self-patterns)))
+            (let [patterns (:strengths self-patterns)
+                  ;; Check if any patterns have rich context (conditions + actions)
+                  has-rich-context? (some #(and (:context-conditions %) (:action-taken %)) patterns)
+                  ;; Deduplicate patterns by creating a signature from conditions + action type
+                  dedupe-key (fn [p]
+                               (let [conds (:context-conditions p)
+                                     action (:action-taken p)]
+                                 (str (pr-str (sort-by first conds))
+                                      "|" (:type action) "|" (pr-str (:target action)))))
+                  ;; Group by signature and take highest confidence from each group
+                  deduped-patterns (->> patterns
+                                        (filter #(and (:context-conditions %) (:action-taken %)))
+                                        (group-by dedupe-key)
+                                        (map (fn [[_ group]]
+                                               ;; Take highest confidence, sum up evidence counts
+                                               (let [best (apply max-key :confidence group)]
+                                                 (assoc best
+                                                        :count (reduce + 0 (keep :count group))
+                                                        :evidence-episodes (count group)))))
+                                        (sort-by :confidence >)
+                                        vec)
+                  ;; If no rich patterns, use original patterns
+                  final-patterns (if (seq deduped-patterns) deduped-patterns patterns)]
+              (swap! sections conj
+                     (if has-rich-context?
+                       ;; Use actionable rule format with deduplicated patterns
+                       (str "### Learned Rules from Success Patterns\n"
+                            (->> final-patterns
+                                 (take max-items)
+                                 (map format-rich-pattern)
+                                 (str/join "\n")))
+                       ;; Fallback to label/description format
+                       (str "### What Works Well\n"
+                            (->> final-patterns
+                                 (take max-items)
+                                 (map #(str "- **" (:label %) "** "
+                                            (format "(%.0f%% confidence)" (* 100 (:confidence %)))))
+                                 (str/join "\n")))))))
+
+        ;; Patterns to avoid section
+        _ (when (and include-failures (seq (:weaknesses self-patterns)))
+            (swap! sections conj
+                   (str "### Patterns to Avoid\n"
+                        (->> (:weaknesses self-patterns)
+                             (take max-items)
+                             (map #(str "- **" (:description %) "**"
+                                        (when (:frequency %)
+                                          (str " (frequency: " (format "%.0f%%" (* 100 (:frequency %))) ")"))))
+                             (str/join "\n")))))
+
+        formatted (when (seq @sections)
+                    (str "## Relevant Knowledge\n\n" (str/join "\n\n" @sections)))]
+
+    {:formatted-context formatted
+     :self-patterns self-patterns
+     :has-patterns? (boolean (or (seq (:strengths self-patterns))
+                                  (seq (:weaknesses self-patterns))))
+     :strength-count (count (:strengths self-patterns))
+     :weakness-count (count (:weaknesses self-patterns))}))

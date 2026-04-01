@@ -544,22 +544,42 @@
                                all-concepts
                                {:embedding-fields (or (:embedding-fields config)
                                                       (:colbert-fields colbert-result))
-                                :auto-detect? (:auto-detect-embedding-fields? config)})
+                                :auto-detect? (:auto-detect-embedding-fields? config)
+                                :ctx ctx})  ;; Pass context for LLM-driven field detection
                              (catch Exception e
                                (mu/log ::embedding-failed :error (.getMessage e))
                                nil)))
 
-        ;; Emit embedding event if successful
-        embedding-event (when embedding-result
-                          (->event {:type :evolutionary/concepts-embedded
-                                    :tags #{[:ontology ontology-id]
-                                            [:build build-id]}
-                                    :body {:ontology-id ontology-id
-                                           :build-id build-id
-                                           :embedded-count (:embedded-count embedding-result)
-                                           :embedding-fields (:fields-used embedding-result)
-                                           :model-id (:model-id embedding-result)
-                                           :embedded-at (str (java.time.Instant/now))}}))
+        ;; Emit embedding events if successful
+        ;; 1. Summary event for tracking
+        embedding-summary-event (when embedding-result
+                                  (->event {:type :evolutionary/concepts-embedded
+                                            :tags #{[:ontology ontology-id]
+                                                    [:build build-id]}
+                                            :body {:ontology-id ontology-id
+                                                   :build-id build-id
+                                                   :embedded-count (:embedded-count embedding-result)
+                                                   :embedding-fields (:fields-used embedding-result)
+                                                   :model-id (:model-id embedding-result)
+                                                   :embedded-at (str (java.time.Instant/now))}}))
+
+        ;; 2. Per-concept events with actual vectors (for read model caching/cold-start)
+        embedding-concept-events (when (and embedding-result (seq (:embeddings embedding-result)))
+                                   (let [fields-used (:fields-used embedding-result)
+                                         model-id (:model-id embedding-result)
+                                         embedded-at (str (java.time.Instant/now))]
+                                     (mapv (fn [{:keys [uri embedding text-embedded]}]
+                                             (->event {:type :ontology/concept-embedded
+                                                       :tags #{[:ontology ontology-id]
+                                                               [:concept uri]}
+                                                       :body {:uri uri
+                                                              :ontology-id ontology-id
+                                                              :embedding (mapv double embedding)  ;; CRITICAL: ensure :double
+                                                              :text-embedded text-embedded
+                                                              :field-source (str/join "+" (map name fields-used))
+                                                              :model-id model-id
+                                                              :embedded-at embedded-at}}))
+                                           (:embeddings embedding-result))))
 
         ;; Build completion
         duration-ms (- (System/currentTimeMillis) start-time)
@@ -578,14 +598,15 @@
                                           :duration-ms duration-ms
                                           :completed-at (str (java.time.Instant/now))}})
 
-        ;; Collect all events (embedding-event may be nil)
+        ;; Collect all events (embedding events may be nil)
         all-events (concat [start-event]
                            registration-events
                            extraction-events
                            [resolution-event]
                            evolution-events
                            [snapshot-event]
-                           (when embedding-event [embedding-event])
+                           (when embedding-summary-event [embedding-summary-event])
+                           (or embedding-concept-events [])
                            [completion-event])]
 
     {:ontology-id ontology-id

@@ -15,6 +15,7 @@
             [ai.obney.orc.ontology.core.classifier :as classifier]
             [ai.obney.orc.ontology.core.embedding :as embedding]
             [ai.obney.orc.ontology.core.discovery :as discovery]
+            [ai.obney.orc.ontology.core.rule-extraction :as rule-extraction]
             [ai.obney.grain.event-store-v3.interface :as es :refer [->event]]
             [ai.obney.grain.command-processor-v2.interface :refer [defcommand]]
             [ai.obney.grain.time.interface :as time]
@@ -100,39 +101,71 @@
 ;; =============================================================================
 
 (defcommand :ontology record-tree-strength
-  "Record that a tree demonstrates a particular success pattern."
-  [{{:keys [tree-id pattern-uri confidence evidence-trace-ids avg-score]} :command
+  "Record that a tree demonstrates a particular success pattern.
+
+   Domain-agnostic fields:
+   - context-conditions: Map of any conditions at decision time (replaces state-conditions)
+   - action-taken: Map describing the action that led to success
+   - domain-type: String identifier like \"drone-control\", \"legal-review\", \"sales-outreach\"
+   - expected-outcome: String describing what success looks like"
+  [{{:keys [tree-id pattern-uri confidence evidence-trace-ids avg-score
+            ;; Domain-agnostic fields
+            context-conditions state-conditions  ;; state-conditions for backward compat
+            action-taken domain-type expected-outcome]} :command
     :keys [event-store]}]
-  (let [now (now-str)]
+  (let [now (now-str)
+        ;; Merge old and new field names for compatibility
+        conditions (or context-conditions state-conditions)]
     {:command-result/events
      [(->event
        {:type :ontology/tree-strength-recorded
         :tags #{[:tree tree-id]}  ;; Only UUID-based tags allowed
-        :body {:tree-id tree-id
-               :pattern-uri pattern-uri
-               :confidence confidence
-               :evidence-trace-ids (vec evidence-trace-ids)
-               :avg-score avg-score
-               :recorded-at now}})]}))
+        :body (cond-> {:tree-id tree-id
+                       :pattern-uri pattern-uri
+                       :confidence confidence
+                       :evidence-trace-ids (vec evidence-trace-ids)
+                       :avg-score avg-score
+                       :recorded-at now}
+                ;; Add domain-agnostic fields when present
+                conditions (assoc :context-conditions conditions
+                                  :state-conditions conditions)  ;; both for compat
+                action-taken (assoc :action-taken action-taken)
+                domain-type (assoc :domain-type domain-type)
+                expected-outcome (assoc :expected-outcome expected-outcome))})]}))
 
 (defcommand :ontology record-tree-weakness
-  "Record that a tree exhibits a particular failure pattern."
-  [{{:keys [tree-id failure-uri subtype-uri frequency severity triggers evidence-trace-ids]} :command
+  "Record that a tree exhibits a particular failure pattern.
+
+   Domain-agnostic fields:
+   - failure-context: Map of conditions when failure occurred (replaces failure-conditions)
+   - attempted-action: Map describing the action that was attempted
+   - domain-type: String identifier like \"drone-control\", \"legal-review\", \"sales-outreach\""
+  [{{:keys [tree-id failure-uri subtype-uri frequency severity triggers evidence-trace-ids
+            ;; Domain-agnostic fields
+            failure-context failure-conditions  ;; failure-conditions for backward compat
+            attempted-action domain-type]} :command
     :keys [event-store]}]
   (let [now (now-str)
-        severity-kw (if (keyword? severity) severity (keyword severity))]
+        severity-kw (if (keyword? severity) severity (keyword severity))
+        ;; Merge old and new field names for compatibility
+        context (or failure-context failure-conditions)]
     {:command-result/events
      [(->event
        {:type :ontology/tree-weakness-recorded
         :tags #{[:tree tree-id]}  ;; Only UUID-based tags allowed
-        :body {:tree-id tree-id
-               :failure-uri failure-uri
-               :subtype-uri subtype-uri
-               :frequency frequency
-               :severity severity-kw
-               :triggers (vec triggers)
-               :evidence-trace-ids (vec evidence-trace-ids)
-               :recorded-at now}})]}))
+        :body (cond-> {:tree-id tree-id
+                       :failure-uri failure-uri
+                       :subtype-uri subtype-uri
+                       :frequency frequency
+                       :severity severity-kw
+                       :triggers (vec triggers)
+                       :evidence-trace-ids (vec evidence-trace-ids)
+                       :recorded-at now}
+                ;; Add domain-agnostic fields when present
+                context (assoc :failure-context context
+                               :failure-conditions context)  ;; both for compat
+                attempted-action (assoc :attempted-action attempted-action)
+                domain-type (assoc :domain-type domain-type))})]}))
 
 (defcommand :ontology record-problem-mapping
   "Record that a tree solves a particular problem type."
@@ -548,4 +581,57 @@
                          (:subtypes result))]
 
         {:command-result/data (dissoc result :subtypes)
+         :command-result/events events}))))
+
+;; =============================================================================
+;; Rule Extraction Commands (Self-Learning)
+;; =============================================================================
+
+(defcommand :ontology extract-learned-rules
+  "Extract condition-action rules from successful episodes.
+
+   Domain-agnostic: Works with any domain by accepting domain-type and domain-description.
+
+   Analyzes tree-strength-recorded events with rich context to extract
+   reusable condition-action rules that can be injected into future LLM prompts.
+
+   Args:
+   - tree-id: UUID of the tree to analyze
+   - problem-type: Problem type URI being solved
+   - min-episodes: Minimum episodes required (default 5)
+   - domain-type: Domain identifier, e.g. 'drone-control', 'legal-review'
+   - domain-description: Human-readable context for LLM"
+  [{{:keys [tree-id problem-type min-episodes domain-type domain-description]} :command
+    :keys [event-store] :as ctx}]
+  (let [result (rule-extraction/extract-rules ctx tree-id
+                 {:domain-type (or domain-type "unknown")
+                  :domain-description (or domain-description "General task execution")
+                  :min-episodes (or min-episodes 5)})]
+
+    (if (:skipped result)
+      ;; Not enough episodes - return data only, no events
+      {:command-result/data result}
+
+      ;; Emit learned-rule-extracted events for each rule
+      (let [now (now-str)
+            events (mapv (fn [rule]
+                           (->event
+                             {:type :ontology/learned-rule-extracted
+                              :tags #{[:tree tree-id]}
+                              :body {:rule-id (generate-uuid)
+                                     :tree-id tree-id
+                                     :rule {:condition (or (:conditions rule) {})
+                                            :action (or (:action rule) {})
+                                            :confidence (or (:confidence rule) 0.8)
+                                            :success-rate (or (:success-rate rule) 0.9)
+                                            :evidence-episodes []}
+                                     :problem-type problem-type
+                                     :domain-type (:domain-type result)
+                                     :extracted-at now}}))
+                         (:rules result))]
+
+        {:command-result/data {:extracted (count events)
+                                :analyzed-episodes (:analyzed-episodes result)
+                                :domain-type (:domain-type result)
+                                :tree-id tree-id}
          :command-result/events events}))))

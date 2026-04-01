@@ -330,6 +330,101 @@ The enhanced instruction helps prevent previous failures.
 
 ---
 
+### Stage 7B: Self-Learning Context Injection
+
+After standard cross-tree context retrieval, the system can also inject patterns learned from **this tree's own execution history**. This is called **self-learning mode**.
+
+**Component:** `components/ontology/core/retrieval.clj`
+
+```clojure
+(require '[ai.obney.orc.ontology.interface :as ontology])
+
+;; Get this tree's own accumulated patterns
+(def self-patterns (ontology/find-self-patterns event-store tree-id))
+
+;; Build actionable context from self-learned patterns
+(def self-context (ontology/build-actionable-context event-store tree-id
+                    {:domain-description "Lead qualification for B2B sales"
+                     :max-patterns 5}))
+
+;; Returns formatted text ready for LLM injection:
+;; "## Learned Patterns from Previous Executions
+;;
+;;  ### Successful Actions
+;;  **Pattern: TimedOutreach** (confidence: 0.88)
+;;  When conditions:
+;;  - lead-score: 85
+;;  - days-since-contact: 14
+;;  Action taken: outreach → schedule-demo
+;;  Expected outcome: demo-scheduled
+;;
+;;  ### Failures to Avoid
+;;  **Failure: PrematureClose** (severity: high)
+;;  Failed when conditions:
+;;  - lead-score: 45
+;;  - budget-confirmed?: false"
+```
+
+**Self-Learning vs Cross-Tree Context:**
+
+| Approach | Source | Use Case |
+|----------|--------|----------|
+| Cross-Tree (Stage 6) | All trees with same problem-type | Transfer learning, few-shot examples |
+| Self-Learning (Stage 7B) | This tree's own history | Single-tree training, personalized improvement |
+
+**When to Use Self-Learning:**
+
+1. **Training Phase** - When iteratively improving a new workflow
+2. **Domain-Specific Nuances** - When the tree has unique patterns not shared with others
+3. **Rich Context Recording** - When recording condition-action pairs with domain-specific fields
+
+**Recording Rich Context for Self-Learning:**
+
+```clojure
+;; Record success with domain-specific conditions and actions
+(cmd/ontology-record-tree-strength
+  (assoc ctx :command
+    {:tree-id sheet-id
+     :pattern-uri "success:TimedOutreach"
+     :confidence 0.88
+     :evidence-trace-ids [trace-id]
+     :avg-score 0.85
+     ;; Domain-agnostic rich context
+     :domain-type "sales-outreach"
+     :context-conditions {:lead-score 85
+                          :days-since-contact 14
+                          :company-size "enterprise"}
+     :action-taken {:type "outreach"
+                    :target "schedule-demo"
+                    :reason "High-scoring lead ready for conversion"}
+     :expected-outcome "demo-scheduled"}))
+```
+
+**Rule Extraction from Self-Learned Patterns:**
+
+After accumulating sufficient episodes, extract explicit condition-action rules:
+
+```clojure
+;; Extract rules from successful episodes (requires 5+ episodes)
+(ontology/extract-rules ctx tree-id
+  {:domain-type "sales-outreach"
+   :domain-description "B2B SaaS lead qualification and outreach"
+   :min-episodes 5})
+
+;; Returns extracted rules:
+;; {:extracted 2
+;;  :rules [{:condition-description "When lead score is high and contact is overdue"
+;;           :conditions {:lead-score [">" 75]
+;;                        :days-since-contact [">" 10]}
+;;           :action-description "Schedule product demo"
+;;           :action {:type "outreach" :target "schedule-demo"}
+;;           :confidence 0.88
+;;           :success-rate 0.92
+;;           :evidence-count 4}]}
+```
+
+---
+
 ## Current State Assessment
 
 | Stage | Status | Component | Key Files |
@@ -625,9 +720,10 @@ Ineffective patterns to avoid:
 | Command | Purpose |
 |---------|---------|
 | `:ontology/classify-evaluation` | Classify evaluation, optionally auto-record |
-| `:ontology/record-tree-strength` | Record successful pattern |
-| `:ontology/record-tree-weakness` | Record failure pattern |
+| `:ontology/record-tree-strength` | Record successful pattern (supports rich context) |
+| `:ontology/record-tree-weakness` | Record failure pattern (supports failure context) |
 | `:ontology/record-node-pattern` | Record node-level learning |
+| `:ontology/extract-learned-rules` | Extract condition-action rules from episodes |
 
 ### Queries
 
@@ -637,13 +733,18 @@ Ineffective patterns to avoid:
 | `:ontology/find-similar-trees` | Find trees by problem type |
 | `:ontology/get-node-type-learnings` | Get patterns by node type |
 | `:ontology/build-context` | Build context for injection |
+| `find-self-patterns` | Get tree's own accumulated patterns |
+| `build-actionable-context` | Format self-learned patterns for LLM injection |
+| `get-tree-rules` | Get extracted rules for a tree |
+| `find-rules-by-problem` | Find rules by problem type |
 
 ### Key Files
 
 | File | Purpose |
 |------|---------|
 | `ontology/core/classifier.clj` | Evaluation → Failure mapping |
-| `ontology/core/retrieval.clj` | Context building |
-| `ontology/core/commands.clj` | Recording commands |
+| `ontology/core/retrieval.clj` | Context building + self-learning retrieval |
+| `ontology/core/commands.clj` | Recording commands (incl. domain-agnostic fields) |
+| `ontology/core/rule_extraction.clj` | Rule extraction workflow |
 | `orc-service/core/executor.clj` | Context injection |
 | `evaluation/core/judges.clj` | 4 evaluation judges |

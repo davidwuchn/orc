@@ -88,7 +88,16 @@
     [:confidence :double]
     [:evidence-trace-ids [:vector :uuid]]
     [:avg-score :double]
-    [:recorded-at :string]]
+    [:recorded-at :string]
+    ;; Domain-agnostic rich context fields for self-learning
+    [:context-conditions {:optional true} [:map-of :keyword :any]]
+    [:state-conditions {:optional true} [:map-of :keyword :any]]  ;; backward compat
+    [:action-taken {:optional true} [:map
+                                     [:type {:optional true} :string]
+                                     [:target {:optional true} :any]
+                                     [:reason {:optional true} :string]]]
+    [:domain-type {:optional true} :string]
+    [:expected-outcome {:optional true} :string]]
 
    :ontology/tree-weakness-recorded
    [:map
@@ -99,7 +108,15 @@
     [:severity severity-level]
     [:triggers [:vector :string]]
     [:evidence-trace-ids [:vector :uuid]]
-    [:recorded-at :string]]
+    [:recorded-at :string]
+    ;; Domain-agnostic rich context fields for self-learning
+    [:failure-context {:optional true} [:map-of :keyword :any]]
+    [:failure-conditions {:optional true} [:map-of :keyword :any]]  ;; backward compat
+    [:attempted-action {:optional true} [:map
+                                         [:type {:optional true} :string]
+                                         [:target {:optional true} :any]
+                                         [:reason {:optional true} :string]]]
+    [:domain-type {:optional true} :string]]
 
    :ontology/tree-problem-mapping-created
    [:map
@@ -116,6 +133,24 @@
     [:success-rate :double]
     [:execution-count :int]
     [:updated-at :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Learned Rules Events (Self-Learning)
+   ;; -------------------------------------------------------------------------
+
+   :ontology/learned-rule-extracted
+   [:map
+    [:rule-id :uuid]
+    [:tree-id :uuid]
+    [:rule [:map
+            [:condition [:map-of :keyword :any]]
+            [:action [:map-of :keyword :any]]
+            [:confidence :double]
+            [:success-rate :double]
+            [:evidence-episodes [:vector :uuid]]]]
+    [:problem-type :string]
+    [:domain-type {:optional true} :string]
+    [:extracted-at :string]]
 
    :ontology/domain-knowledge-added
    [:map
@@ -175,11 +210,12 @@
 
    :ontology/concept-embedded
    [:map
-    [:concept-id :uuid]
-    [:uri :string]                        ;; "failure:Hallucination"
+    [:uri :string]                        ;; "failure:Hallucination" or "onet:11-1011.00"
+    [:ontology-id {:optional true} :uuid] ;; Links to evolutionary ontology
+    [:concept-id {:optional true} :uuid]  ;; Legacy individual concept ID
     [:text-embedded :string]              ;; Source text that was embedded
     [:field-source :string]               ;; "label+description" or "triggers"
-    [:embedding [:vector :double]]        ;; 384-dim vector
+    [:embedding [:vector :double]]        ;; 384-dim vector (MUST be :double, not Float)
     [:model-id :string]
     [:embedded-at :string]]
 
@@ -239,7 +275,16 @@
     [:pattern-uri :string]
     [:confidence :double]
     [:evidence-trace-ids [:vector :uuid]]
-    [:avg-score :double]]
+    [:avg-score :double]
+    ;; Domain-agnostic rich context fields
+    [:context-conditions {:optional true} [:map-of :keyword :any]]
+    [:state-conditions {:optional true} [:map-of :keyword :any]]  ;; backward compat
+    [:action-taken {:optional true} [:map
+                                     [:type {:optional true} :string]
+                                     [:target {:optional true} :any]
+                                     [:reason {:optional true} :string]]]
+    [:domain-type {:optional true} :string]
+    [:expected-outcome {:optional true} :string]]
 
    :ontology/record-tree-weakness
    [:map
@@ -249,7 +294,15 @@
     [:frequency :double]
     [:severity severity-level]
     [:triggers [:vector :string]]
-    [:evidence-trace-ids [:vector :uuid]]]
+    [:evidence-trace-ids [:vector :uuid]]
+    ;; Domain-agnostic rich context fields
+    [:failure-context {:optional true} [:map-of :keyword :any]]
+    [:failure-conditions {:optional true} [:map-of :keyword :any]]  ;; backward compat
+    [:attempted-action {:optional true} [:map
+                                         [:type {:optional true} :string]
+                                         [:target {:optional true} :any]
+                                         [:reason {:optional true} :string]]]
+    [:domain-type {:optional true} :string]]
 
    :ontology/record-problem-mapping
    [:map
@@ -276,6 +329,14 @@
     [:description :string]
     [:based-on-failure-traces [:vector :uuid]]
     [:impact-score {:optional true} :double]]
+
+   :ontology/extract-learned-rules
+   [:map
+    [:tree-id :uuid]
+    [:problem-type :string]
+    [:min-episodes {:optional true} :int]
+    [:domain-type {:optional true} :string]
+    [:domain-description {:optional true} :string]]
 
    :ontology/classify-evaluation
    [:map
@@ -950,13 +1011,30 @@
                           [:pattern :string]
                           [:confidence :double]
                           [:evidence-count :int]
-                          [:avg-score :double]]]]
+                          [:avg-score :double]
+                          [:recorded-at {:optional true} :string]
+                          ;; Domain-agnostic fields
+                          [:context-conditions {:optional true} [:map-of :keyword :any]]
+                          [:action-taken {:optional true} [:map
+                                                           [:type {:optional true} :string]
+                                                           [:target {:optional true} :any]
+                                                           [:reason {:optional true} :string]]]
+                          [:domain-type {:optional true} :string]
+                          [:expected-outcome {:optional true} :string]]]]
     [:weaknesses [:vector [:map
                            [:failure :string]
                            [:subtype {:optional true} :string]
                            [:frequency :double]
                            [:severity severity-level]
-                           [:triggers [:vector :string]]]]]
+                           [:triggers [:vector :string]]
+                           [:recorded-at {:optional true} :string]
+                           ;; Domain-agnostic fields
+                           [:failure-context {:optional true} [:map-of :keyword :any]]
+                           [:attempted-action {:optional true} [:map
+                                                                [:type {:optional true} :string]
+                                                                [:target {:optional true} :any]
+                                                                [:reason {:optional true} :string]]]
+                           [:domain-type {:optional true} :string]]]]
     [:solves [:vector [:map
                        [:problem-uri :string]
                        [:success-rate :double]
@@ -965,6 +1043,19 @@
                                   [:id :uuid]
                                   [:description :string]
                                   [:impact-score {:optional true} :double]]]]]
+
+   :ontology/learned-rules
+   [:map-of :uuid                          ;; tree-id -> rules vector
+    [:vector [:map
+              [:rule-id :uuid]
+              [:condition [:map-of :keyword :any]]
+              [:action [:map-of :keyword :any]]
+              [:confidence :double]
+              [:success-rate :double]
+              [:evidence-episodes [:vector :uuid]]
+              [:problem-type :string]
+              [:domain-type {:optional true} :string]
+              [:extracted-at :string]]]]
 
    :ontology/node-experiences
    [:map-of node-type                     ;; node-type -> experiences
