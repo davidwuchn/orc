@@ -191,6 +191,7 @@
      :trace? - Enable tracing (passed to async pipeline via options)
      :langfuse-client - Langfuse client (passed to async pipeline via options)
      :store-trace? - Store trace in event store (default true, passed via options)
+     :max-ticks - Override re-tick budget for this execution (defaults to *max-tick-iterations*)
 
    Returns:
      {:status :success | :failure | :timeout
@@ -199,7 +200,7 @@
       :error string?             ;; Present if status is :failure
       :executed-version ...}     ;; Version number if published version was used"
   [context sheet-id inputs & {:keys [timeout-ms use-version force-draft
-                                      trace? langfuse-client store-trace?]
+                                      trace? langfuse-client store-trace? max-ticks]
                                :or {timeout-ms 300000 store-trace? true}}]
   (let [tick-id (random-uuid)
         p (register-completion! tick-id)
@@ -215,7 +216,8 @@
                                      :options (cond-> {:timeout-ms timeout-ms
                                                         :store-trace? store-trace?}
                                                  trace? (assoc :trace? true)
-                                                 langfuse-client (assoc :langfuse-client langfuse-client))}
+                                                 langfuse-client (assoc :langfuse-client langfuse-client)
+                                                 max-ticks (assoc :max-ticks max-ticks))}
                               use-version (assoc :use-version use-version)
                               force-draft (assoc :force-draft force-draft))))]
     (if (:cognitect.anomalies/category cmd-result)

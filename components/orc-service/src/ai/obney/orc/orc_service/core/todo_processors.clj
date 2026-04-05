@@ -1035,6 +1035,8 @@
         status (:status event)
         tick-ctx (rm/get-tick-execution-context context tick-id)
         root-node-id (:root-node-id tick-ctx)
+        ;; Per-execution override from options, else global dynamic default
+        max-ticks (or (get-in tick-ctx [:options :max-ticks]) *max-tick-iterations*)
         ;; Get current tick to check iteration count and cancellation
         tick (rm/get-tick context tick-id)
         current-iteration (or (:iteration tick) 1)
@@ -1055,7 +1057,7 @@
 
         ;; Status is running and we haven't hit max iterations - re-tick
         (and (= status :running)
-             (< current-iteration *max-tick-iterations*))
+             (< current-iteration max-ticks))
         {:result/events
          [(->event
            {:type :sheet/tree-tick-completed
@@ -1076,7 +1078,7 @@
         ;; Either success/failure, or hit max iterations
         :else
         (let [final-status (if (and (= status :running)
-                                     (>= current-iteration *max-tick-iterations*))
+                                     (>= current-iteration max-ticks))
                              :failure
                              status)
               ;; For tick-scoped executions, gather outputs from isolated blackboard
@@ -1104,21 +1106,26 @@
 (defn deliver-execution-result
   "When a tick completes, deliver the result to any waiting promise.
    This bridges the async todo processor pipeline back to sync callers
-   who are blocking on runtime/execute."
+   who are blocking on runtime/execute.
+
+   Skips delivery for intermediate :running completions — those are
+   re-tick signals, not final results. The final delivery happens when
+   the tree completes with :success/:failure, or when max iterations
+   is hit (complete-tree-tick converts :running to :failure)."
   [{:keys [event]}]
   (let [tick-id (:tick-id event)
         root-status (:root-status event)
         outputs (:outputs event)
         error (:error event)]
-    (runtime/deliver-completion! tick-id
-      {:status (case root-status
-                 :success :success
-                 :failure :failure
-                 :running :failure  ;; running at completion means max iterations hit
-                 :failure)
-       :outputs (or outputs {})
-       :trace-id tick-id
-       :error error})
+    (when (not= root-status :running)
+      (runtime/deliver-completion! tick-id
+        {:status (case root-status
+                   :success :success
+                   :failure :failure
+                   :failure)
+         :outputs (or outputs {})
+         :trace-id tick-id
+         :error error}))
     ;; No events to emit
     nil))
 
