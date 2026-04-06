@@ -12,7 +12,8 @@
             [ai.obney.grain.event-store-v3.interface :as event-store :refer [->event]]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
-            [ai.obney.grain.time.interface :as time]))
+            [ai.obney.grain.time.interface :as time]
+            [clojure.string :as str]))
 
 ;; =============================================================================
 ;; Tick-Scoped Resolution Helpers
@@ -39,6 +40,52 @@
   (if-let [override (and overrides (:name node) (get overrides (:name node)))]
     (assoc node :instruction override)
     node))
+
+(defn- apply-ontology-context
+  "If node has :context parameter, inject ontology context into instruction.
+
+   The :context parameter can include:
+   - :problem-type - Problem URI for context lookup
+   - :include-patterns - Include success patterns
+   - :include-failures - Include failure patterns
+   - :tree-id - Enable self-learning mode
+   - :self-learning? - Enable self-learning context
+
+   This requires the ontology component to be available in the context."
+  [node context]
+  (let [ctx-config (:context node)]
+    (if (and ctx-config (:instruction node))
+      ;; Try to build ontology context - gracefully handle missing ontology component
+      (try
+        (let [ontology-ns (requiring-resolve 'ai.obney.orc.ontology.interface/build-ontology-context)
+              format-fn (requiring-resolve 'ai.obney.orc.ontology.interface/format-context-for-llm)]
+          (if (and ontology-ns format-fn)
+            (let [event-store (:event-store context)
+                  ;; Build ontology context
+                  ontology-ctx (ontology-ns event-store
+                                            (cond-> {:problem-type (:problem-type ctx-config)}
+                                              (:tree-id ctx-config) (assoc :tree-id (:tree-id ctx-config))
+                                              (:self-learning? ctx-config) (assoc :self-learning? true)))
+                  ;; Format for LLM injection
+                  formatted (format-fn ontology-ctx
+                                       {:include (cond-> #{}
+                                                   (:include-patterns ctx-config) (conj :patterns)
+                                                   (:include-failures ctx-config) (conj :failures))
+                                        :max-items 5})]
+              (if (and formatted (not (str/blank? formatted)))
+                ;; Prepend ontology context to instruction
+                (update node :instruction
+                        (fn [inst]
+                          (str "## Ontology Context\n\n"
+                               formatted
+                               "\n\n---\n\n"
+                               inst)))
+                node))
+            node))
+        (catch Exception _e
+          ;; Ontology component not available or error - proceed without context
+          node))
+      node)))
 
 (defn- make-bb-write-event
   "Create a tick-scoped blackboard write event (isolated per execution)."
@@ -117,7 +164,8 @@
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
-                 (apply-instruction-override overrides))]
+                 (apply-instruction-override overrides)
+                 (apply-ontology-context context))]
     (when (= :leaf (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             ;; Merge event inputs into blackboard (e.g., map-each item values)
@@ -191,7 +239,8 @@
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
-                 (apply-instruction-override overrides))]
+                 (apply-instruction-override overrides)
+                 (apply-ontology-context context))]
     (when (= :repl-researcher (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             blackboard (reduce (fn [bb [k v]]

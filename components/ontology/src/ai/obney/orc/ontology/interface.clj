@@ -28,6 +28,7 @@
             [ai.obney.orc.ontology.core.rule-extraction :as rule-extraction]
             [ai.obney.orc.ontology.core.commands] ;; Register defcommand handlers for tree profiles
             [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
+            [ai.obney.orc.ontology.core.todo-processors] ;; Register todo processors for auto-learning
             [ai.obney.grain.event-store-v3.interface :as event-store]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]))
 
