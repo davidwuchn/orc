@@ -138,8 +138,14 @@
      :reads - Vector of blackboard keys to read (e.g., [:student-profile :programs])
      :writes - Vector of blackboard keys to write (e.g., [:result])
      :retry - {:max-attempts n :backoff-ms [100 500]}
-     :judges - Vector of judge names (defined in sheet/judges)"
-  [name & {:keys [model instruction reads writes retry judges]}]
+     :judges - Vector of judge names (defined in sheet/judges)
+     :context - Ontology context injection config:
+                {:problem-type \"problem:Classification\"
+                 :include-patterns true
+                 :include-failures true
+                 :tree-id uuid  ;; for self-learning
+                 :self-learning? true}"
+  [name & {:keys [model instruction reads writes retry judges context]}]
   (cond-> {:node-type :leaf
            :name name
            :executor :ai
@@ -148,7 +154,8 @@
            :reads (vec reads)
            :writes (vec writes)}
     retry (assoc :retry retry)
-    judges (assoc :judges (vec judges))))
+    judges (assoc :judges (vec judges))
+    context (assoc :context context)))
 
 (defn code
   "Define a code executor leaf node.
@@ -596,7 +603,8 @@
                    (:instruction node) (assoc :instruction (:instruction node))
                    (seq (:reads node)) (assoc :reads (:reads node))
                    (seq (:writes node)) (assoc :writes (:writes node))
-                   (:retry node) (assoc :retry (:retry node))))
+                   (:retry node) (assoc :retry (:retry node))
+                   (:context node) (assoc :context (:context node))))
           ;; Condition-specific
           (= :condition (:type node))
           (merge (cond-> {}

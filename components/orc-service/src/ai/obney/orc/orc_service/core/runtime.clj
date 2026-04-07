@@ -54,7 +54,9 @@
                        :max-concurrency (:max-concurrency snapshot-node)
                        ;; Repl-researcher fields
                        :mcp-tools (or (:mcp-tools snapshot-node) [])
-                       :max-iterations (:max-iterations snapshot-node)}
+                       :max-iterations (:max-iterations snapshot-node)
+                       ;; Ontology context injection
+                       :context (:context snapshot-node)}
           ;; Recursively parse children
           child-records (mapcat (fn [i child]
                                   (parse-snapshot-nodes child node-id i (str path "/" i)))
