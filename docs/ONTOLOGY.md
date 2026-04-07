@@ -331,7 +331,7 @@ The ontology component enables:
 [:map
  [:node-id :uuid]
  [:sheet-id :uuid]
- [:node-type [:enum :llm :repl-researcher :code :map-each :condition :llm-condition]]
+ [:node-type [:enum :llm :repl-researcher :code :map-each :condition :llm-condition :delegate]]
  [:pattern-type [:enum :search :instruction :execution :structural]]
  [:effective? :boolean]
  [:pattern-description :string]

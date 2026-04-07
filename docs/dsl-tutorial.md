@@ -81,6 +81,10 @@ The ORC DSL offers several advantages over imperative code:
 ;; 4. Check the outputs
 (:outputs result)  ;; => {:output-key "result value"}
 (:status result)   ;; => :success or :failure
+
+;; Optional: Set LLM call budget (safety net for runaway workflows)
+(def result (sheet/execute ctx sheet-id {:input-key "value"}
+                           :llm-call-budget 50))
 ```
 
 ---
@@ -361,6 +365,70 @@ Use LLM to evaluate a yes/no question.
 - LLM responds with yes/no (or true/false, 1/0)
 - Returns SUCCESS if yes, FAILURE if no
 - Use with `fallback` for LLM-driven branching
+
+### delegate
+
+Execute another workflow (sheet) with isolated blackboard. Useful for composing reusable subworkflows.
+
+```clojure
+(sheet/delegate "process-enrichment"
+  :target-sheet-id enrichment-sheet-id  ;; UUID of target workflow
+  :reads [:lead-data :context]           ;; Keys to pass as inputs
+  :writes [:enriched-data :metadata]     ;; Keys to receive as outputs
+  :timeout-ms 60000                       ;; Optional timeout (default 5 min)
+  :inherit-ontology? true)                ;; Share learned patterns
+```
+
+**Parameters:**
+- `:target-sheet-id` - UUID of the workflow to execute (required)
+- `:reads` - Blackboard keys to pass as inputs to target workflow
+- `:writes` - Blackboard keys to receive back from target workflow outputs
+- `:timeout-ms` - Execution timeout in milliseconds (default: 300000)
+- `:inherit-ontology?` - Whether child inherits ontology context (default: true)
+
+**Behavior:**
+- Creates isolated blackboard for target workflow (no shared state)
+- Maps `:reads` keys from parent blackboard to target inputs
+- Maps target outputs back to parent `:writes` keys
+- Target failure causes delegate node to fail
+- Full execution tracing with lifecycle events
+
+**Use cases:**
+- Decompose complex workflows into reusable components
+- A/B test different sub-workflow implementations
+- Isolate failure domains (child failure won't corrupt parent state)
+- Parallel execution of independent subworkflows via `parallel` + `delegate`
+
+**Example: Parent with reusable child**
+```clojure
+;; Build the child workflow first
+(def enrichment-sheet-id
+  (sheet/build-workflow! ctx
+    (sheet/workflow "lead-enrichment"
+      (sheet/blackboard
+        {:lead-data :string
+         :enriched-data [:map [:company-info :string]
+                              [:funding-stage :string]]})
+      (sheet/llm "enrich"
+        :model "google/gemini-2.5-flash"
+        :instruction "Research and enrich this lead data..."
+        :reads [:lead-data]
+        :writes [:enriched-data]))))
+
+;; Parent workflow delegates to child
+(def parent-workflow
+  (sheet/workflow "lead-processor"
+    (sheet/blackboard
+      {:raw-lead :string
+         :processed-lead [:map [:original :string]
+                               [:enriched [:map-of :keyword :any]]]})
+    (sheet/sequence "main"
+      ;; Pass raw-lead, get back enriched-data into processed-lead
+      (sheet/delegate "enrich-step"
+        :target-sheet-id enrichment-sheet-id
+        :reads [:raw-lead]
+        :writes [:processed-lead]))))
+```
 
 ---
 

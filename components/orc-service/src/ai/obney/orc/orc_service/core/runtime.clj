@@ -193,6 +193,7 @@
      :trace? - Enable tracing (passed to async pipeline via options)
      :langfuse-client - Langfuse client (passed to async pipeline via options)
      :store-trace? - Store trace in event store (default true, passed via options)
+     :llm-call-budget - Max LLM calls before failing (opt-in only, NO default)
 
    Returns:
      {:status :success | :failure | :timeout
@@ -201,7 +202,8 @@
       :error string?             ;; Present if status is :failure
       :executed-version ...}     ;; Version number if published version was used"
   [context sheet-id inputs & {:keys [timeout-ms use-version force-draft
-                                      trace? langfuse-client store-trace?]
+                                      trace? langfuse-client store-trace?
+                                      llm-call-budget]  ;; Opt-in only - NO default
                                :or {timeout-ms 300000 store-trace? true}}]
   (let [tick-id (random-uuid)
         p (register-completion! tick-id)
@@ -217,7 +219,8 @@
                                      :options (cond-> {:timeout-ms timeout-ms
                                                         :store-trace? store-trace?}
                                                  trace? (assoc :trace? true)
-                                                 langfuse-client (assoc :langfuse-client langfuse-client))}
+                                                 langfuse-client (assoc :langfuse-client langfuse-client)
+                                                 llm-call-budget (assoc :llm-call-budget llm-call-budget))}
                               use-version (assoc :use-version use-version)
                               force-draft (assoc :force-draft force-draft))))]
     (if (:cognitect.anomalies/category cmd-result)

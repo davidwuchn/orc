@@ -230,6 +230,28 @@ Use an LLM for yes/no decisions.
   :reads [:message])
 ```
 
+#### `delegate`
+
+Execute another workflow with isolated blackboard.
+
+```clojure
+(sheet/delegate "run-subworkflow"
+  :target-sheet-id child-sheet-uuid
+  :reads [:input-data]           ;; Pass to child
+  :writes [:result]              ;; Receive from child
+  :timeout-ms 60000)             ;; Optional timeout
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `:target-sheet-id` | UUID of the workflow to execute |
+| `:reads` | Blackboard keys to pass as inputs |
+| `:writes` | Blackboard keys to receive as outputs |
+| `:timeout-ms` | Execution timeout (default: 300000ms) |
+| `:inherit-ontology?` | Share ontology context (default: true) |
+
 ---
 
 ## Blackboard Patterns
@@ -351,6 +373,34 @@ result
 | `:failure` | Node failed (may trigger fallback) |
 | `:running` | Node still executing (async) |
 
+### LLM Call Budget (Opt-in)
+
+Prevent runaway workflows in nested iteration scenarios by setting an LLM call limit.
+
+**IMPORTANT:** Budget is opt-in only. If not specified, **no limit is enforced**.
+
+```clojure
+;; No budget (default - unlimited)
+(sheet/execute ctx sheet-id inputs)
+
+;; With budget (fails if exceeded)
+(sheet/execute ctx sheet-id inputs :llm-call-budget 100)
+```
+
+**When budget is exceeded:**
+- Workflow fails with error: `"LLM call budget exceeded: 100/100"`
+- No partial results - fails immediately when limit reached
+
+**When to use:**
+- `map-each` over large collections calling LLMs
+- Recursive/iterative workflows (repl-researcher)
+- Production safety nets for untested workflows
+
+**Tracking:**
+- Budget is per-tick (per execution)
+- Counter cleared automatically on completion
+- Only AI executor calls count (not code nodes)
+
 ---
 
 ## Event Store Integration
@@ -370,6 +420,50 @@ The orc-service uses Grain's event store for persistence and observability.
 | `:sheet/node-execution-completed` | Node ends | `:sheet-id`, `:node-id`, `:status`, `:duration-ms` |
 | `:sheet/tree-tick-completed` | `execute` end | `:sheet-id`, `:tick-id`, `:root-status` |
 | `:sheet/trace-assembled` | Trace ready | `:trace-id`, `:sheet-id`, full trace data |
+| `:sheet/execution-lifecycle-event` | Before/after/failure of node | `:phase`, `:node-type`, `:metadata` |
+
+### Execution Lifecycle Hooks
+
+ORC emits lifecycle events at key execution phases, enabling custom observability and instrumentation.
+
+**Phases:**
+
+| Phase | When Emitted |
+|-------|--------------|
+| `:before-execute` | Just before node starts |
+| `:after-execute` | After successful completion |
+| `:on-failure` | When execution fails |
+
+**Event Schema:**
+
+```clojure
+{:sheet-id uuid
+ :tick-id uuid
+ :node-id uuid
+ :phase [:enum :before-execute :after-execute :on-failure]
+ :node-type :keyword
+ :node-name :string
+ :timestamp :string
+ :metadata {:optional true} [:map-of :keyword :any]}
+```
+
+**Subscribing to Lifecycle Events:**
+
+```clojure
+(defprocessor :custom my-lifecycle-logger
+  {:topics #{:sheet/execution-lifecycle-event}}
+  "Log execution lifecycle events for observability."
+  [context]
+  (let [{:keys [phase node-name node-type]} (:event context)]
+    (mu/log ::lifecycle :phase phase :node node-name :type node-type)
+    nil))
+```
+
+**Use Cases:**
+- Custom logging/metrics (Datadog, Prometheus)
+- Execution timing analysis
+- Failure alerting
+- Debugging slow nodes
 
 ### Read Model Queries
 

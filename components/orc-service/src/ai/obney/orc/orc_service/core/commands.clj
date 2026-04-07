@@ -602,6 +602,60 @@
                   (:model node) (assoc :previous-model (:model node))
                   (:max-iterations node) (assoc :previous-max-iterations (:max-iterations node)))})]})))
 
+(defcommand :sheet set-delegate-config
+  {:authorized? authenticated?}
+  "Set configuration for a delegate node.
+   Delegate nodes execute another sheet with isolated blackboard,
+   mapping inputs from parent and outputs back to parent."
+  [{{:keys [sheet-id node-id target-sheet-id reads writes timeout-ms inherit-ontology?]} :command
+    :as ctx}]
+  (let [node (rm/get-node ctx sheet-id node-id)
+        target-sheet (when target-sheet-id
+                       (rm/get-sheet ctx target-sheet-id))
+        blackboard (rm/get-blackboard-by-key ctx sheet-id)
+        all-keys (set (keys blackboard))
+        unknown-reads (remove all-keys reads)
+        unknown-writes (remove all-keys writes)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :delegate (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only delegate nodes can have delegate configuration"}
+
+      (and target-sheet-id (not target-sheet))
+      {::anom/category ::anom/not-found
+       ::anom/message "Target sheet not found"}
+
+      (seq unknown-reads)
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Unknown blackboard keys in reads: " (vec unknown-reads))}
+
+      (seq unknown-writes)
+      {::anom/category ::anom/incorrect
+       ::anom/message (str "Unknown blackboard keys in writes: " (vec unknown-writes))}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/delegate-config-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :target-sheet-id target-sheet-id
+                         :reads (vec reads)
+                         :writes (vec writes)}
+                  timeout-ms (assoc :timeout-ms timeout-ms)
+                  (some? inherit-ontology?) (assoc :inherit-ontology? inherit-ontology?)
+                  (:target-sheet-id node) (assoc :previous-target-sheet-id (:target-sheet-id node))
+                  (seq (:reads node)) (assoc :previous-reads (:reads node))
+                  (seq (:writes node)) (assoc :previous-writes (:writes node))
+                  (:delegate-timeout-ms node) (assoc :previous-timeout-ms (:delegate-timeout-ms node))
+                  (some? (:inherit-ontology? node)) (assoc :previous-inherit-ontology? (:inherit-ontology? node)))})]})))
+
 ;; =============================================================================
 ;; Blackboard Commands
 ;; =============================================================================

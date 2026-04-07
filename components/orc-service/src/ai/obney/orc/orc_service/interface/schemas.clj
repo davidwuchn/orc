@@ -14,7 +14,7 @@
 
 (def node-type
   "Behavior tree node types"
-  [:enum :leaf :sequence :fallback :condition :llm-condition :parallel :map-each :repl-researcher])
+  [:enum :leaf :sequence :fallback :condition :llm-condition :parallel :map-each :repl-researcher :delegate])
 
 (def executor-type
   "Executor types for leaf nodes"
@@ -133,6 +133,10 @@
     ;; Repl-researcher-only fields
     [:mcp-tools {:optional true} [:vector :string]] ;; Available MCP tool names for research
     [:max-iterations {:optional true} :int]         ;; Max research iterations (default 10)
+    ;; Delegate-only fields
+    [:target-sheet-id {:optional true} :uuid]       ;; Sheet to delegate execution to
+    [:delegate-timeout-ms {:optional true} :int]    ;; Timeout for delegated execution
+    [:inherit-ontology? {:optional true} :boolean]  ;; Share ontology context with target
     ;; Execution tracking
     [:last-error {:optional true} :string]]
 
@@ -364,6 +368,16 @@
     [:mcp-tools [:vector :string]]                      ;; Available MCP tool names
     [:model {:optional true} :string]                   ;; OpenRouter model ID
     [:max-iterations {:optional true} :int]]            ;; Default 10
+
+   :sheet/set-delegate-config
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:target-sheet-id :uuid]                            ;; Sheet to delegate to
+    [:reads [:vector :keyword]]                         ;; Blackboard keys to pass as inputs
+    [:writes [:vector :keyword]]                        ;; Output keys to receive from target
+    [:timeout-ms {:optional true} :int]                 ;; Timeout for delegated execution
+    [:inherit-ontology? {:optional true} :boolean]]     ;; Share ontology context (default true)
 
    ;; -------------------------------------------------------------------------
    ;; Blackboard Commands
@@ -712,6 +726,21 @@
     [:previous-model {:optional true} :string]
     [:previous-max-iterations {:optional true} :int]]
 
+   :sheet/delegate-config-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:target-sheet-id :uuid]
+    [:reads [:vector :keyword]]
+    [:writes [:vector :keyword]]
+    [:timeout-ms {:optional true} :int]
+    [:inherit-ontology? {:optional true} :boolean]
+    [:previous-target-sheet-id {:optional true} :uuid]
+    [:previous-reads {:optional true} [:vector :keyword]]
+    [:previous-writes {:optional true} [:vector :keyword]]
+    [:previous-timeout-ms {:optional true} :int]
+    [:previous-inherit-ontology? {:optional true} :boolean]]
+
    ;; -------------------------------------------------------------------------
    ;; Blackboard Events
    ;; -------------------------------------------------------------------------
@@ -832,6 +861,18 @@
     [:node-id :uuid]
     [:item-index :int]
     [:total-items :int]]
+
+   ;; Lifecycle event for execution hooks (instrumentation, logging, etc.)
+   :sheet/execution-lifecycle-event
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:phase [:enum :before-execute :after-execute :on-failure]]
+    [:node-type :keyword]
+    [:node-name :string]
+    [:timestamp :string]
+    [:metadata {:optional true} [:map-of :keyword :any]]]
 
    ;; -------------------------------------------------------------------------
    ;; Versioning Events
