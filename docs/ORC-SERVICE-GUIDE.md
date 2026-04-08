@@ -420,50 +420,6 @@ The orc-service uses Grain's event store for persistence and observability.
 | `:sheet/node-execution-completed` | Node ends | `:sheet-id`, `:node-id`, `:status`, `:duration-ms` |
 | `:sheet/tree-tick-completed` | `execute` end | `:sheet-id`, `:tick-id`, `:root-status` |
 | `:sheet/trace-assembled` | Trace ready | `:trace-id`, `:sheet-id`, full trace data |
-| `:sheet/execution-lifecycle-event` | Before/after/failure of node | `:phase`, `:node-type`, `:metadata` |
-
-### Execution Lifecycle Hooks
-
-ORC emits lifecycle events at key execution phases, enabling custom observability and instrumentation.
-
-**Phases:**
-
-| Phase | When Emitted |
-|-------|--------------|
-| `:before-execute` | Just before node starts |
-| `:after-execute` | After successful completion |
-| `:on-failure` | When execution fails |
-
-**Event Schema:**
-
-```clojure
-{:sheet-id uuid
- :tick-id uuid
- :node-id uuid
- :phase [:enum :before-execute :after-execute :on-failure]
- :node-type :keyword
- :node-name :string
- :timestamp :string
- :metadata {:optional true} [:map-of :keyword :any]}
-```
-
-**Subscribing to Lifecycle Events:**
-
-```clojure
-(defprocessor :custom my-lifecycle-logger
-  {:topics #{:sheet/execution-lifecycle-event}}
-  "Log execution lifecycle events for observability."
-  [context]
-  (let [{:keys [phase node-name node-type]} (:event context)]
-    (mu/log ::lifecycle :phase phase :node node-name :type node-type)
-    nil))
-```
-
-**Use Cases:**
-- Custom logging/metrics (Datadog, Prometheus)
-- Execution timing analysis
-- Failure alerting
-- Debugging slow nodes
 
 ### Read Model Queries
 

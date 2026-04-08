@@ -138,39 +138,6 @@
            :value value}}))
 
 ;; =============================================================================
-;; Lifecycle Event Emission
-;; =============================================================================
-
-(defn- emit-lifecycle-event!
-  "Emit execution lifecycle event for hook subscribers.
-   Uses direct event emission (Grain pattern) - not command processing.
-
-   Phases:
-   - :before-execute - Just before node starts execution
-   - :after-execute  - After successful completion
-   - :on-failure     - When execution fails
-
-   External code can subscribe via todo processor with topic
-   #{:sheet/execution-lifecycle-event}."
-  [context sheet-id tick-id node-id node-type node-name phase & [metadata]]
-  (let [es (:event-store context)
-        tenant-id (:tenant-id context)
-        event (->event
-                {:type :sheet/execution-lifecycle-event
-                 :tags #{[:sheet sheet-id]
-                         [:tick tick-id]
-                         [:node node-id]}
-                 :body (cond-> {:sheet-id sheet-id
-                                :tick-id tick-id
-                                :node-id node-id
-                                :phase phase
-                                :node-type node-type
-                                :node-name (or node-name "")
-                                :timestamp (str (time/now))}
-                         metadata (assoc :metadata metadata))})]
-    (event-store/append es {:tenant-id tenant-id :events [event]})))
-
-;; =============================================================================
 ;; Tick Execution Processor
 ;; =============================================================================
 
@@ -417,11 +384,6 @@
                            {}
                            read-keys)]
 
-        ;; Emit lifecycle event before execution
-        (emit-lifecycle-event! context sheet-id tick-id node-id
-                               :delegate (:name node) :before-execute
-                               {:target-sheet-id target-sheet-id})
-
         ;; Async execution pattern (ORC standard)
         (future
           (try
@@ -447,12 +409,6 @@
                            {}
                            write-keys)]
 
-              ;; Emit lifecycle event after execution
-              (emit-lifecycle-event! context sheet-id tick-id node-id
-                                     :delegate (:name node)
-                                     (if (= :success status) :after-execute :on-failure)
-                                     {:status status :duration-ms duration-ms})
-
               ;; Complete node execution (ORC pattern)
               (cp/process-command
                 (assoc context :command
@@ -469,11 +425,6 @@
                          (:error result) (assoc :error (:error result))))))
 
             (catch Exception e
-              ;; Emit failure lifecycle event
-              (emit-lifecycle-event! context sheet-id tick-id node-id
-                                     :delegate (:name node) :on-failure
-                                     {:error (.getMessage e)})
-
               ;; Fail node execution (ORC pattern)
               (cp/process-command
                 (assoc context :command
