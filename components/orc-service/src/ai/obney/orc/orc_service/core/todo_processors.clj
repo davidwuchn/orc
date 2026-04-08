@@ -98,12 +98,11 @@
         (let [ontology-ns (requiring-resolve 'ai.obney.orc.ontology.interface/build-ontology-context)
               format-fn (requiring-resolve 'ai.obney.orc.ontology.interface/format-context-for-llm)]
           (if (and ontology-ns format-fn)
-            (let [event-store (:event-store context)
-                  ;; Resolve tree-id: explicit > sheet-id (auto for self-learning)
+            (let [;; Resolve tree-id: explicit > sheet-id (auto for self-learning)
                   tree-id (or (:tree-id ctx-config)
                               (when (:self-learning? ctx-config) (:sheet-id context)))
-                  ;; Build ontology context
-                  ontology-ctx (ontology-ns event-store
+                  ;; Build ontology context - pass full context (needs :event-store and :cache)
+                  ontology-ctx (ontology-ns context
                                             (cond-> {:problem-type (:problem-type ctx-config)}
                                               tree-id (assoc :tree-id tree-id)
                                               (:self-learning? ctx-config) (assoc :self-learning? true)))

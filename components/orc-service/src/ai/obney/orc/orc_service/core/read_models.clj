@@ -35,6 +35,7 @@
     :sheet/node-deleted
     :sheet/node-name-set
     :sheet/node-instruction-set
+    :sheet/node-context-set
     :sheet/node-io-set
     :sheet/node-decorators-set
     :sheet/node-check-set
@@ -85,6 +86,7 @@
     :sheet/node-deleted
     :sheet/node-name-set
     :sheet/node-instruction-set
+    :sheet/node-context-set
     :sheet/node-io-set
     :sheet/node-decorators-set
     :sheet/node-check-set
@@ -320,6 +322,10 @@
 (defmethod nodes* :sheet/node-instruction-set
   [state event]
   (assoc-in state [(:node-id event) :instruction] (:instruction event)))
+
+(defmethod nodes* :sheet/node-context-set
+  [state event]
+  (assoc-in state [(:node-id event) :context] (:context event)))
 
 (defmethod nodes* :sheet/node-io-set
   [state event]

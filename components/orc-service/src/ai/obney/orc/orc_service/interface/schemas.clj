@@ -298,6 +298,12 @@
     [:node-id :uuid]
     [:instruction :string]]
 
+   :sheet/set-node-context
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:context [:map-of :keyword :any]]]
+
    :sheet/set-node-io
    [:map
     [:sheet-id :uuid]
@@ -628,6 +634,13 @@
     [:node-id :uuid]
     [:instruction :string]
     [:previous-instruction {:optional true} :string]]
+
+   :sheet/node-context-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:context [:map-of :keyword :any]]
+    [:previous-context {:optional true} [:map-of :keyword :any]]]
 
    :sheet/node-io-set
    [:map

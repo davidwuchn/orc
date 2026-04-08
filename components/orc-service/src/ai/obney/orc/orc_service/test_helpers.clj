@@ -402,6 +402,16 @@
    :node-id node-id
    :judges (vec judges)})
 
+(defn make-set-node-context-command
+  "Create a set-node-context command for self-learning injection."
+  [sheet-id node-id context]
+  {:command/name :sheet/set-node-context
+   :command/id (random-uuid)
+   :command/timestamp (time/now)
+   :sheet-id sheet-id
+   :node-id node-id
+   :context context})
+
 ;; =============================================================================
 ;; Factory Functions - Blackboard Commands
 ;; =============================================================================

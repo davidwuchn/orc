@@ -436,7 +436,11 @@
         ;; Set judges if configured
         (when-let [judges (:judges node)]
           (h/run-and-apply! ctx
-            (h/make-set-node-judges-command sheet-id node-id judges))))
+            (h/make-set-node-judges-command sheet-id node-id judges)))
+        ;; Set ontology context if configured (for self-learning injection)
+        (when-let [context (:context node)]
+          (h/run-and-apply! ctx
+            (h/make-set-node-context-command sheet-id node-id context))))
 
       :condition
       (when-let [check (:check node)]

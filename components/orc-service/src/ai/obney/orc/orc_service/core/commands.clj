@@ -285,6 +285,32 @@
                          :instruction instruction}
                   (:instruction node) (assoc :previous-instruction (:instruction node)))})]})))
 
+(defcommand :sheet set-node-context
+  {:authorized? authenticated?}
+  "Set the ontology context for a leaf node (for self-learning injection)."
+  [{{:keys [sheet-id node-id context]} :command
+    :as ctx}]
+  (let [node (rm/get-node ctx sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have context"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-context-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :context context}
+                  (:context node) (assoc :previous-context (:context node)))})]})))
+
 (defcommand :sheet set-node-io
   {:authorized? authenticated?}
   "Set the reads/writes (blackboard keys) for a leaf node."
