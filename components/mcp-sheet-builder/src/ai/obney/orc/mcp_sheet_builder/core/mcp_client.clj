@@ -7,6 +7,7 @@
    - :nrepl - Uses the nREPL MCP bridge"
   (:require [clj-http.client :as http]
             [cheshire.core :as json]
+            [clojure.string :as str]
             [com.brunobonacci.mulog :as u]))
 
 ;; ============================================================================
@@ -20,43 +21,162 @@
   (close* [this] "Close the connection."))
 
 ;; ============================================================================
-;; HTTP/SSE Client
+;; Streamable HTTP MCP Client (MCP 2025-03-26 spec)
 ;; ============================================================================
 
-(defrecord HTTPMCPClient [url session-id headers]
+(defn- parse-sse-response
+  "Parse an SSE (Server-Sent Events) response body.
+   Returns the JSON-RPC result from the data lines."
+  [body]
+  (let [lines (str/split-lines body)
+        data-lines (->> lines
+                        (filter #(str/starts-with? % "data: "))
+                        (map #(subs % 6)))]
+    (when (seq data-lines)
+      (json/parse-string (first data-lines) true))))
+
+(defn- parse-response-body
+  "Parse the response body, handling both JSON and SSE formats."
+  [response]
+  (let [content-type (or (get-in response [:headers "content-type"])
+                         (get-in response [:headers "Content-Type"])
+                         "")
+        body (:body response)]
+    (cond
+      ;; SSE response - parse the event stream
+      (str/includes? content-type "text/event-stream")
+      (parse-sse-response (if (string? body) body (slurp body)))
+
+      ;; JSON response - body may already be parsed or be a string
+      (map? body)
+      body
+
+      (string? body)
+      (json/parse-string body true)
+
+      :else
+      body)))
+
+;; Forward declaration for session initialization
+(declare initialize-mcp-session!)
+
+(defn- reinitialize-session!
+  "Reinitialize the MCP session when it expires (404 error)."
+  [url headers session-id-atom]
+  (u/log ::session-expired :url url)
+  (let [new-session-id (initialize-mcp-session! url headers)]
+    (reset! session-id-atom new-session-id)
+    new-session-id))
+
+(defn- mcp-request-with-retry
+  "Make an MCP request with automatic session refresh on 404.
+   request-fn takes session-id and returns response."
+  [url headers session-id-atom request-fn]
+  (try
+    (request-fn @session-id-atom)
+    (catch Exception e
+      ;; clj-http with slingshot wraps status in ex-data
+      (let [data (ex-data e)
+            status (or (:status data)
+                       ;; Check if error message contains 404
+                       (when (and (instance? clojure.lang.ExceptionInfo e)
+                                  (re-find #"status 404" (str (.getMessage e))))
+                         404))]
+        (if (= 404 status)
+          ;; Session expired - reinitialize and retry
+          (do
+            (reinitialize-session! url headers session-id-atom)
+            (request-fn @session-id-atom))
+          (throw e))))))
+
+(defrecord StreamableHTTPMCPClient [url session-id-atom headers]
   MCPClient
   (list-tools* [_]
     (u/trace ::list-tools {:url url}
-      (let [response (http/post (str url "/tools/list")
-                                {:headers (merge {"Content-Type" "application/json"} headers)
-                                 :body (json/generate-string {:jsonrpc "2.0"
-                                                               :method "tools/list"
-                                                               :id 1})
-                                 :as :json})]
-        (get-in response [:body :result :tools] []))))
+      (mcp-request-with-retry url headers session-id-atom
+        (fn [session-id]
+          (let [response (http/post url
+                                    {:headers (cond-> {"Content-Type" "application/json"
+                                                       "Accept" "application/json, text/event-stream"}
+                                                session-id (assoc "Mcp-Session-Id" session-id))
+                                     :body (json/generate-string {:jsonrpc "2.0"
+                                                                   :method "tools/list"
+                                                                   :id 1})
+                                     :as :auto
+                                     :throw-exceptions true})
+                parsed (parse-response-body response)]
+            (get-in parsed [:result :tools] []))))))
 
   (call-tool* [_ tool-name args]
     (u/trace ::call-tool {:url url :tool tool-name}
-      (let [response (http/post (str url "/tools/call")
-                                {:headers (merge {"Content-Type" "application/json"} headers)
-                                 :body (json/generate-string {:jsonrpc "2.0"
-                                                               :method "tools/call"
-                                                               :params {:name tool-name
-                                                                        :arguments args}
-                                                               :id 1})
-                                 :as :json})]
-        (get-in response [:body :result]))))
+      (mcp-request-with-retry url headers session-id-atom
+        (fn [session-id]
+          (let [response (http/post url
+                                    {:headers (cond-> {"Content-Type" "application/json"
+                                                       "Accept" "application/json, text/event-stream"}
+                                                session-id (assoc "Mcp-Session-Id" session-id))
+                                     :body (json/generate-string {:jsonrpc "2.0"
+                                                                   :method "tools/call"
+                                                                   :params {:name tool-name
+                                                                            :arguments args}
+                                                                   :id 1})
+                                     :as :auto
+                                     :throw-exceptions true})
+                parsed (parse-response-body response)]
+            (get parsed :result))))))
 
-  (close* [_]
-    ;; HTTP connections are stateless, nothing to close
-    nil))
+  (close* [this]
+    ;; Send DELETE to close session if we have a session ID
+    (when-let [session-id @session-id-atom]
+      (try
+        (http/delete url {:headers {"Mcp-Session-Id" session-id}})
+        (catch Exception _)))
+    (reset! session-id-atom nil)))
+
+(defn- initialize-mcp-session!
+  "Initialize an MCP session with the server.
+   Returns the session ID if one is assigned."
+  [url headers]
+  (u/trace ::initialize-session {:url url}
+    (try
+      ;; Step 1: Send InitializeRequest
+      (let [init-response (http/post url
+                                     {:headers (merge {"Content-Type" "application/json"
+                                                       "Accept" "application/json, text/event-stream"}
+                                                      headers)
+                                      :body (json/generate-string
+                                              {:jsonrpc "2.0"
+                                               :method "initialize"
+                                               :params {:protocolVersion "2025-03-26"
+                                                        :capabilities {}
+                                                        :clientInfo {:name "orc-mcp-client"
+                                                                     :version "1.0.0"}}
+                                               :id 1})
+                                      :as :auto})
+            session-id (get-in init-response [:headers "mcp-session-id"])]
+
+        ;; Step 2: Send InitializedNotification
+        (http/post url
+                   {:headers (cond-> {"Content-Type" "application/json"
+                                      "Accept" "application/json, text/event-stream"}
+                               session-id (assoc "Mcp-Session-Id" session-id))
+                    :body (json/generate-string
+                            {:jsonrpc "2.0"
+                             :method "notifications/initialized"})})
+
+        session-id)
+      (catch Exception e
+        (u/log ::initialize-failed :error (.getMessage e))
+        nil))))
 
 (defn- connect-http
-  "Connect to an HTTP MCP server."
+  "Connect to an HTTP MCP server using Streamable HTTP transport."
   [{:keys [url headers api-key]}]
   (let [auth-headers (when api-key
-                       {"Authorization" (str "Bearer " api-key)})]
-    (->HTTPMCPClient url (str (random-uuid)) (merge headers auth-headers))))
+                       {"Authorization" (str "Bearer " api-key)})
+        all-headers (merge headers auth-headers)
+        session-id (initialize-mcp-session! url all-headers)]
+    (->StreamableHTTPMCPClient url (atom session-id) all-headers)))
 
 ;; ============================================================================
 ;; Claude MCP Bridge (Uses Claude Code's infrastructure)
@@ -222,12 +342,152 @@
                                         :description "Question to answer"}}
                   :required ["query"]}}])
 
+(def playwright-tools
+  "Playwright MCP tool definitions.
+   Based on https://github.com/microsoft/playwright-mcp"
+  [{:name "browser_navigate"
+    :description "Navigate to a URL in the browser."
+    :inputSchema {:type "object"
+                  :properties {"url" {:type "string"
+                                      :description "URL to navigate to"}}
+                  :required ["url"]}}
+   {:name "browser_click"
+    :description "Click on an element on the page."
+    :inputSchema {:type "object"
+                  :properties {"element" {:type "string"
+                                          :description "Human-readable element description"}
+                               "ref" {:type "string"
+                                      :description "Exact target element reference from snapshot"}
+                               "selector" {:type "string"
+                                           :description "CSS selector for the element"}}}}
+   {:name "browser_type"
+    :description "Type text into an editable element on the page."
+    :inputSchema {:type "object"
+                  :properties {"element" {:type "string"
+                                          :description "Human-readable element description"}
+                               "ref" {:type "string"
+                                      :description "Exact target element reference from snapshot"}
+                               "selector" {:type "string"
+                                           :description "CSS selector for the element"}
+                               "text" {:type "string"
+                                       :description "Text to type into the element"}
+                               "submit" {:type "boolean"
+                                         :description "Press Enter after typing"}}
+                  :required ["text"]}}
+   {:name "browser_fill_form"
+    :description "Fill multiple form fields at once."
+    :inputSchema {:type "object"
+                  :properties {"fields" {:type "array"
+                                         :items {:type "object"
+                                                 :properties {"selector" {:type "string"}
+                                                              "value" {:type "string"}}}
+                                         :description "Array of {selector, value} pairs"}}
+                  :required ["fields"]}}
+   {:name "browser_snapshot"
+    :description "Capture an accessibility snapshot of the current page, returning structured text content."
+    :inputSchema {:type "object"
+                  :properties {"filename" {:type "string"
+                                           :description "Optional filename to save snapshot"}
+                               "selector" {:type "string"
+                                           :description "CSS selector to scope the snapshot"}
+                               "depth" {:type "integer"
+                                        :description "Maximum depth of the snapshot tree"}}}}
+   {:name "browser_take_screenshot"
+    :description "Take a screenshot of the current page or element."
+    :inputSchema {:type "object"
+                  :properties {"type" {:type "string"
+                                       :enum ["png" "jpeg"]
+                                       :description "Image format"}
+                               "filename" {:type "string"
+                                           :description "Filename to save screenshot"}
+                               "element" {:type "string"
+                                          :description "Element description to screenshot"}
+                               "selector" {:type "string"
+                                           :description "CSS selector for element"}
+                               "fullPage" {:type "boolean"
+                                           :description "Capture full scrollable page"}}}}
+   {:name "browser_wait_for"
+    :description "Wait for text to appear/disappear or for a specified time."
+    :inputSchema {:type "object"
+                  :properties {"time" {:type "integer"
+                                       :description "Time to wait in milliseconds"}
+                               "text" {:type "string"
+                                       :description "Text to wait for"}
+                               "textGone" {:type "string"
+                                           :description "Text to wait to disappear"}}}}
+   {:name "browser_evaluate"
+    :description "Evaluate JavaScript code on the page and return the result."
+    :inputSchema {:type "object"
+                  :properties {"function" {:type "string"
+                                           :description "JavaScript code to evaluate"}
+                               "element" {:type "string"
+                                          :description "Element to evaluate on"}
+                               "selector" {:type "string"
+                                           :description "CSS selector for context"}}
+                  :required ["function"]}}
+   {:name "browser_press_key"
+    :description "Press a key on the keyboard."
+    :inputSchema {:type "object"
+                  :properties {"key" {:type "string"
+                                      :description "Key to press (e.g. Enter, Escape, ArrowDown)"}}
+                  :required ["key"]}}
+   {:name "browser_select_option"
+    :description "Select an option in a dropdown element."
+    :inputSchema {:type "object"
+                  :properties {"element" {:type "string"
+                                          :description "Element description"}
+                               "selector" {:type "string"
+                                           :description "CSS selector for dropdown"}
+                               "values" {:type "array"
+                                         :items {:type "string"}
+                                         :description "Values to select"}}
+                  :required ["values"]}}
+   {:name "browser_hover"
+    :description "Hover over an element on the page."
+    :inputSchema {:type "object"
+                  :properties {"element" {:type "string"
+                                          :description "Element description"}
+                               "selector" {:type "string"
+                                           :description "CSS selector"}}}}
+   {:name "browser_close"
+    :description "Close the browser page."
+    :inputSchema {:type "object"
+                  :properties {}}}
+   {:name "browser_tabs"
+    :description "List, create, close, or select a browser tab."
+    :inputSchema {:type "object"
+                  :properties {"action" {:type "string"
+                                         :enum ["list" "create" "close" "select"]
+                                         :description "Tab action to perform"}
+                               "index" {:type "integer"
+                                        :description "Tab index for select/close"}
+                               "url" {:type "string"
+                                      :description "URL for create action"}}}}
+   {:name "browser_console_messages"
+    :description "Return all console messages from the page."
+    :inputSchema {:type "object"
+                  :properties {"level" {:type "string"
+                                        :enum ["log" "info" "warn" "error"]
+                                        :description "Filter by log level"}
+                               "all" {:type "boolean"
+                                      :description "Include all levels"}}}}
+   {:name "browser_network_requests"
+    :description "Return all network requests made since page load."
+    :inputSchema {:type "object"
+                  :properties {"filter" {:type "string"
+                                         :description "Filter requests by URL pattern"}
+                               "requestHeaders" {:type "boolean"
+                                                 :description "Include request headers"}
+                               "requestBody" {:type "boolean"
+                                              :description "Include request body"}}}}])
+
 (def known-mcp-servers
   "Known MCP server definitions."
   {:langfuse {:tools langfuse-tools}
    :nrepl {:tools nrepl-tools}
    :exa {:tools exa-tools}
-   :tavily {:tools tavily-tools}})
+   :tavily {:tools tavily-tools}
+   :playwright {:tools playwright-tools}})
 
 ;; ============================================================================
 ;; Public API
@@ -327,7 +587,7 @@
         connections (:connections registry)]
     (fn [tool-name args]
       (u/trace ::registry-call-tool {:tool tool-name}
-        (if-let [slash-idx (clojure.string/index-of tool-name "/")]
+        (if-let [slash-idx (str/index-of tool-name "/")]
           ;; Namespaced: route to specific server
           (let [server (subs tool-name 0 slash-idx)
                 bare-name (subs tool-name (inc slash-idx))
@@ -345,7 +605,7 @@
               1 (call-tool (get connections (:server (first matches)))
                            tool-name args)
               (throw (ex-info (str "Ambiguous tool '" tool-name "' found on servers: "
-                                   (clojure.string/join ", " (map :server matches))
+                                   (str/join ", " (map :server matches))
                                    ". Use server/tool format.")
                               {:tool tool-name
                                :servers (mapv :server matches)})))))))))
