@@ -138,8 +138,14 @@
      :reads - Vector of blackboard keys to read (e.g., [:student-profile :programs])
      :writes - Vector of blackboard keys to write (e.g., [:result])
      :retry - {:max-attempts n :backoff-ms [100 500]}
-     :judges - Vector of judge names (defined in sheet/judges)"
-  [name & {:keys [model instruction reads writes retry judges]}]
+     :judges - Vector of judge names (defined in sheet/judges)
+     :context - Ontology context injection config:
+                {:problem-type \"problem:Classification\"
+                 :include-patterns true
+                 :include-failures true
+                 :tree-id uuid  ;; for self-learning
+                 :self-learning? true}"
+  [name & {:keys [model instruction reads writes retry judges context]}]
   (cond-> {:node-type :leaf
            :name name
            :executor :ai
@@ -148,7 +154,8 @@
            :reads (vec reads)
            :writes (vec writes)}
     retry (assoc :retry retry)
-    judges (assoc :judges (vec judges))))
+    judges (assoc :judges (vec judges))
+    context (assoc :context context)))
 
 (defn code
   "Define a code executor leaf node.
@@ -220,6 +227,38 @@
    :writes (vec (or writes []))
    :mcp-tools (vec (or mcp-tools []))
    :max-iterations (or max-iterations 10)})
+
+(defn delegate
+  "Define a delegate node for subworkflow execution.
+
+   Executes another sheet (workflow) with isolated blackboard,
+   mapping inputs from parent and outputs back to parent.
+   This enables modular, composable workflow design.
+
+   Options:
+     :target-sheet-id - UUID of the sheet to delegate to (required)
+     :reads - Vector of blackboard keys to pass as inputs to target
+     :writes - Vector of blackboard keys to receive outputs from target
+     :timeout-ms - Max execution time for the delegation (default: 300000ms)
+     :inherit-ontology? - Share ontology context with target (default: true)
+
+   Example:
+   ```clojure
+   (delegate \"analyze-data\"
+     :target-sheet-id #uuid \"...\"
+     :reads [:input-data :config]
+     :writes [:analysis-result :metrics]
+     :timeout-ms 60000)
+   ```"
+  [name & {:keys [target-sheet-id reads writes timeout-ms inherit-ontology?]
+           :or {inherit-ontology? true}}]
+  (cond-> {:node-type :delegate
+           :name name
+           :target-sheet-id target-sheet-id
+           :reads (vec (or reads []))
+           :writes (vec (or writes []))}
+    timeout-ms (assoc :timeout-ms timeout-ms)
+    (some? inherit-ontology?) (assoc :inherit-ontology? inherit-ontology?)))
 
 (defn sequence
   "Define a sequence node (runs children in order, fails on first failure).
@@ -421,6 +460,17 @@
             :model (:model node)
             :max-iterations (:max-iterations node))))
 
+      :delegate
+      (do
+        ;; Set delegate config
+        (h/run-and-apply! ctx
+          (h/make-set-delegate-config-command sheet-id node-id
+            (:target-sheet-id node)
+            :reads (:reads node)
+            :writes (:writes node)
+            :timeout-ms (:timeout-ms node)
+            :inherit-ontology? (:inherit-ontology? node))))
+
       :parallel
       (do
         (h/run-and-apply! ctx
@@ -596,7 +646,8 @@
                    (:instruction node) (assoc :instruction (:instruction node))
                    (seq (:reads node)) (assoc :reads (:reads node))
                    (seq (:writes node)) (assoc :writes (:writes node))
-                   (:retry node) (assoc :retry (:retry node))))
+                   (:retry node) (assoc :retry (:retry node))
+                   (:context node) (assoc :context (:context node))))
           ;; Condition-specific
           (= :condition (:type node))
           (merge (cond-> {}
@@ -628,6 +679,14 @@
                    (seq (:mcp-tools node)) (assoc :mcp-tools (:mcp-tools node))
                    (:model node) (assoc :model (:model node))
                    (:max-iterations node) (assoc :max-iterations (:max-iterations node))))
+          ;; Delegate-specific
+          (= :delegate (:type node))
+          (merge (cond-> {}
+                   (:target-sheet-id node) (assoc :target-sheet-id (:target-sheet-id node))
+                   (seq (:reads node)) (assoc :reads (:reads node))
+                   (seq (:writes node)) (assoc :writes (:writes node))
+                   (:delegate-timeout-ms node) (assoc :timeout-ms (:delegate-timeout-ms node))
+                   (some? (:inherit-ontology? node)) (assoc :inherit-ontology? (:inherit-ontology? node))))
           ;; Children for composite nodes
           (seq (:children-ids node))
           (assoc :children
@@ -714,6 +773,16 @@
             (vec (:mcp-tools node))
             :model (:model node)
             :max-iterations (:max-iterations node))))
+
+      :delegate
+      (when (:target-sheet-id node)
+        (h/run-and-apply! ctx
+          (h/make-set-delegate-config-command sheet-id node-id
+            (:target-sheet-id node)
+            :reads (vec (:reads node))
+            :writes (vec (:writes node))
+            :timeout-ms (:timeout-ms node)
+            :inherit-ontology? (:inherit-ontology? node))))
 
       :parallel
       (do
@@ -930,6 +999,19 @@
       (list (dsl-sym 'repl-researcher) (:name node))
       (apply list (dsl-sym 'repl-researcher) (:name node) opts))))
 
+(defn- delegate-node->form
+  "Convert a delegate node to DSL form."
+  [node]
+  (let [opts (build-keyword-args
+               {:target-sheet-id (:target-sheet-id node)
+                :reads (:reads node)
+                :writes (:writes node)
+                :timeout-ms (:delegate-timeout-ms node)
+                :inherit-ontology? (:inherit-ontology? node)})]
+    (if (empty? opts)
+      (list (dsl-sym 'delegate) (:name node))
+      (apply list (dsl-sym 'delegate) (:name node) opts))))
+
 (defn- composite-node->form
   "Convert a sequence or fallback node to DSL form."
   [fn-sym node]
@@ -975,6 +1057,7 @@
     :condition (condition-node->form node)
     :llm-condition (llm-condition-node->form node)
     :repl-researcher (repl-researcher-node->form node)
+    :delegate (delegate-node->form node)
     :sequence (composite-node->form 'sequence node)
     :fallback (composite-node->form 'fallback node)
     :parallel (parallel-node->form node)

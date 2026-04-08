@@ -155,12 +155,13 @@
         :tags #{[:tree tree-id]}  ;; Only UUID-based tags allowed
         :body (cond-> {:tree-id tree-id
                        :failure-uri failure-uri
-                       :subtype-uri subtype-uri
                        :frequency frequency
                        :severity severity-kw
                        :triggers (vec triggers)
                        :evidence-trace-ids (vec evidence-trace-ids)
                        :recorded-at now}
+                ;; Only include subtype-uri when provided (schema expects :string, not nil)
+                subtype-uri (assoc :subtype-uri subtype-uri)
                 ;; Add domain-agnostic fields when present
                 context (assoc :failure-context context
                                :failure-conditions context)  ;; both for compat

@@ -12,7 +12,46 @@
             [ai.obney.grain.event-store-v3.interface :as event-store :refer [->event]]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
-            [ai.obney.grain.time.interface :as time]))
+            [ai.obney.grain.time.interface :as time]
+            [clojure.string :as str]))
+
+;; =============================================================================
+;; LLM Call Budget Tracking (Opt-in Only)
+;; =============================================================================
+;;
+;; Budget is opt-in only - if :llm-call-budget is not specified, NO limit is
+;; enforced. This prevents unexpected workflow cancellations.
+
+;; Tracks LLM call counts per tick-id for budget enforcement.
+(defonce ^:private tick-llm-counts (atom {}))
+
+(defn- increment-llm-count!
+  "Increment LLM call count for a tick."
+  [tick-id]
+  (swap! tick-llm-counts update tick-id (fnil inc 0)))
+
+(defn- get-llm-count
+  "Get current LLM call count for a tick."
+  [tick-id]
+  (get @tick-llm-counts tick-id 0))
+
+(defn clear-llm-count!
+  "Clear LLM count for a tick (called on tick completion)."
+  [tick-id]
+  (swap! tick-llm-counts dissoc tick-id))
+
+(defn- check-llm-budget
+  "Check if LLM budget exceeded. Returns nil if no budget set (unlimited).
+   Only checks if :llm-call-budget was explicitly set in tick options."
+  [context tick-id]
+  (let [tick-ctx (rm/get-tick-execution-context context tick-id)
+        budget (get-in tick-ctx [:options :llm-call-budget])]
+    ;; CRITICAL: Only check if budget was explicitly set (not nil)
+    ;; nil means unlimited - no cap enforced
+    (when budget
+      (let [current (get-llm-count tick-id)]
+        (when (>= current budget)
+          {:exceeded true :current current :budget budget})))))
 
 ;; =============================================================================
 ;; Tick-Scoped Resolution Helpers
@@ -39,6 +78,52 @@
   (if-let [override (and overrides (:name node) (get overrides (:name node)))]
     (assoc node :instruction override)
     node))
+
+(defn- apply-ontology-context
+  "If node has :context parameter, inject ontology context into instruction.
+
+   The :context parameter can include:
+   - :problem-type - Problem URI for context lookup
+   - :include-patterns - Include success patterns
+   - :include-failures - Include failure patterns
+   - :tree-id - Enable self-learning mode
+   - :self-learning? - Enable self-learning context
+
+   This requires the ontology component to be available in the context."
+  [node context]
+  (let [ctx-config (:context node)]
+    (if (and ctx-config (:instruction node))
+      ;; Try to build ontology context - gracefully handle missing ontology component
+      (try
+        (let [ontology-ns (requiring-resolve 'ai.obney.orc.ontology.interface/build-ontology-context)
+              format-fn (requiring-resolve 'ai.obney.orc.ontology.interface/format-context-for-llm)]
+          (if (and ontology-ns format-fn)
+            (let [event-store (:event-store context)
+                  ;; Build ontology context
+                  ontology-ctx (ontology-ns event-store
+                                            (cond-> {:problem-type (:problem-type ctx-config)}
+                                              (:tree-id ctx-config) (assoc :tree-id (:tree-id ctx-config))
+                                              (:self-learning? ctx-config) (assoc :self-learning? true)))
+                  ;; Format for LLM injection
+                  formatted (format-fn ontology-ctx
+                                       {:include (cond-> #{}
+                                                   (:include-patterns ctx-config) (conj :patterns)
+                                                   (:include-failures ctx-config) (conj :failures))
+                                        :max-items 5})]
+              (if (and formatted (not (str/blank? formatted)))
+                ;; Prepend ontology context to instruction
+                (update node :instruction
+                        (fn [inst]
+                          (str "## Ontology Context\n\n"
+                               formatted
+                               "\n\n---\n\n"
+                               inst)))
+                node))
+            node))
+        (catch Exception _e
+          ;; Ontology component not available or error - proceed without context
+          node))
+      node)))
 
 (defn- make-bb-write-event
   "Create a tick-scoped blackboard write event (isolated per execution)."
@@ -117,7 +202,8 @@
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
-                 (apply-instruction-override overrides))]
+                 (apply-instruction-override overrides)
+                 (apply-ontology-context context))]
     (when (= :leaf (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             ;; Merge event inputs into blackboard (e.g., map-each item values)
@@ -131,22 +217,39 @@
             provider (or dscloj-provider *default-dscloj-provider*)
             executor-type (or (:executor node) :ai)
             ;; Extract execution context for correlation
-            exec-context (extract-execution-context event-inputs)]
-        ;; Run execution in a future to avoid blocking
-        (future
-          (try
-            (let [result (cond
-                           ;; Code executor doesn't need provider
-                           (= :code executor-type)
-                           (executor/execute-leaf node blackboard nil
-                                                  :context context)
-                           ;; AI executor with provider
-                           provider
-                           (executor/execute-leaf node blackboard provider
-                                                  :context context)
-                           ;; No provider - use mock
-                           :else
-                           (executor/execute-leaf-mock node blackboard))
+            exec-context (extract-execution-context event-inputs)
+            ;; Check LLM budget ONLY for AI executor types (not code)
+            is-llm-call? (and (= :ai executor-type) provider)]
+        ;; Check budget before execution (only if budget set and this is an LLM call)
+        (if-let [exceeded (and is-llm-call? (check-llm-budget context tick-id))]
+          ;; Budget exceeded - fail immediately
+          (cp/process-command
+            (assoc context :command
+                   {:command/id (random-uuid)
+                    :command/timestamp (time/now)
+                    :command/name :sheet/fail-node-execution
+                    :sheet-id sheet-id
+                    :tick-id tick-id
+                    :node-id node-id
+                    :error (str "LLM call budget exceeded: "
+                               (:current exceeded) "/" (:budget exceeded))}))
+          ;; Run execution in a future to avoid blocking
+          (future
+            (try
+              ;; Increment LLM count before making the call (if applicable)
+              (when is-llm-call? (increment-llm-count! tick-id))
+              (let [result (cond
+                             ;; Code executor doesn't need provider
+                             (= :code executor-type)
+                             (executor/execute-leaf node blackboard nil
+                                                    :context context)
+                             ;; AI executor with provider
+                             provider
+                             (executor/execute-leaf node blackboard provider
+                                                    :context context)
+                             ;; No provider - use mock
+                             :else
+                             (executor/execute-leaf-mock node blackboard))
                   {:keys [status outputs error duration-ms]} result]
               ;; Use process-command to emit completion event
               (cp/process-command
@@ -172,7 +275,7 @@
                         :sheet-id sheet-id
                         :tick-id tick-id
                         :node-id node-id
-                        :error (.getMessage e)})))))
+                        :error (.getMessage e)}))))))
         ;; Return nil - completion will be handled by the future via process-command
         nil))))
 
@@ -191,7 +294,8 @@
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
-                 (apply-instruction-override overrides))]
+                 (apply-instruction-override overrides)
+                 (apply-ontology-context context))]
     (when (= :repl-researcher (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             blackboard (reduce (fn [bb [k v]]
@@ -231,6 +335,107 @@
                         :tick-id tick-id
                         :node-id node-id
                         :error (.getMessage e)})))))
+        nil))))
+
+;; =============================================================================
+;; Delegate Node Execution Processor
+;; =============================================================================
+
+(defn execute-delegate-node
+  "Execute delegate node by dispatching to target sheet.
+   Maps parent blackboard inputs to target, executes, maps outputs back.
+
+   Delegate nodes execute another sheet (workflow) with isolated blackboard:
+   - :reads keys are passed from parent blackboard to target inputs
+   - :writes keys are received from target outputs back to parent blackboard
+   - Execution is async with timeout enforcement
+
+   Follows ORC async pattern: future + cp/process-command for completion."
+  [{:keys [event event-store] :as context}]
+  (let [sheet-id (:sheet-id event)
+        tick-id (:tick-id event)
+        node-id (:node-id event)
+        event-inputs (:inputs event)
+        nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
+        node (get nodes-by-id node-id)]
+    (when (= :delegate (:type node))
+      (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
+            ;; Merge event inputs into blackboard (ORC pattern)
+            blackboard (reduce (fn [bb [k v]]
+                                 (if (and (keyword? k)
+                                          (not (= (namespace k) (namespace ::_))))
+                                   (assoc-in bb [k :value] v)
+                                   bb))
+                               raw-blackboard
+                               event-inputs)
+            exec-context (extract-execution-context event-inputs)
+
+            target-sheet-id (:target-sheet-id node)
+            read-keys (:reads node)
+            write-keys (:writes node)
+            timeout-ms (or (:delegate-timeout-ms node) 300000)
+
+            ;; Map parent blackboard to target inputs (string keys for execute)
+            target-inputs (reduce
+                           (fn [acc k]
+                             (if-let [entry (get blackboard k)]
+                               (assoc acc (name k) (:value entry))
+                               acc))
+                           {}
+                           read-keys)]
+
+        ;; Async execution pattern (ORC standard)
+        (future
+          (try
+            (let [start-time (System/currentTimeMillis)
+                  result (runtime/execute context target-sheet-id
+                                          target-inputs
+                                          :timeout-ms timeout-ms)
+                  duration-ms (- (System/currentTimeMillis) start-time)
+                  status (:status result)
+
+                  ;; Map target outputs to parent blackboard
+                  ;; Note: target outputs may have keyword or string keys depending on execution path
+                  outputs (reduce
+                           (fn [acc k]
+                             (let [kw-key (if (keyword? k) k (keyword k))
+                                   str-key (name k)
+                                   ;; Try keyword key first, then string key
+                                   v (or (get (:outputs result) kw-key)
+                                         (get (:outputs result) str-key))]
+                               (if v
+                                 (assoc acc k v)
+                                 acc)))
+                           {}
+                           write-keys)]
+
+              ;; Complete node execution (ORC pattern)
+              (cp/process-command
+                (assoc context :command
+                       (cond-> {:command/id (random-uuid)
+                                :command/timestamp (time/now)
+                                :command/name :sheet/complete-node-execution
+                                :sheet-id sheet-id
+                                :tick-id tick-id
+                                :node-id node-id
+                                :status status
+                                :writes outputs
+                                :duration-ms duration-ms}
+                         (seq exec-context) (assoc :inputs exec-context)
+                         (:error result) (assoc :error (:error result))))))
+
+            (catch Exception e
+              ;; Fail node execution (ORC pattern)
+              (cp/process-command
+                (assoc context :command
+                       {:command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :command/name :sheet/fail-node-execution
+                        :sheet-id sheet-id
+                        :tick-id tick-id
+                        :node-id node-id
+                        :error (.getMessage e)})))))
+        ;; Return nil - completion handled async via process-command
         nil))))
 
 ;; =============================================================================
@@ -1117,7 +1322,12 @@
         root-status (:root-status event)
         outputs (:outputs event)
         error (:error event)]
+    ;; Skip intermediate :running completions — those are re-tick signals,
+    ;; not final results. complete-tree-tick converts :running to :failure
+    ;; when max iterations are exhausted.
     (when (not= root-status :running)
+      ;; Clean up budget tracking for this tick
+      (clear-llm-count! tick-id)
       (runtime/deliver-completion! tick-id
         {:status (case root-status
                    :success :success
@@ -1420,7 +1630,23 @@
                                                          (:max-concurrency snapshot-node)
                                                          (assoc :max-concurrency (:max-concurrency snapshot-node)))}))])
 
-                                   ;; sequence, fallback - no extra config needed
+                                   :delegate
+                                   (filterv some?
+                                            [(when (:target-sheet-id snapshot-node)
+                                               (->event
+                                                {:type :sheet/delegate-config-set
+                                                 :tags #{[:sheet sheet-id] [:node node-id]}
+                                                 :body (cond-> {:sheet-id sheet-id
+                                                                :node-id node-id
+                                                                :target-sheet-id (:target-sheet-id snapshot-node)
+                                                                :reads (or (:reads snapshot-node) [])
+                                                                :writes (or (:writes snapshot-node) [])}
+                                                         (:delegate-timeout-ms snapshot-node)
+                                                         (assoc :timeout-ms (:delegate-timeout-ms snapshot-node))
+                                                         (some? (:inherit-ontology? snapshot-node))
+                                                         (assoc :inherit-ontology? (:inherit-ontology? snapshot-node)))}))])
+
+                                   ;; sequence, fallback, repl-researcher - no extra config needed
                                    [])]
                              (filterv some? (into [create-event name-event] config-events))))
                          node-records)]
@@ -1476,6 +1702,12 @@
   "Execute repl-researcher nodes when node execution starts."
   [context]
   (execute-repl-researcher-node context))
+
+(defprocessor :sheet execute-delegate-node
+  {:topics #{:sheet/node-execution-started}}
+  "Execute delegate nodes when node execution starts."
+  [context]
+  (execute-delegate-node context))
 
 (defprocessor :sheet handle-child-completion
   {:topics #{:sheet/node-execution-completed}}

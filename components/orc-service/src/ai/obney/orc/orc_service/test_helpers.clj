@@ -357,6 +357,21 @@
     model (assoc :model model)
     max-iterations (assoc :max-iterations max-iterations)))
 
+(defn make-set-delegate-config-command
+  "Create a set-delegate-config command.
+   Delegate nodes execute another sheet with isolated blackboard."
+  [sheet-id node-id target-sheet-id & {:keys [reads writes timeout-ms inherit-ontology?]}]
+  (cond-> {:command/name :sheet/set-delegate-config
+           :command/id (random-uuid)
+           :command/timestamp (time/now)
+           :sheet-id sheet-id
+           :node-id node-id
+           :target-sheet-id target-sheet-id
+           :reads (vec (or reads []))
+           :writes (vec (or writes []))}
+    timeout-ms (assoc :timeout-ms timeout-ms)
+    (some? inherit-ontology?) (assoc :inherit-ontology? inherit-ontology?)))
+
 ;; =============================================================================
 ;; Factory Functions - Judge Commands
 ;; =============================================================================

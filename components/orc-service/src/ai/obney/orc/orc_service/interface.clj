@@ -104,6 +104,7 @@
 (def parallel dsl/parallel)
 (def map-each dsl/map-each)
 (def repl-researcher dsl/repl-researcher)
+(def delegate dsl/delegate)
 
 ;; Schema builder
 (def blackboard dsl/blackboard)

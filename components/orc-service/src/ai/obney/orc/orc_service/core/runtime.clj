@@ -54,7 +54,9 @@
                        :max-concurrency (:max-concurrency snapshot-node)
                        ;; Repl-researcher fields
                        :mcp-tools (or (:mcp-tools snapshot-node) [])
-                       :max-iterations (:max-iterations snapshot-node)}
+                       :max-iterations (:max-iterations snapshot-node)
+                       ;; Ontology context injection
+                       :context (:context snapshot-node)}
           ;; Recursively parse children
           child-records (mapcat (fn [i child]
                                   (parse-snapshot-nodes child node-id i (str path "/" i)))
@@ -192,6 +194,7 @@
      :langfuse-client - Langfuse client (passed to async pipeline via options)
      :store-trace? - Store trace in event store (default true, passed via options)
      :max-ticks - Override re-tick budget for this execution (defaults to *max-tick-iterations*)
+     :llm-call-budget - Max LLM calls before failing (opt-in only, NO default)
 
    Returns:
      {:status :success | :failure | :timeout
@@ -200,7 +203,8 @@
       :error string?             ;; Present if status is :failure
       :executed-version ...}     ;; Version number if published version was used"
   [context sheet-id inputs & {:keys [timeout-ms use-version force-draft
-                                      trace? langfuse-client store-trace? max-ticks]
+                                      trace? langfuse-client store-trace?
+                                      max-ticks llm-call-budget]
                                :or {timeout-ms 300000 store-trace? true}}]
   (let [tick-id (random-uuid)
         p (register-completion! tick-id)
@@ -217,7 +221,8 @@
                                                         :store-trace? store-trace?}
                                                  trace? (assoc :trace? true)
                                                  langfuse-client (assoc :langfuse-client langfuse-client)
-                                                 max-ticks (assoc :max-ticks max-ticks))}
+                                                 max-ticks (assoc :max-ticks max-ticks)
+                                                 llm-call-budget (assoc :llm-call-budget llm-call-budget))}
                               use-version (assoc :use-version use-version)
                               force-draft (assoc :force-draft force-draft))))]
     (if (:cognitect.anomalies/category cmd-result)

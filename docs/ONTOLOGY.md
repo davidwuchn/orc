@@ -2,6 +2,8 @@
 
 The ontology component provides a three-layer semantic knowledge system for understanding AI workflow performance, integrated with the Grain event-sourcing framework and ORC behavior trees.
 
+> **Quick Start**: For a hands-on guide to manual self-learning, see [SELF-LEARNING-MANUAL.md](./SELF-LEARNING-MANUAL.md).
+
 ## Overview
 
 The ontology component enables:
@@ -331,7 +333,7 @@ The ontology component enables:
 [:map
  [:node-id :uuid]
  [:sheet-id :uuid]
- [:node-type [:enum :llm :repl-researcher :code :map-each :condition :llm-condition]]
+ [:node-type [:enum :llm :repl-researcher :code :map-each :condition :llm-condition :delegate]]
  [:pattern-type [:enum :search :instruction :execution :structural]]
  [:effective? :boolean]
  [:pattern-description :string]

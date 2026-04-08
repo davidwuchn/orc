@@ -45,6 +45,7 @@
     :sheet/map-each-config-set
     :sheet/llm-condition-config-set
     :sheet/repl-researcher-config-set
+    :sheet/delegate-config-set
     :sheet/node-execution-started
     :sheet/node-execution-completed})
 
@@ -94,6 +95,7 @@
     :sheet/map-each-config-set
     :sheet/llm-condition-config-set
     :sheet/repl-researcher-config-set
+    :sheet/delegate-config-set
     :sheet/key-declared
     :sheet/key-schema-updated
     :sheet/key-deleted
@@ -226,7 +228,8 @@
                         :llm-condition "LLM Condition"
                         :parallel "Parallel"
                         :map-each "Map Each"
-                        :repl-researcher "REPL Researcher")
+                        :repl-researcher "REPL Researcher"
+                        :delegate "Delegate")
                 :parent-id parent-id
                 :children-ids []
                 :status :idle
@@ -374,6 +377,15 @@
       (assoc-in [(:node-id event) :mcp-tools] (:mcp-tools event))
       (assoc-in [(:node-id event) :model] (:model event))
       (assoc-in [(:node-id event) :max-iterations] (:max-iterations event))))
+
+(defmethod nodes* :sheet/delegate-config-set
+  [state event]
+  (-> state
+      (assoc-in [(:node-id event) :target-sheet-id] (:target-sheet-id event))
+      (assoc-in [(:node-id event) :reads] (:reads event))
+      (assoc-in [(:node-id event) :writes] (:writes event))
+      (assoc-in [(:node-id event) :delegate-timeout-ms] (:timeout-ms event))
+      (assoc-in [(:node-id event) :inherit-ontology?] (:inherit-ontology? event))))
 
 (defmethod nodes* :sheet/node-judges-set
   [state event]
@@ -863,12 +875,23 @@
     (let [bb-entries (:blackboard-entries snapshot)
           inputs (or (:inputs event) {})
           ;; Merge inputs into blackboard entries
+          ;; Note: inputs may have string keys from runtime/execute, but blackboard uses keyword keys
+          ;; If bb-entries is empty (cache miss), create entries from inputs directly
           blackboard (reduce (fn [bb [key-name value]]
-                               (if (get bb key-name)
-                                 (-> bb
-                                     (assoc-in [key-name :value] value)
-                                     (assoc-in [key-name :version] 1))
-                                 bb))
+                               (let [kw-key (if (string? key-name) (keyword key-name) key-name)]
+                                 (if (get bb kw-key)
+                                   ;; Key exists - update value
+                                   (-> bb
+                                       (assoc-in [kw-key :value] value)
+                                       (assoc-in [kw-key :version] 1))
+                                   ;; Key doesn't exist - create entry from input
+                                   ;; This handles cache misses where bb-entries is empty
+                                   (assoc bb kw-key
+                                          {:sheet-id (:sheet-id event)
+                                           :key kw-key
+                                           :schema :any  ;; Unknown schema, but value is provided
+                                           :value value
+                                           :version 1}))))
                              bb-entries
                              inputs)]
       (assoc state (:tick-id event)

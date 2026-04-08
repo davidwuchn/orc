@@ -79,6 +79,7 @@ This document provides a comprehensive architectural reference for understanding
 | `code` | Execute Clojure function |
 | `condition` | Static boolean check on blackboard |
 | `llm-condition` | LLM-evaluated yes/no question |
+| `delegate` | Execute another workflow with isolated blackboard |
 
 **Key Files:**
 - `orc-service/core/dsl.clj` - DSL builders (`workflow`, `llm`, `code`, etc.)
@@ -190,7 +191,8 @@ This makes `build-workflow!` safe to call on every application startup — uncha
   :parallel  → execute-parallel-sync (concurrent via futures)
   :map-each  → execute-map-each-sync (iterate with :parallel N)
   :condition → execute-condition-sync (static check)
-  :llm-condition → execute-llm-condition-sync (LLM yes/no))
+  :llm-condition → execute-llm-condition-sync (LLM yes/no)
+  :delegate  → execute-delegate-node (run subworkflow))
 ```
 
 5. For leaf nodes, dispatch to executor:

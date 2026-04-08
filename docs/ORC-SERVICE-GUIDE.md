@@ -230,6 +230,28 @@ Use an LLM for yes/no decisions.
   :reads [:message])
 ```
 
+#### `delegate`
+
+Execute another workflow with isolated blackboard.
+
+```clojure
+(sheet/delegate "run-subworkflow"
+  :target-sheet-id child-sheet-uuid
+  :reads [:input-data]           ;; Pass to child
+  :writes [:result]              ;; Receive from child
+  :timeout-ms 60000)             ;; Optional timeout
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `:target-sheet-id` | UUID of the workflow to execute |
+| `:reads` | Blackboard keys to pass as inputs |
+| `:writes` | Blackboard keys to receive as outputs |
+| `:timeout-ms` | Execution timeout (default: 300000ms) |
+| `:inherit-ontology?` | Share ontology context (default: true) |
+
 ---
 
 ## Blackboard Patterns
@@ -350,6 +372,34 @@ result
 | `:success` | Node completed successfully |
 | `:failure` | Node failed (may trigger fallback) |
 | `:running` | Node still executing (async) |
+
+### LLM Call Budget (Opt-in)
+
+Prevent runaway workflows in nested iteration scenarios by setting an LLM call limit.
+
+**IMPORTANT:** Budget is opt-in only. If not specified, **no limit is enforced**.
+
+```clojure
+;; No budget (default - unlimited)
+(sheet/execute ctx sheet-id inputs)
+
+;; With budget (fails if exceeded)
+(sheet/execute ctx sheet-id inputs :llm-call-budget 100)
+```
+
+**When budget is exceeded:**
+- Workflow fails with error: `"LLM call budget exceeded: 100/100"`
+- No partial results - fails immediately when limit reached
+
+**When to use:**
+- `map-each` over large collections calling LLMs
+- Recursive/iterative workflows (repl-researcher)
+- Production safety nets for untested workflows
+
+**Tracking:**
+- Budget is per-tick (per execution)
+- Counter cleared automatically on completion
+- Only AI executor calls count (not code nodes)
 
 ---
 

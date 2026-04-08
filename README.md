@@ -108,6 +108,7 @@ Commands -> Events -> Read Models -> Queries
 | `orc/condition` | Leaf | Branch based on code predicate. |
 | `orc/llm-condition` | Leaf | Branch based on LLM yes/no judgment. |
 | `orc/repl-researcher` | Leaf | Iterative: generate code, call MCP tools, refine. |
+| `orc/delegate` | Leaf | Execute another workflow with isolated blackboard. |
 
 ## Development Setup
 
