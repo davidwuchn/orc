@@ -426,6 +426,8 @@
       (try
         (let [f (:fn resolved)
               ;; Gather inputs from blackboard
+              ;; Code executors use keyword keys: (get inputs :site-url)
+              ;; DSCloj handles keyword→string translation when sending to LLM
               inputs (reduce (fn [acc key-name]
                                (if-let [entry (get blackboard key-name)]
                                  (assoc acc key-name (:value entry))
@@ -433,7 +435,9 @@
                              {}
                              (:reads node))
               ;; Call the function with context
-              result (f (assoc context :inputs inputs))
+              ;; Include :execution-context so code executors can access event-store
+              ;; for recording learnings via ontology (auto-learning)
+              result (f (assoc context :inputs inputs :execution-context context))
               duration-ms (- (System/currentTimeMillis) start-time)]
           ;; Result should be a map of key -> value
           (if (map? result)
@@ -684,38 +688,61 @@
 
 (defn- build-code-generation-module
   "Build DSCloj module for generating Clojure code."
-  [node blackboard-metadata history mcp-tools]
-  {:inputs [{:name :task
-             :spec :string
-             :description "The research task to complete"}
-            {:name :context
-             :spec :string
-             :description "Available variables and their types"}
-            {:name :history
-             :spec :string
-             :description "Results from previous iterations (if any)"}
-            {:name :tools
-             :spec :string
-             :description "Available MCP tools you can call as functions"}]
-   :outputs [{:name :code
-              :spec :string
-              :description "Clojure code to execute. Call MCP tools as functions, use println to log progress, and output FINAL_ANSWER: <result> when done."}]
-   :instructions (let [has-namespaced? (some #(str/includes? % "/") mcp-tools)
-                       tool-list (str/join ", " mcp-tools)]
-                   (str "You are a research assistant that writes Clojure code to solve tasks.\n\n"
+  [node blackboard-metadata history mcp-tools browser-tools]
+  (let [has-mcp? (seq mcp-tools)
+        has-browser? (seq browser-tools)
+        has-namespaced? (some #(str/includes? % "/") mcp-tools)
+        mcp-tool-list (str/join ", " mcp-tools)
+        browser-tool-list (str/join ", " browser-tools)]
+    {:inputs [{:name :task
+               :spec :string
+               :description "The research task to complete"}
+              {:name :context
+               :spec :string
+               :description "Available variables and their types"}
+              {:name :history
+               :spec :string
+               :description "Results from previous iterations (if any)"}
+              {:name :tools
+               :spec :string
+               :description "Available tools you can call as functions"}]
+     :outputs [{:name :code
+                :spec :string
+                :description "Clojure code to execute. Call tools as functions, use println to log progress, and output FINAL_ANSWER: <result> when done."}]
+     :instructions (str "You are a research assistant that writes Clojure code to solve tasks.\n\n"
                         "IMPORTANT RULES:\n"
-                        "1. Write valid Clojure code that calls the available MCP tools\n"
+                        "1. Write valid Clojure code that calls the available tools\n"
                         "2. Use println to log your progress and findings\n"
                         "3. When you have the final answer, output it as: (str \"FINAL_ANSWER: \" your-answer)\n"
-                        "4. MCP tools are available as functions: " tool-list "\n"
-                        (if has-namespaced?
-                          (str "   Namespaced tools use Clojure's namespace syntax: (server/tool {:arg \"value\"})\n"
-                               "   Example: (" (first mcp-tools) " {:query \"search term\"})\n")
-                          (str "   Example: (" (first mcp-tools) " {:query \"search term\"})\n"))
-                        "5. Each tool takes a map of arguments\n"
-                        "6. You can use standard Clojure functions: map, filter, reduce, str, etc.\n"
-                        "7. Do NOT use require, eval, slurp, or any I/O functions\n\n"
-                        "Your task: " (:instruction node)))})
+
+                        ;; Browser tools section
+                        (when has-browser?
+                          (str "\n## BROWSER TOOLS (agent-browser)\n"
+                               "Available: " browser-tool-list "\n"
+                               "These control a real browser. Key functions:\n"
+                               "- (open \"https://url.com\") - Navigate to URL\n"
+                               "- (snapshot) - Get accessibility tree with @refs (e.g., @e1, @e2)\n"
+                               "- (click \"@e1\") - Click element by ref\n"
+                               "- (fill \"@e2\" \"text\") - Fill form field\n"
+                               "- (press \"Enter\") - Press key\n"
+                               "- (get-text \"@e1\") - Get element text\n"
+                               "- (get-title) - Get page title\n"
+                               "- (wait 2000) - Wait milliseconds\n\n"
+                               "Workflow: open -> snapshot -> interact using @refs -> snapshot to see result\n"))
+
+                        ;; MCP tools section
+                        (when has-mcp?
+                          (str "\n## MCP TOOLS\n"
+                               "Available: " mcp-tool-list "\n"
+                               (if has-namespaced?
+                                 (str "Namespaced: (server/tool {:arg \"value\"})\n")
+                                 "")
+                               "Each takes a map of arguments.\n"))
+
+                        "\n## GENERAL\n"
+                        "- Use standard Clojure: map, filter, reduce, str, get, get-in, etc.\n"
+                        "- Do NOT use require, eval, slurp, or any I/O functions\n\n"
+                        "Your task: " (:instruction node))}))
 
 (defn execute-repl-researcher
   "Execute a repl-researcher node using iterative LLM+SCI code execution.
@@ -745,12 +772,14 @@
   (let [start-time (System/currentTimeMillis)
         max-iterations (or (:max-iterations node) 10)
         mcp-tools (or (:mcp-tools node) [])
+        browser-tools (or (:browser-tools node) [])
         call-tool-fn (:call-tool-fn context)
 
-        ;; Build SCI context with MCP tools injected
+        ;; Build SCI context with MCP and browser tools injected
         sci-ctx (sci-sandbox/build-sci-context
                  {:call-tool-fn call-tool-fn
-                  :mcp-tools mcp-tools})
+                  :mcp-tools mcp-tools
+                  :browser-tools browser-tools})
 
         ;; Build blackboard metadata (types only, no values)
         bb-metadata (build-blackboard-metadata node blackboard)
@@ -773,16 +802,43 @@
            :usage @total-usage}
 
           ;; Generate code using LLM
-          (let [module (build-code-generation-module node bb-metadata history mcp-tools)
-                inputs {:task (serialize-for-llm (:instruction node))
+          (let [;; Get blackboard values for template substitution in instruction
+                bb-values (reduce (fn [acc k]
+                                    (if-let [entry (get blackboard k)]
+                                      (assoc acc (name k) (serialize-for-llm (:value entry)))
+                                      acc))
+                                  {}
+                                  (:reads node))
+                ;; Pre-process instruction to substitute template variables like {site-url}
+                processed-instruction (reduce (fn [instr [k v]]
+                                                (str/replace instr
+                                                             (str "{" k "}")
+                                                             (if (string? v) v (pr-str v))))
+                                              (:instruction node)
+                                              bb-values)
+                module (build-code-generation-module
+                         (assoc node :instruction processed-instruction)
+                         bb-metadata history mcp-tools browser-tools)
+                all-tools (concat mcp-tools browser-tools)
+                inputs {:task (serialize-for-llm processed-instruction)
                         :context bb-metadata
                         :history (or (build-iteration-history history) "None")
-                        :tools (str/join ", " mcp-tools)}
-                dscloj-options (assoc options :validate? false)
+                        :tools (str/join ", " all-tools)}
+                ;; Ensure model is passed in options for DSCloj
+                dscloj-options (cond-> (assoc options :validate? false)
+                                 (:model node) (assoc :model (:model node)))
 
-                ;; Generate code
-                llm-result (dscloj/predict effective-provider module inputs dscloj-options)
-                code (get-in llm-result [:outputs :code])
+                ;; Generate code - use base provider, model is in dscloj-options
+                llm-result (dscloj/predict provider module inputs dscloj-options)
+                ;; DSCloj returns {:code "..."} directly, not {:outputs {:code "..."}}
+                ;; Strip markdown code fences if present (some LLMs wrap code in ```clojure...```)
+                code (let [raw (or (:code llm-result) (get-in llm-result [:outputs :code]))]
+                       (if (string? raw)
+                         (-> raw
+                             (str/replace #"^```(?:clojure|clj|edn)?\s*\n?" "")
+                             (str/replace #"\n?```\s*$" "")
+                             str/trim)
+                         raw))
 
                 ;; Update usage tracking
                 _ (when-let [usage (:usage llm-result)]
@@ -801,34 +857,48 @@
                :duration-ms (- (System/currentTimeMillis) start-time)
                :usage @total-usage}
 
-              ;; Check for FINAL_ANSWER in the generated code itself
-              (sci-sandbox/contains-final-answer? code)
-              (let [final-answer (sci-sandbox/extract-final-answer code)
-                    write-key (first (:writes node))]
-                {:status :success
-                 :outputs {write-key final-answer}
-                 :final-answer final-answer
-                 :iterations (conj history {:code code :result "FINAL_ANSWER in code" :stdout ""})
-                 :duration-ms (- (System/currentTimeMillis) start-time)
-                 :usage @total-usage})
-
               :else
-              ;; Execute code in SCI sandbox
+              ;; Execute code in SCI sandbox (always execute, even if code contains FINAL_ANSWER pattern)
               (let [exec-result (sci-sandbox/execute-code sci-ctx code)
                     new-history (conj history
                                       {:code code
                                        :result (:result exec-result)
                                        :stdout (:stdout exec-result)
-                                       :error (:error exec-result)})]
+                                       :error (:error exec-result)})
+                    ;; Use raw-result first (unescaped), fall back to pr-str'd result
+                    raw-result (when (string? (:raw-result exec-result))
+                                 (:raw-result exec-result))
+                    result-for-extraction (or raw-result (:result exec-result))]
                 (cond
                   ;; Check for FINAL_ANSWER in result or stdout
-                  (or (sci-sandbox/contains-final-answer? (:result exec-result))
+                  (or (sci-sandbox/contains-final-answer? result-for-extraction)
                       (sci-sandbox/contains-final-answer? (:stdout exec-result)))
-                  (let [final-answer (or (sci-sandbox/extract-final-answer (:result exec-result))
+                  (let [final-answer (or (sci-sandbox/extract-final-answer result-for-extraction)
                                          (sci-sandbox/extract-final-answer (:stdout exec-result)))
-                        write-key (first (:writes node))]
+                        write-keys (:writes node)
+                        ;; If final-answer is a map, try to spread its values across write keys
+                        ;; This handles both single and multiple write keys
+                        outputs (if (map? final-answer)
+                                  ;; Map case: extract values for each write key
+                                  ;; Support both keyword and string keys from LLM
+                                  (let [extracted (reduce (fn [acc k]
+                                                            (let [kw (if (keyword? k) k (keyword k))
+                                                                  str-k (name kw)
+                                                                  v (or (get final-answer kw)
+                                                                        (get final-answer str-k))]
+                                                              (if (some? v)
+                                                                (assoc acc kw v)
+                                                                acc)))
+                                                          {}
+                                                          write-keys)]
+                                    ;; If we extracted values, use them; otherwise put whole map under first key
+                                    (if (seq extracted)
+                                      extracted
+                                      {(first write-keys) final-answer}))
+                                  ;; Non-map: use first key
+                                  {(first write-keys) final-answer})]
                     {:status :success
-                     :outputs {write-key final-answer}
+                     :outputs outputs
                      :final-answer final-answer
                      :iterations new-history
                      :duration-ms (- (System/currentTimeMillis) start-time)

@@ -16,6 +16,24 @@
             [clojure.string :as str]))
 
 ;; =============================================================================
+;; Output Key Normalization
+;; =============================================================================
+;;
+;; Code executors may return string keys ({"output" "value"}) while the
+;; :sheet/complete-node-execution command schema expects keyword keys.
+;; This helper ensures consistent keyword keys.
+
+(defn- normalize-output-keys
+  "Convert output map keys to keywords for command schema compatibility.
+   Handles both string and keyword keys, preserving values."
+  [outputs]
+  (when outputs
+    (reduce-kv (fn [acc k v]
+                 (assoc acc (if (keyword? k) k (keyword k)) v))
+               {}
+               outputs)))
+
+;; =============================================================================
 ;; LLM Call Budget Tracking (Opt-in Only)
 ;; =============================================================================
 ;;
@@ -263,7 +281,7 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes (or outputs {})}
+                                :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
                          (seq exec-context) (assoc :inputs exec-context)))))
@@ -323,7 +341,7 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes (or outputs {})}
+                                :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
                          (seq exec-context) (assoc :inputs exec-context)))))
@@ -421,7 +439,7 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes outputs
+                                :writes (normalize-output-keys outputs)
                                 :duration-ms duration-ms}
                          (seq exec-context) (assoc :inputs exec-context)
                          (:error result) (assoc :error (:error result))))))
@@ -599,7 +617,16 @@
           ;; Start first child
           (let [first-child-id (first children-ids)
                 first-child (get nodes-by-id first-child-id)
-                blackboard (resolve-blackboard context sheet-id tick-id)
+                raw-blackboard (resolve-blackboard context sheet-id tick-id)
+                ;; Merge event inputs into blackboard (e.g., map-each item values)
+                ;; This ensures items passed from map-each are available to children
+                blackboard (reduce (fn [bb [k v]]
+                                     (if (and (keyword? k)
+                                              (not (= (namespace k) (namespace ::_))))
+                                       (assoc-in bb [k :value] v)
+                                       bb))
+                                   raw-blackboard
+                                   event-inputs)
                 bb-inputs (if (= :leaf (:type first-child))
                             (reduce (fn [acc k]
                                       (if-let [entry (get blackboard k)]
@@ -608,8 +635,9 @@
                                     {}
                                     (:reads first-child))
                             {})
-                ;; Merge execution context with blackboard inputs
-                inputs (merge exec-context bb-inputs)]
+                ;; Merge execution context with blackboard inputs AND event-inputs
+                ;; Pass event-inputs to children so they can also access map-each items
+                inputs (merge exec-context event-inputs bb-inputs)]
             {:result/events
              [(->event
                {:type :sheet/node-execution-started
@@ -1060,6 +1088,7 @@
             ;; Store state
             (swap! map-each-state assoc state-key initial-state)
             ;; Start first batch - set item value and start child for each
+            ;; We emit blackboard writes + start events so children can read item from blackboard
             {:result/events
              (into
               ;; Emit initial progress event
@@ -1073,24 +1102,26 @@
                         :node-id node-id
                         :item-index 0
                         :total-items total-items}})]
-              (for [idx batch-indices]
-                (let [item (nth items idx)
-                      child (get nodes-by-id child-id)]
-                  ;; We need to set the item-key value before starting child
-                  ;; This is done via a key-value-set event followed by node-execution-started
-                  ;; For simplicity, we'll set it in the inputs map
-                  (->event
-                   {:type :sheet/node-execution-started
-                    :tags #{[:sheet sheet-id]
-                            [:node child-id]
-                            [:tick tick-id]}
-                    :body {:sheet-id sheet-id
-                           :tick-id tick-id
-                           :node-id child-id
-                           ;; Pass item as an input override
-                           :inputs {item-key item
-                                    ::map-each-index idx
-                                    ::map-each-parent node-id}}}))))}))))))
+              (mapcat
+               (fn [idx]
+                 (let [item (nth items idx)
+                       child (get nodes-by-id child-id)]
+                   ;; Emit blackboard write for item BEFORE starting child
+                   ;; This ensures all children in a sequence can read the item
+                   [(make-bb-write-event event-store sheet-id tick-id item-key item blackboard)
+                    (->event
+                     {:type :sheet/node-execution-started
+                      :tags #{[:sheet sheet-id]
+                              [:node child-id]
+                              [:tick tick-id]}
+                      :body {:sheet-id sheet-id
+                             :tick-id tick-id
+                             :node-id child-id
+                             ;; Pass item as an input override
+                             :inputs {item-key item
+                                      ::map-each-index idx
+                                      ::map-each-parent node-id}}})]))
+               batch-indices))}))))))
 
 (defn handle-map-each-child-completion
   "Handle completion of a map-each child iteration.
@@ -1116,9 +1147,25 @@
           (let [{:keys [items child-id item-key output-key]} state
                 ;; Get the original item
                 item (nth items item-index)
+                ;; When child is a composite (sequence/fallback), writes may be empty.
+                ;; In that case, read all non-special keys from the blackboard.
+                effective-writes (if (seq writes)
+                                   writes
+                                   ;; Composite child - read from blackboard
+                                   (let [blackboard (resolve-blackboard context sheet-id tick-id)
+                                         source-key (:source-key state)]
+                                     (reduce-kv
+                                      (fn [acc k v]
+                                        (if (and (keyword? k)
+                                                 (not (#{item-key source-key output-key} k))
+                                                 (not (= (namespace k) (namespace ::_))))
+                                          (assoc acc k (:value v))
+                                          acc))
+                                      {}
+                                      blackboard)))
                 ;; Create result from writes
                 computed-result (if (= :success child-status)
-                                  (let [updated-item (get writes item-key item)
+                                  (let [updated-item (get effective-writes item-key item)
                                         source-key (:source-key state)
                                         other-writes (reduce-kv
                                                        (fn [acc k v]
@@ -1128,7 +1175,7 @@
                                                            (assoc acc (keyword k) v)
                                                            acc))
                                                        {}
-                                                       writes)]
+                                                       effective-writes)]
                                     (if (map? updated-item)
                                       (merge updated-item other-writes)
                                       (if (seq other-writes)
@@ -1196,6 +1243,8 @@
                     :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
                     :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
                            :item-index (:completed-count act) :total-items total-items}})
+                  ;; Write item to blackboard so children in sequence can read it
+                  (make-bb-write-event event-store sheet-id tick-id item-key next-item blackboard)
                   (->event
                    {:type :sheet/node-execution-started
                     :tags #{[:sheet sheet-id] [:node child-id] [:tick tick-id]}

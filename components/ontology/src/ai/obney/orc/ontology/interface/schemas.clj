@@ -235,7 +235,43 @@
     [:embedding [:vector :double]]
     [:failure-uri {:optional true} :string]  ;; Classified failure
     [:model-id :string]
-    [:embedded-at :string]]})
+    [:embedded-at :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Site Registry Events (Generic Site Pattern Learning)
+   ;; -------------------------------------------------------------------------
+
+   :site/registered
+   [:map
+    [:site-id :uuid]
+    [:domain :string]                     ;; "redfin.com"
+    [:display-name :string]               ;; "Redfin"
+    [:category [:enum :corporate :peer-to-peer :aggregator :local]]
+    [:discovered-via [:enum :manual :web-search :referral]]
+    [:url-pattern {:optional true} :string]  ;; "https://www.{domain}/{location}/rentals/"
+    [:requires-headed {:optional true} :boolean]
+    [:known-challenges {:optional true} [:vector :string]]  ;; ["press-hold", "popup"]
+    [:notes {:optional true} :string]
+    [:registered-at :string]]
+
+   :site/trust-updated
+   [:map
+    [:site-id :uuid]
+    [:domain :string]
+    [:trust-score :double]                ;; 0.0-1.0
+    [:extraction-count :int]              ;; How many successful extractions
+    [:last-success-at {:optional true} :string]
+    [:last-failure-at {:optional true} :string]
+    [:updated-at :string]]
+
+   :site/pattern-learned
+   [:map
+    [:site-id :uuid]
+    [:domain :string]
+    [:pattern-type [:enum :navigation :search :extraction :bot-bypass :pagination]]
+    [:pattern-data [:map-of :keyword :any]]  ;; Site-specific tactics
+    [:confidence :double]
+    [:learned-at :string]]})
 
 ;; =============================================================================
 ;; Command Schemas
@@ -421,7 +457,39 @@
     [:index-id :uuid]
     [:index-name :string]
     [:document-count :int]
-    [:colbert-fields [:vector :keyword]]]})
+    [:colbert-fields [:vector :keyword]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Apartment Search Commands
+   ;; -------------------------------------------------------------------------
+
+   ;; -------------------------------------------------------------------------
+   ;; Site Registry Commands (Generic Site Pattern Learning)
+   ;; -------------------------------------------------------------------------
+
+   :site/register-site
+   [:map
+    [:domain :string]
+    [:display-name :string]
+    [:category [:enum :corporate :peer-to-peer :aggregator :local]]
+    [:discovered-via [:enum :manual :web-search :referral]]
+    [:url-pattern {:optional true} :string]
+    [:requires-headed {:optional true} :boolean]
+    [:known-challenges {:optional true} [:vector :string]]
+    [:notes {:optional true} :string]]
+
+   :site/update-site-trust
+   [:map
+    [:domain :string]
+    [:success? :boolean]                  ;; true = successful extraction, false = failure
+    [:listings-extracted {:optional true} :int]]
+
+   :site/record-site-pattern
+   [:map
+    [:domain :string]
+    [:pattern-type [:enum :navigation :search :extraction :bot-bypass :pagination]]
+    [:pattern-data [:map-of :keyword :any]]
+    [:confidence {:optional true} :double]]})
 
 ;; =============================================================================
 ;; Query Schemas
@@ -487,7 +555,25 @@
 
    :ontology/get-concept-embedding
    [:map
-    [:uri :string]]})
+    [:uri :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Site Registry Queries (Generic Site Pattern Learning)
+   ;; -------------------------------------------------------------------------
+
+   :site/get-site
+   [:map
+    [:domain :string]]
+
+   :site/get-trusted-sites
+   [:map
+    [:min-trust {:optional true} :double]  ;; Default 0.5
+    [:limit {:optional true} :int]]
+
+   :site/get-site-patterns
+   [:map
+    [:domain :string]
+    [:pattern-type {:optional true} [:enum :navigation :search :extraction :bot-bypass :pagination]]]})
 
 ;; =============================================================================
 ;; Evolutionary Ontology Builder - Shared Domain Schemas
@@ -1086,4 +1172,34 @@
     [:map
      [:model-id :string]
      [:dimensions :int]
-     [:configured-at :string]]]})
+     [:configured-at :string]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; Site Registry Read Models (Generic Site Pattern Learning)
+   ;; -------------------------------------------------------------------------
+
+   :site/registry
+   [:map
+    [:by-domain [:map-of :string          ;; domain -> site
+                 [:map
+                  [:site-id :uuid]
+                  [:domain :string]
+                  [:display-name :string]
+                  [:category [:enum :corporate :peer-to-peer :aggregator :local]]
+                  [:discovered-via [:enum :manual :web-search :referral]]
+                  [:url-pattern {:optional true} :string]
+                  [:requires-headed {:optional true} :boolean]
+                  [:known-challenges {:optional true} [:vector :string]]
+                  [:notes {:optional true} :string]
+                  [:trust-score :double]
+                  [:extraction-count :int]
+                  [:last-success-at {:optional true} :string]
+                  [:last-failure-at {:optional true} :string]
+                  [:registered-at :string]]]]
+    [:by-trust [:vector :string]]         ;; domains sorted by trust score
+    [:patterns [:map-of :string           ;; domain -> patterns
+                [:vector [:map
+                          [:pattern-type [:enum :navigation :search :extraction :bot-bypass :pagination]]
+                          [:pattern-data [:map-of :keyword :any]]
+                          [:confidence :double]
+                          [:learned-at :string]]]]]]})
