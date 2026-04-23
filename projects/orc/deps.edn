@@ -2,7 +2,7 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
 
         obneyai/grain-core-v2 {:git/url "https://github.com/ObneyAI/grain.git"
-                               :git/sha "3c050c7957bc6c3087ed4e42c4a8dcf28109c57a"
+                               :git/sha "f5a87e4083dd33017126077fd4dc66266313da00"
                                :deps/root "projects/grain-core-v2"}
 
         orc/orc-service       {:local/root "../../components/orc-service"}
@@ -21,5 +21,5 @@
  :aliases {:test {:extra-paths []
                   :extra-deps {orc/grain-test-utils {:local/root "../../components/grain-test-utils"}
                                obneyai/grain-control-plane {:git/url "https://github.com/ObneyAI/grain.git"
-                                                            :git/sha "3c050c7957bc6c3087ed4e42c4a8dcf28109c57a"
+                                                            :git/sha "f5a87e4083dd33017126077fd4dc66266313da00"
                                                             :deps/root "projects/grain-control-plane"}}}}}
