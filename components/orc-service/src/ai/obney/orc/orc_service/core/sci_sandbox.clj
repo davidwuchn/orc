@@ -119,23 +119,53 @@
                      (group-by :server ns-tools))})))
 
 ;; ============================================================================
+;; Browser Tool Bindings (agent-browser CLI)
+;; ============================================================================
+
+(defn- build-browser-tool-bindings
+  "Build SCI bindings for agent-browser tools.
+
+   browser-tools is a vector of tool names to expose.
+   Returns a map of {symbol -> fn}."
+  [browser-tools]
+  (when (seq browser-tools)
+    ;; Lazily require agent-browser to avoid circular deps
+    (try
+      (require '[ai.obney.orc.agent-browser.interface :as browser])
+      (let [all-tools (deref (resolve 'ai.obney.orc.agent-browser.interface/browser-tools))
+            selected (select-keys all-tools browser-tools)]
+        (reduce-kv
+         (fn [acc name fn]
+           (assoc acc (symbol name) fn))
+         {}
+         selected))
+      (catch Exception e
+        (u/log ::browser-tools-not-available :error (.getMessage e))
+        {}))))
+
+;; ============================================================================
 ;; SCI Context Building
 ;; ============================================================================
 
 (defn build-sci-context
-  "Build a SCI execution context with MCP tools injected.
+  "Build a SCI execution context with MCP and browser tools injected.
 
    The context provides:
    - Safe subset of clojure.core
-   - MCP tools as callable functions in 'user namespace
+   - MCP tools as callable functions (via :call-tool-fn)
+   - Browser tools as direct functions (via :browser-tools)
    - Custom bindings for print functions (capture stdout)
 
    Options:
    - :call-tool-fn - Function (tool-name args-map) -> result for MCP calls
-   - :mcp-tools - Vector of tool names to inject
+   - :mcp-tools - Vector of MCP tool names to inject
+   - :browser-tools - Vector of browser tool names to inject (e.g., [\"open\" \"snapshot\" \"click\"])
    - :stdout-writer - StringWriter to capture stdout (optional)"
-  [{:keys [call-tool-fn mcp-tools stdout-writer]}]
+  [{:keys [call-tool-fn mcp-tools browser-tools stdout-writer]}]
   (let [{:keys [flat namespaces]} (build-tool-bindings call-tool-fn mcp-tools)
+
+        ;; Browser tool bindings (shell-based, no session management)
+        browser-bindings (build-browser-tool-bindings browser-tools)
 
         ;; Build safe clojure.core namespace
         core-publics (ns-publics 'clojure.core)
@@ -164,13 +194,30 @@
                           'println (fn [& args]
                                      (.write stdout-writer (str (apply str args) "\n")))
                           'prn (fn [& args]
-                                 (.write stdout-writer (str (apply str (map pr-str args)) "\n")))})]
+                                 (.write stdout-writer (str (apply str (map pr-str args)) "\n")))})
+
+        ;; Helper to realize all lazy sequences recursively
+        realize-all (fn realize-all [x]
+                      (cond
+                        (map? x) (into {} (map (fn [[k v]] [k (realize-all v)]) x))
+                        (coll? x) (into (empty x) (map realize-all x))
+                        :else x))
+
+        ;; FINAL_ANSWER helper that properly realizes lazy seqs
+        final-answer-fn (fn [value]
+                          (let [realized (realize-all value)]
+                            (str "FINAL_ANSWER: " (pr-str realized))))
+
+        ;; Merge all bindings: MCP tools + browser tools + print overrides + helpers
+        all-bindings (merge flat browser-bindings print-bindings
+                            {'FINAL_ANSWER final-answer-fn
+                             'realize-all realize-all})]
 
     (sci/init
      {:namespaces (merge {'clojure.core safe-core-final
-                          'user flat}
+                          'user (merge flat browser-bindings)}
                          namespaces)  ;; e.g., {'linear {'list_issues <fn>}}
-      :bindings (merge flat print-bindings)})))
+      :bindings all-bindings})))
 
 ;; ============================================================================
 ;; Code Execution
@@ -204,20 +251,53 @@
 ;; ============================================================================
 
 (def final-answer-patterns
-  "Patterns that indicate a final answer in LLM output or code result."
-  [#"FINAL_ANSWER:\s*(.+)"
-   #"FINAL-ANSWER:\s*(.+)"
-   #"\"FINAL_ANSWER:\s*(.+)\""
-   #"\(str\s+\"FINAL_ANSWER:\s*\"(.+)\)"])
+  "Patterns that indicate a final answer in LLM output or code result.
+   Order matters - more specific patterns first, generic patterns last.
+   Uses non-greedy matching and explicit boundary handling to avoid
+   capturing trailing quotes. Uses (?s) for multi-line JSON support."
+  [;; Most specific: (str \"FINAL_ANSWER: \" value) form
+   #"\(str\s+\"FINAL_ANSWER:\s*\"\s*([^)\s]+)\s*\)"
+   ;; Quoted: \"FINAL_ANSWER: value\"
+   #"\"FINAL_ANSWER:\s*([^\"]+)\""
+   ;; Generic - multi-line support with (?s) flag, captures to end of string
+   #"(?s)FINAL_ANSWER:\s*(.+?)\"?\z"
+   #"(?s)FINAL-ANSWER:\s*(.+?)\"?\z"])
+
+(defn- try-parse-edn
+  "Try to parse a string as EDN. Returns parsed value or nil on failure.
+
+   Handles escaped quotes from pr-str output by unescaping first."
+  [s]
+  (when (and (string? s) (not (str/blank? s)))
+    (let [;; Unescape the string if it contains escaped quotes from pr-str
+          unescaped (-> s
+                        (str/replace "\\\"" "\"")
+                        (str/replace "\\\\" "\\"))]
+      (try
+        (clojure.edn/read-string unescaped)
+        (catch Exception _
+          ;; Try original string if unescaping broke something
+          (try
+            (clojure.edn/read-string s)
+            (catch Exception _ nil)))))))
 
 (defn extract-final-answer
   "Extract the final answer from a string if present.
-   Returns nil if no final answer pattern is found."
+   Returns nil if no final answer pattern is found.
+
+   Attempts to parse the extracted value as EDN if it looks like a data structure.
+   Returns the parsed EDN if successful, otherwise returns the raw string."
   [s]
   (when (string? s)
     (some (fn [pattern]
             (when-let [[_ answer] (re-find pattern s)]
-              (str/trim answer)))
+              (let [trimmed (str/trim answer)]
+                ;; Try to parse as EDN if it looks like a data structure
+                (if (or (str/starts-with? trimmed "[")
+                        (str/starts-with? trimmed "{")
+                        (str/starts-with? trimmed "("))
+                  (or (try-parse-edn trimmed) trimmed)
+                  trimmed))))
           final-answer-patterns)))
 
 (defn contains-final-answer?
@@ -243,13 +323,14 @@
 ;; ============================================================================
 
 (defn execute-with-mcp
-  "Execute code with MCP tools available.
+  "Execute code with MCP and/or browser tools available.
 
    This is a convenience function that builds context and executes in one step.
 
    Options:
-   - :call-tool-fn - Function (tool-name args-map) -> result
-   - :mcp-tools - Vector of tool names to inject
+   - :call-tool-fn - Function (tool-name args-map) -> result for MCP tools
+   - :mcp-tools - Vector of MCP tool names to inject
+   - :browser-tools - Vector of agent-browser tool names to inject
    - :code - Code string to execute
 
    Returns:
@@ -257,10 +338,15 @@
    - :result - Evaluation result
    - :error - Error if any
    - :final-answer - Extracted answer if FINAL_ANSWER found"
-  [{:keys [call-tool-fn mcp-tools code]}]
+  [{:keys [call-tool-fn mcp-tools browser-tools code]}]
   (let [ctx (build-sci-context {:call-tool-fn call-tool-fn
-                                :mcp-tools mcp-tools})
+                                :mcp-tools mcp-tools
+                                :browser-tools browser-tools})
         exec-result (execute-code ctx code)
-        final-answer (or (extract-final-answer (:result exec-result))
+        ;; Try raw-result first (unescaped), then fall back to pr-str'd result
+        raw (when (string? (:raw-result exec-result))
+              (:raw-result exec-result))
+        final-answer (or (when raw (extract-final-answer raw))
+                         (extract-final-answer (:result exec-result))
                          (extract-final-answer (:stdout exec-result)))]
     (assoc exec-result :final-answer final-answer)))

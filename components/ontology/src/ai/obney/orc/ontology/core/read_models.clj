@@ -724,3 +724,146 @@
      :avg-success-rate (when (seq all-rules-flat)
                          (/ (reduce + 0 (map :success-rate all-rules-flat))
                             (count all-rules-flat)))}))
+
+;; =============================================================================
+;; Site Registry Projection (Generic Site Pattern Learning)
+;; =============================================================================
+;; Builds site registry with trust scores and learned patterns
+
+(def site-registry-events
+  "Events that affect site registry read model"
+  #{:site/registered
+    :site/trust-updated
+    :site/pattern-learned})
+
+(defmulti site-registry*
+  "Apply event to site registry read model.
+   State: {:by-domain {domain -> site}
+           :by-trust [domains sorted by trust]
+           :patterns {domain -> [patterns]}}"
+  (fn [_state event] (:event/type event)))
+
+(defmethod site-registry* :site/registered
+  [state event]
+  (let [{:keys [site-id domain display-name category discovered-via
+                url-pattern requires-headed known-challenges notes registered-at]} event
+        site {:site-id site-id
+              :domain domain
+              :display-name display-name
+              :category category
+              :discovered-via discovered-via
+              :url-pattern url-pattern
+              :requires-headed (boolean requires-headed)
+              :known-challenges (vec (or known-challenges []))
+              :notes notes
+              :trust-score 0.5  ;; Initial trust score
+              :extraction-count 0
+              :registered-at (str registered-at)}]
+    (-> state
+        (assoc-in [:by-domain domain] site)
+        (update :by-trust (fn [domains]
+                            (->> (conj (or domains []) domain)
+                                 (sort-by (fn [d]
+                                            (- (get-in state [:by-domain d :trust-score] 0.5))))
+                                 vec))))))
+
+(defmethod site-registry* :site/trust-updated
+  [state event]
+  (let [{:keys [domain trust-score extraction-count
+                last-success-at last-failure-at updated-at]} event]
+    (-> state
+        (update-in [:by-domain domain] merge
+                   {:trust-score trust-score
+                    :extraction-count extraction-count
+                    :last-success-at last-success-at
+                    :last-failure-at last-failure-at})
+        ;; Re-sort by-trust list
+        (update :by-trust (fn [domains]
+                            (->> (or domains [])
+                                 (sort-by (fn [d]
+                                            (- (get-in state [:by-domain d :trust-score] 0.5))))
+                                 vec))))))
+
+(defmethod site-registry* :site/pattern-learned
+  [state event]
+  (let [{:keys [domain pattern-type pattern-data confidence learned-at]} event
+        pattern {:pattern-type pattern-type
+                 :pattern-data pattern-data
+                 :confidence confidence
+                 :learned-at (str learned-at)}]
+    (update-in state [:patterns domain] (fnil conj []) pattern)))
+
+(defmethod site-registry* :default [state _] state)
+
+(defn site-registry
+  "Build site registry from events."
+  [initial-state events]
+  (reduce site-registry* initial-state events))
+
+(defreadmodel :site registry
+  {:events site-registry-events, :version 1}
+  [state event] (site-registry* state event))
+
+;; =============================================================================
+;; Site Registry Query Helpers
+;; =============================================================================
+
+(defn get-site-by-domain
+  "Get a site by its domain."
+  [ctx domain]
+  (get-in (rmp/project ctx :site/registry) [:by-domain domain]))
+
+(defn get-all-sites
+  "Get all registered sites."
+  [ctx]
+  (vals (get (rmp/project ctx :site/registry) :by-domain {})))
+
+(defn get-trusted-sites
+  "Get sites with trust score above threshold, sorted by trust.
+
+   Args:
+   - min-trust: Minimum trust score (default 0.5)
+   - limit: Maximum sites to return"
+  [ctx & [{:keys [min-trust limit] :or {min-trust 0.5}}]]
+  (let [state (rmp/project ctx :site/registry)
+        all-sites (vals (:by-domain state))
+        trusted (->> all-sites
+                     (filter #(>= (:trust-score % 0) min-trust))
+                     (sort-by :trust-score >))]
+    (if limit
+      (take limit trusted)
+      trusted)))
+
+(defn get-site-patterns
+  "Get learned patterns for a site.
+
+   Args:
+   - domain: Site domain
+   - pattern-type: Optional filter by pattern type"
+  [ctx domain & [{:keys [pattern-type]}]]
+  (let [patterns (get-in (rmp/project ctx :site/registry) [:patterns domain] [])]
+    (if pattern-type
+      (filter #(= pattern-type (:pattern-type %)) patterns)
+      patterns)))
+
+(defn get-sites-requiring-headed
+  "Get sites that require headed browser mode."
+  [ctx]
+  (->> (get-all-sites ctx)
+       (filter :requires-headed)))
+
+(defn site-registry-statistics
+  "Get statistics about the site registry."
+  [ctx]
+  (let [state (rmp/project ctx :site/registry)
+        sites (vals (:by-domain state))
+        patterns (get state :patterns {})]
+    {:total-sites (count sites)
+     :by-category (frequencies (map :category sites))
+     :by-discovered-via (frequencies (map :discovered-via sites))
+     :sites-requiring-headed (count (filter :requires-headed sites))
+     :total-patterns (reduce + (map count (vals patterns)))
+     :avg-trust-score (when (seq sites)
+                        (/ (reduce + (map :trust-score sites))
+                           (count sites)))
+     :sites-with-extractions (count (filter #(> (:extraction-count % 0) 0) sites))}))

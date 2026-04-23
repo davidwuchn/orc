@@ -155,12 +155,13 @@
         :tags #{[:tree tree-id]}  ;; Only UUID-based tags allowed
         :body (cond-> {:tree-id tree-id
                        :failure-uri failure-uri
-                       :subtype-uri subtype-uri
                        :frequency frequency
                        :severity severity-kw
                        :triggers (vec triggers)
                        :evidence-trace-ids (vec evidence-trace-ids)
                        :recorded-at now}
+                ;; Only include subtype-uri when provided (schema expects :string, not nil)
+                subtype-uri (assoc :subtype-uri subtype-uri)
                 ;; Add domain-agnostic fields when present
                 context (assoc :failure-context context
                                :failure-conditions context)  ;; both for compat
@@ -635,3 +636,113 @@
                                 :domain-type (:domain-type result)
                                 :tree-id tree-id}
          :command-result/events events}))))
+
+;; =============================================================================
+;; Site Registry Commands (Generic Site Pattern Learning)
+;; =============================================================================
+
+(defcommand :site register-site
+  "Register a new apartment listing site.
+
+   Checks if site already exists by domain.
+   If exists, returns existing site-id without emitting event.
+   If new, emits site-registered event with initial trust score."
+  [{{:keys [domain display-name category discovered-via
+            url-pattern requires-headed known-challenges notes]} :command
+    :keys [event-store] :as ctx}]
+  (let [existing (rm/get-site-by-domain ctx domain)]
+    (if existing
+      ;; Site already registered
+      {:command-result/message "Site already registered"
+       :command-result/data {:site-id (:site-id existing)
+                             :domain domain}}
+      ;; Register new site
+      (let [site-id (generate-uuid)
+            now (now-str)]
+        {:command-result/events
+         [(->event
+           {:type :site/registered
+            :tags #{[:site site-id]}
+            :body (cond-> {:site-id site-id
+                           :domain domain
+                           :display-name display-name
+                           :category category
+                           :discovered-via discovered-via
+                           :registered-at now}
+                    url-pattern (assoc :url-pattern url-pattern)
+                    (some? requires-headed) (assoc :requires-headed requires-headed)
+                    (seq known-challenges) (assoc :known-challenges (vec known-challenges))
+                    notes (assoc :notes notes))})]
+         :command-result/data {:site-id site-id
+                               :domain domain}}))))
+
+(defcommand :site update-site-trust
+  "Update trust score for a site based on extraction success/failure.
+
+   Trust score calculation:
+   - Success: trust = (current * count + 1) / (count + 1)
+   - Failure: trust = (current * count + 0) / (count + 1)
+
+   This is a moving average that weighs recent results appropriately."
+  [{{:keys [domain success? listings-extracted]} :command
+    :keys [event-store] :as ctx}]
+  (let [existing (rm/get-site-by-domain ctx domain)]
+    (if-not existing
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Site not found: " domain)}
+
+      (let [now (now-str)
+            current-trust (or (:trust-score existing) 0.5)
+            current-count (or (:extraction-count existing) 0)
+            ;; Calculate new trust score as moving average
+            new-count (inc current-count)
+            new-trust (/ (+ (* current-trust current-count)
+                            (if success? 1.0 0.0))
+                         new-count)]
+        {:command-result/events
+         [(->event
+           {:type :site/trust-updated
+            :tags #{[:site (:site-id existing)]}
+            :body (cond-> {:site-id (:site-id existing)
+                           :domain domain
+                           :trust-score new-trust
+                           :extraction-count new-count
+                           :updated-at now}
+                    success? (assoc :last-success-at now)
+                    (not success?) (assoc :last-failure-at now))})]
+         :command-result/data {:domain domain
+                               :trust-score new-trust
+                               :extraction-count new-count}}))))
+
+(defcommand :site record-site-pattern
+  "Record a learned navigation/extraction pattern for a site.
+
+   Patterns are site-specific tactics learned over time:
+   - navigation: How to navigate to listings page
+   - search: How to use search filters
+   - extraction: Selectors and strategies for extracting listings
+   - bot-bypass: Techniques for avoiding bot detection
+   - pagination: How to navigate between pages"
+  [{{:keys [domain pattern-type pattern-data confidence]} :command
+    :keys [event-store] :as ctx}]
+  (let [existing (rm/get-site-by-domain ctx domain)]
+    (if-not existing
+      {::anom/category ::anom/not-found
+       ::anom/message (str "Site not found: " domain)}
+
+      (let [now (now-str)
+            pattern-type-kw (if (keyword? pattern-type)
+                              pattern-type
+                              (keyword pattern-type))]
+        {:command-result/events
+         [(->event
+           {:type :site/pattern-learned
+            :tags #{[:site (:site-id existing)]}
+            :body {:site-id (:site-id existing)
+                   :domain domain
+                   :pattern-type pattern-type-kw
+                   :pattern-data pattern-data
+                   :confidence (or confidence 0.8)
+                   :learned-at now}})]
+         :command-result/data {:domain domain
+                               :pattern-type pattern-type-kw}}))))

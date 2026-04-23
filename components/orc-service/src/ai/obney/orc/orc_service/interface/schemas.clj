@@ -298,6 +298,12 @@
     [:node-id :uuid]
     [:instruction :string]]
 
+   :sheet/set-node-context
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:context [:map-of :keyword :any]]]
+
    :sheet/set-node-io
    [:map
     [:sheet-id :uuid]
@@ -629,6 +635,13 @@
     [:instruction :string]
     [:previous-instruction {:optional true} :string]]
 
+   :sheet/node-context-set
+   [:map
+    [:sheet-id :uuid]
+    [:node-id :uuid]
+    [:context [:map-of :keyword :any]]
+    [:previous-context {:optional true} [:map-of :keyword :any]]]
+
    :sheet/node-io-set
    [:map
     [:sheet-id :uuid]
@@ -861,18 +874,6 @@
     [:node-id :uuid]
     [:item-index :int]
     [:total-items :int]]
-
-   ;; Lifecycle event for execution hooks (instrumentation, logging, etc.)
-   :sheet/execution-lifecycle-event
-   [:map
-    [:sheet-id :uuid]
-    [:tick-id :uuid]
-    [:node-id :uuid]
-    [:phase [:enum :before-execute :after-execute :on-failure]]
-    [:node-type :keyword]
-    [:node-name :string]
-    [:timestamp :string]
-    [:metadata {:optional true} [:map-of :keyword :any]]]
 
    ;; -------------------------------------------------------------------------
    ;; Versioning Events

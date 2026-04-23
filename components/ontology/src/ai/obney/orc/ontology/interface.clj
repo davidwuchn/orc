@@ -1226,3 +1226,327 @@
    - :domain-type - Domain that was analyzed"
   [ctx tree-id opts]
   (rule-extraction/extract-rules ctx tree-id opts))
+
+;; =============================================================================
+;; Site Registry Access (Generic Site Pattern Learning)
+;; =============================================================================
+
+(def site-registry-events
+  "Event types that affect site registry read model."
+  rm/site-registry-events)
+
+(defn get-site-by-domain
+  "Get a registered site by its domain."
+  [ctx domain]
+  (rm/get-site-by-domain ctx domain))
+
+(defn get-all-sites
+  "Get all registered sites."
+  [ctx]
+  (rm/get-all-sites ctx))
+
+(defn get-trusted-sites
+  "Get sites with trust score above threshold, sorted by trust.
+   Options:
+   - :min-trust - Minimum trust score (default 0.5)
+   - :limit - Maximum sites to return"
+  [ctx & [opts]]
+  (rm/get-trusted-sites ctx opts))
+
+(defn get-site-patterns
+  "Get learned patterns for a site.
+   Options:
+   - :pattern-type - Filter by pattern type (:navigation, :extraction, etc.)"
+  [ctx domain & [opts]]
+  (rm/get-site-patterns ctx domain opts))
+
+(defn get-sites-requiring-headed
+  "Get sites that require headed browser mode."
+  [ctx]
+  (rm/get-sites-requiring-headed ctx))
+
+(defn site-registry-statistics
+  "Get statistics about the site registry.
+   Returns:
+   - :total-sites - Total registered sites
+   - :by-category - Map of category to count
+   - :by-discovered-via - Map of discovery method to count
+   - :sites-requiring-headed - Count of headed-mode sites
+   - :total-patterns - Total learned patterns
+   - :avg-trust-score - Average trust score"
+  [ctx]
+  (rm/site-registry-statistics ctx))
+
+;; =============================================================================
+;; Action Outcome Learning (General-Purpose)
+;; =============================================================================
+;;
+;; These convenience functions enable behavior trees to learn from action
+;; outcomes without needing domain-specific recording functions. They wrap
+;; the existing ontology commands with sensible defaults for browser automation
+;; and other domains.
+;;
+;; Usage:
+;;   ;; Record a failed action
+;;   (record-action-outcome ctx
+;;     {:tree-id sheet-id
+;;      :domain "rent.com"
+;;      :action-type :click
+;;      :action-target "@e123"
+;;      :success false
+;;      :outcome-type :bot-detection
+;;      :redirected-to "ratelimited.rent.com"})
+;;
+;;   ;; Query past outcomes before attempting an action
+;;   (query-action-outcomes ctx
+;;     {:domain "rent.com"
+;;      :action-type :click})
+;;   ;; => [{:success false :outcome-type :bot-detection ...}]
+;;
+;;   ;; Check if action is safe based on past outcomes
+;;   (check-action-safe ctx "rent.com" :click)
+;;   ;; => {:safe false :failure-rate 1.0 :recommendation :skip}
+
+(defn record-action-outcome
+  "Record the outcome of an action for future learning.
+
+   This is the general-purpose recording function that can be used by
+   any code executor to record outcomes. It wraps the existing ontology
+   commands with convenient defaults.
+
+   Args:
+     ctx: Context with event-store
+     outcome-map:
+       :tree-id - UUID of the behavior tree (required)
+       :domain - Domain/site where action occurred (e.g., 'rent.com')
+       :action-type - Keyword like :click, :scroll, :navigate, :fill
+       :action-target - The target of the action (selector, URL, etc.)
+       :success - Boolean indicating if action succeeded
+       :outcome-type - Keyword like :success, :failure, :bot-detection, :redirect, :timeout
+       :error-message - Optional error message
+       :redirected-to - Optional URL if redirected
+       :browser-mode - Optional :headed or :headless
+       :page-url - Optional current page URL
+
+   Returns:
+     Command result map
+
+   Example:
+     (record-action-outcome ctx
+       {:tree-id sheet-id
+        :domain \"rent.com\"
+        :action-type :click
+        :action-target \"@e123\"
+        :success false
+        :outcome-type :bot-detection
+        :redirected-to \"ratelimited.rent.com\"})"
+  [ctx {:keys [tree-id domain action-type action-target success
+               outcome-type error-message redirected-to
+               browser-mode page-url]
+        :as outcome-map}]
+  (require '[ai.obney.grain.command-processor-v2.interface :as cp])
+  (require '[ai.obney.grain.time.interface :as time])
+  (let [process-fn (resolve 'ai.obney.grain.command-processor-v2.interface/process-command)
+        now-fn (resolve 'ai.obney.grain.time.interface/now)
+        domain-type "browser-automation"
+
+        ;; Build context-conditions map
+        context-conditions (cond-> {:domain domain
+                                    :action-type (name action-type)}
+                             browser-mode (assoc :browser-mode (name browser-mode))
+                             page-url (assoc :page-url page-url))
+
+        ;; Build action description
+        action-desc {:type (name action-type)
+                     :target action-target
+                     :reason (str "executing " (name action-type) " on " domain)}]
+
+    (if success
+      ;; Record as strength
+      (process-fn
+       (assoc ctx :command
+              {:command/id (random-uuid)
+               :command/timestamp (now-fn)
+               :command/name :ontology/record-tree-strength
+               :tree-id tree-id
+               :pattern-uri (str "success:" (name action-type) "-on-" domain)
+               :confidence 0.8
+               :evidence-trace-ids []
+               :avg-score 1.0
+               :context-conditions context-conditions
+               :action-taken action-desc
+               :domain-type domain-type
+               :expected-outcome (str (name action-type) " completed successfully")}))
+
+      ;; Record as weakness
+      (process-fn
+       (assoc ctx :command
+              {:command/id (random-uuid)
+               :command/timestamp (now-fn)
+               :command/name :ontology/record-tree-weakness
+               :tree-id tree-id
+               :failure-uri (str "failure:" (name (or outcome-type :action-failed)))
+               :frequency 1.0
+               :severity :medium
+               :triggers [(str "action:" (name action-type))]
+               :evidence-trace-ids []
+               :failure-context (cond-> context-conditions
+                                  redirected-to (assoc :redirected-to redirected-to)
+                                  error-message (assoc :error-message error-message)
+                                  outcome-type (assoc :outcome-type (name outcome-type)))
+               :attempted-action action-desc
+               :domain-type domain-type})))))
+
+(defn query-action-outcomes
+  "Query past outcomes for similar actions.
+
+   Searches the tree's weakness and strength records for matching
+   domain and action-type patterns.
+
+   Args:
+     ctx: Context with event-store
+     tree-id: UUID of the behavior tree
+     query-map:
+       :domain - Domain to filter by (optional)
+       :action-type - Action type to filter by (optional)
+       :limit - Max results (default 10)
+
+   Returns:
+     Vector of outcome maps:
+     [{:success false
+       :domain \"rent.com\"
+       :action-type :click
+       :outcome-type :bot-detection
+       :context {...}
+       :recorded-at \"...\"}]"
+  [ctx tree-id {:keys [domain action-type limit] :or {limit 10}}]
+  (let [profile (get-tree-profile ctx tree-id)
+        domain-str (when domain (if (keyword? domain) (name domain) domain))
+        action-str (when action-type (if (keyword? action-type) (name action-type) action-type))
+
+        ;; Extract failures that match criteria
+        matching-weaknesses
+        (->> (:weaknesses profile)
+             (filter (fn [{:keys [failure-context]}]
+                       (and (or (nil? domain-str)
+                                (= domain-str (get failure-context :domain)))
+                            (or (nil? action-str)
+                                (= action-str (get failure-context :action-type))))))
+             (take limit)
+             (mapv (fn [{:keys [failure failure-context attempted-action recorded-at]}]
+                     {:success false
+                      :domain (get failure-context :domain)
+                      :action-type (keyword (get failure-context :action-type))
+                      :outcome-type (when failure
+                                      (keyword (last (clojure.string/split (str failure) #":"))))
+                      :context failure-context
+                      :action attempted-action
+                      :recorded-at recorded-at})))
+
+        ;; Extract successes that match criteria
+        matching-strengths
+        (->> (:strengths profile)
+             (filter (fn [{:keys [context-conditions]}]
+                       (and (or (nil? domain-str)
+                                (= domain-str (get context-conditions :domain)))
+                            (or (nil? action-str)
+                                (= action-str (get context-conditions :action-type))))))
+             (take limit)
+             (mapv (fn [{:keys [pattern-uri context-conditions action-taken recorded-at]}]
+                     {:success true
+                      :domain (get context-conditions :domain)
+                      :action-type (keyword (get context-conditions :action-type))
+                      :outcome-type :success
+                      :context context-conditions
+                      :action action-taken
+                      :recorded-at recorded-at})))]
+
+    (vec (concat matching-weaknesses matching-strengths))))
+
+(defn check-action-safe
+  "Check if an action should be attempted based on past outcomes.
+
+   Queries past outcomes and calculates failure rate. Returns a
+   recommendation based on historical data.
+
+   Args:
+     ctx: Context with event-store
+     tree-id: UUID of the behavior tree
+     domain: Domain/site (string or keyword)
+     action-type: Action type (keyword like :click, :scroll)
+
+   Returns:
+     {:safe true/false
+      :failure-rate 0.0-1.0
+      :success-count N
+      :failure-count N
+      :has-prior-outcomes true/false
+      :recommendation :proceed/:caution/:skip
+      :failures [...] - list of past failures if any}"
+  [ctx tree-id domain action-type]
+  (let [outcomes (query-action-outcomes ctx tree-id
+                   {:domain domain
+                    :action-type action-type
+                    :limit 20})
+        successes (filter :success outcomes)
+        failures (remove :success outcomes)
+        total (count outcomes)
+        failure-rate (if (pos? total)
+                       (/ (count failures) total)
+                       0.0)
+        recommendation (cond
+                         (zero? total) :proceed
+                         (>= failure-rate 0.8) :skip
+                         (>= failure-rate 0.5) :caution
+                         :else :proceed)]
+    {:safe (< failure-rate 0.5)
+     :failure-rate failure-rate
+     :success-count (count successes)
+     :failure-count (count failures)
+     :has-prior-outcomes (pos? total)
+     :recommendation recommendation
+     :failures (mapv :context failures)}))
+
+(defn get-action-recommendations
+  "Get recommended strategies for actions on a domain based on learnings.
+
+   Analyzes past outcomes to provide actionable recommendations for
+   behavior tree nodes.
+
+   Args:
+     ctx: Context with event-store
+     tree-id: UUID of the behavior tree
+     domain: Domain/site to get recommendations for
+
+   Returns:
+     {:domain \"rent.com\"
+      :recommendations
+        [{:action-type :click
+          :safe false
+          :failure-rate 1.0
+          :recommendation :skip
+          :alternative \"Use scroll-only strategy\"}
+         {:action-type :scroll
+          :safe true
+          :failure-rate 0.0
+          :recommendation :proceed}]}"
+  [ctx tree-id domain]
+  (let [action-types [:click :scroll :navigate :fill :press :hover]
+        recommendations
+        (->> action-types
+             (map (fn [action-type]
+                    (let [check (check-action-safe ctx tree-id domain action-type)]
+                      (assoc check
+                             :action-type action-type
+                             :alternative (case (:recommendation check)
+                                            :skip (case action-type
+                                                    :click "Use scroll-only strategy"
+                                                    :navigate "Try alternative URL"
+                                                    :fill "Check for CAPTCHA"
+                                                    "Avoid this action")
+                                            :caution "Proceed with extra care"
+                                            nil)))))
+             (filter :has-prior-outcomes)
+             vec)]
+    {:domain domain
+     :recommendations recommendations}))

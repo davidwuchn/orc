@@ -16,6 +16,24 @@
             [clojure.string :as str]))
 
 ;; =============================================================================
+;; Output Key Normalization
+;; =============================================================================
+;;
+;; Code executors may return string keys ({"output" "value"}) while the
+;; :sheet/complete-node-execution command schema expects keyword keys.
+;; This helper ensures consistent keyword keys.
+
+(defn- normalize-output-keys
+  "Convert output map keys to keywords for command schema compatibility.
+   Handles both string and keyword keys, preserving values."
+  [outputs]
+  (when outputs
+    (reduce-kv (fn [acc k v]
+                 (assoc acc (if (keyword? k) k (keyword k)) v))
+               {}
+               outputs)))
+
+;; =============================================================================
 ;; LLM Call Budget Tracking (Opt-in Only)
 ;; =============================================================================
 ;;
@@ -98,11 +116,13 @@
         (let [ontology-ns (requiring-resolve 'ai.obney.orc.ontology.interface/build-ontology-context)
               format-fn (requiring-resolve 'ai.obney.orc.ontology.interface/format-context-for-llm)]
           (if (and ontology-ns format-fn)
-            (let [event-store (:event-store context)
-                  ;; Build ontology context
-                  ontology-ctx (ontology-ns event-store
+            (let [;; Resolve tree-id: explicit > sheet-id (auto for self-learning)
+                  tree-id (or (:tree-id ctx-config)
+                              (when (:self-learning? ctx-config) (:sheet-id context)))
+                  ;; Build ontology context - pass full context (needs :event-store and :cache)
+                  ontology-ctx (ontology-ns context
                                             (cond-> {:problem-type (:problem-type ctx-config)}
-                                              (:tree-id ctx-config) (assoc :tree-id (:tree-id ctx-config))
+                                              tree-id (assoc :tree-id tree-id)
                                               (:self-learning? ctx-config) (assoc :self-learning? true)))
                   ;; Format for LLM injection
                   formatted (format-fn ontology-ctx
@@ -136,39 +156,6 @@
            :sheet-id sheet-id
            :key key
            :value value}}))
-
-;; =============================================================================
-;; Lifecycle Event Emission
-;; =============================================================================
-
-(defn- emit-lifecycle-event!
-  "Emit execution lifecycle event for hook subscribers.
-   Uses direct event emission (Grain pattern) - not command processing.
-
-   Phases:
-   - :before-execute - Just before node starts execution
-   - :after-execute  - After successful completion
-   - :on-failure     - When execution fails
-
-   External code can subscribe via todo processor with topic
-   #{:sheet/execution-lifecycle-event}."
-  [context sheet-id tick-id node-id node-type node-name phase & [metadata]]
-  (let [es (:event-store context)
-        tenant-id (:tenant-id context)
-        event (->event
-                {:type :sheet/execution-lifecycle-event
-                 :tags #{[:sheet sheet-id]
-                         [:tick tick-id]
-                         [:node node-id]}
-                 :body (cond-> {:sheet-id sheet-id
-                                :tick-id tick-id
-                                :node-id node-id
-                                :phase phase
-                                :node-type node-type
-                                :node-name (or node-name "")
-                                :timestamp (str (time/now))}
-                         metadata (assoc :metadata metadata))})]
-    (event-store/append es {:tenant-id tenant-id :events [event]})))
 
 ;; =============================================================================
 ;; Tick Execution Processor
@@ -294,7 +281,7 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes (or outputs {})}
+                                :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
                          (seq exec-context) (assoc :inputs exec-context)))))
@@ -354,7 +341,7 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes (or outputs {})}
+                                :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
                          (seq exec-context) (assoc :inputs exec-context)))))
@@ -417,11 +404,6 @@
                            {}
                            read-keys)]
 
-        ;; Emit lifecycle event before execution
-        (emit-lifecycle-event! context sheet-id tick-id node-id
-                               :delegate (:name node) :before-execute
-                               {:target-sheet-id target-sheet-id})
-
         ;; Async execution pattern (ORC standard)
         (future
           (try
@@ -447,12 +429,6 @@
                            {}
                            write-keys)]
 
-              ;; Emit lifecycle event after execution
-              (emit-lifecycle-event! context sheet-id tick-id node-id
-                                     :delegate (:name node)
-                                     (if (= :success status) :after-execute :on-failure)
-                                     {:status status :duration-ms duration-ms})
-
               ;; Complete node execution (ORC pattern)
               (cp/process-command
                 (assoc context :command
@@ -463,17 +439,12 @@
                                 :tick-id tick-id
                                 :node-id node-id
                                 :status status
-                                :writes outputs
+                                :writes (normalize-output-keys outputs)
                                 :duration-ms duration-ms}
                          (seq exec-context) (assoc :inputs exec-context)
                          (:error result) (assoc :error (:error result))))))
 
             (catch Exception e
-              ;; Emit failure lifecycle event
-              (emit-lifecycle-event! context sheet-id tick-id node-id
-                                     :delegate (:name node) :on-failure
-                                     {:error (.getMessage e)})
-
               ;; Fail node execution (ORC pattern)
               (cp/process-command
                 (assoc context :command
@@ -646,7 +617,16 @@
           ;; Start first child
           (let [first-child-id (first children-ids)
                 first-child (get nodes-by-id first-child-id)
-                blackboard (resolve-blackboard context sheet-id tick-id)
+                raw-blackboard (resolve-blackboard context sheet-id tick-id)
+                ;; Merge event inputs into blackboard (e.g., map-each item values)
+                ;; This ensures items passed from map-each are available to children
+                blackboard (reduce (fn [bb [k v]]
+                                     (if (and (keyword? k)
+                                              (not (= (namespace k) (namespace ::_))))
+                                       (assoc-in bb [k :value] v)
+                                       bb))
+                                   raw-blackboard
+                                   event-inputs)
                 bb-inputs (if (= :leaf (:type first-child))
                             (reduce (fn [acc k]
                                       (if-let [entry (get blackboard k)]
@@ -655,8 +635,9 @@
                                     {}
                                     (:reads first-child))
                             {})
-                ;; Merge execution context with blackboard inputs
-                inputs (merge exec-context bb-inputs)]
+                ;; Merge execution context with blackboard inputs AND event-inputs
+                ;; Pass event-inputs to children so they can also access map-each items
+                inputs (merge exec-context event-inputs bb-inputs)]
             {:result/events
              [(->event
                {:type :sheet/node-execution-started
@@ -1107,6 +1088,7 @@
             ;; Store state
             (swap! map-each-state assoc state-key initial-state)
             ;; Start first batch - set item value and start child for each
+            ;; We emit blackboard writes + start events so children can read item from blackboard
             {:result/events
              (into
               ;; Emit initial progress event
@@ -1120,24 +1102,26 @@
                         :node-id node-id
                         :item-index 0
                         :total-items total-items}})]
-              (for [idx batch-indices]
-                (let [item (nth items idx)
-                      child (get nodes-by-id child-id)]
-                  ;; We need to set the item-key value before starting child
-                  ;; This is done via a key-value-set event followed by node-execution-started
-                  ;; For simplicity, we'll set it in the inputs map
-                  (->event
-                   {:type :sheet/node-execution-started
-                    :tags #{[:sheet sheet-id]
-                            [:node child-id]
-                            [:tick tick-id]}
-                    :body {:sheet-id sheet-id
-                           :tick-id tick-id
-                           :node-id child-id
-                           ;; Pass item as an input override
-                           :inputs {item-key item
-                                    ::map-each-index idx
-                                    ::map-each-parent node-id}}}))))}))))))
+              (mapcat
+               (fn [idx]
+                 (let [item (nth items idx)
+                       child (get nodes-by-id child-id)]
+                   ;; Emit blackboard write for item BEFORE starting child
+                   ;; This ensures all children in a sequence can read the item
+                   [(make-bb-write-event event-store sheet-id tick-id item-key item blackboard)
+                    (->event
+                     {:type :sheet/node-execution-started
+                      :tags #{[:sheet sheet-id]
+                              [:node child-id]
+                              [:tick tick-id]}
+                      :body {:sheet-id sheet-id
+                             :tick-id tick-id
+                             :node-id child-id
+                             ;; Pass item as an input override
+                             :inputs {item-key item
+                                      ::map-each-index idx
+                                      ::map-each-parent node-id}}})]))
+               batch-indices))}))))))
 
 (defn handle-map-each-child-completion
   "Handle completion of a map-each child iteration.
@@ -1163,9 +1147,25 @@
           (let [{:keys [items child-id item-key output-key]} state
                 ;; Get the original item
                 item (nth items item-index)
+                ;; When child is a composite (sequence/fallback), writes may be empty.
+                ;; In that case, read all non-special keys from the blackboard.
+                effective-writes (if (seq writes)
+                                   writes
+                                   ;; Composite child - read from blackboard
+                                   (let [blackboard (resolve-blackboard context sheet-id tick-id)
+                                         source-key (:source-key state)]
+                                     (reduce-kv
+                                      (fn [acc k v]
+                                        (if (and (keyword? k)
+                                                 (not (#{item-key source-key output-key} k))
+                                                 (not (= (namespace k) (namespace ::_))))
+                                          (assoc acc k (:value v))
+                                          acc))
+                                      {}
+                                      blackboard)))
                 ;; Create result from writes
                 computed-result (if (= :success child-status)
-                                  (let [updated-item (get writes item-key item)
+                                  (let [updated-item (get effective-writes item-key item)
                                         source-key (:source-key state)
                                         other-writes (reduce-kv
                                                        (fn [acc k v]
@@ -1175,7 +1175,7 @@
                                                            (assoc acc (keyword k) v)
                                                            acc))
                                                        {}
-                                                       writes)]
+                                                       effective-writes)]
                                     (if (map? updated-item)
                                       (merge updated-item other-writes)
                                       (if (seq other-writes)
@@ -1243,6 +1243,8 @@
                     :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
                     :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
                            :item-index (:completed-count act) :total-items total-items}})
+                  ;; Write item to blackboard so children in sequence can read it
+                  (make-bb-write-event event-store sheet-id tick-id item-key next-item blackboard)
                   (->event
                    {:type :sheet/node-execution-started
                     :tags #{[:sheet sheet-id] [:node child-id] [:tick tick-id]}
@@ -1289,6 +1291,8 @@
         status (:status event)
         tick-ctx (rm/get-tick-execution-context context tick-id)
         root-node-id (:root-node-id tick-ctx)
+        ;; Per-execution override from options, else global dynamic default
+        max-ticks (or (get-in tick-ctx [:options :max-ticks]) *max-tick-iterations*)
         ;; Get current tick to check iteration count and cancellation
         tick (rm/get-tick context tick-id)
         current-iteration (or (:iteration tick) 1)
@@ -1309,7 +1313,7 @@
 
         ;; Status is running and we haven't hit max iterations - re-tick
         (and (= status :running)
-             (< current-iteration *max-tick-iterations*))
+             (< current-iteration max-ticks))
         {:result/events
          [(->event
            {:type :sheet/tree-tick-completed
@@ -1330,7 +1334,7 @@
         ;; Either success/failure, or hit max iterations
         :else
         (let [final-status (if (and (= status :running)
-                                     (>= current-iteration *max-tick-iterations*))
+                                     (>= current-iteration max-ticks))
                              :failure
                              status)
               ;; For tick-scoped executions, gather outputs from isolated blackboard
@@ -1358,23 +1362,31 @@
 (defn deliver-execution-result
   "When a tick completes, deliver the result to any waiting promise.
    This bridges the async todo processor pipeline back to sync callers
-   who are blocking on runtime/execute."
+   who are blocking on runtime/execute.
+
+   Skips delivery for intermediate :running completions — those are
+   re-tick signals, not final results. The final delivery happens when
+   the tree completes with :success/:failure, or when max iterations
+   is hit (complete-tree-tick converts :running to :failure)."
   [{:keys [event]}]
   (let [tick-id (:tick-id event)
         root-status (:root-status event)
         outputs (:outputs event)
         error (:error event)]
-    ;; Clean up budget tracking for this tick
-    (clear-llm-count! tick-id)
-    (runtime/deliver-completion! tick-id
-      {:status (case root-status
-                 :success :success
-                 :failure :failure
-                 :running :failure  ;; running at completion means max iterations hit
-                 :failure)
-       :outputs (or outputs {})
-       :trace-id tick-id
-       :error error})
+    ;; Skip intermediate :running completions — those are re-tick signals,
+    ;; not final results. complete-tree-tick converts :running to :failure
+    ;; when max iterations are exhausted.
+    (when (not= root-status :running)
+      ;; Clean up budget tracking for this tick
+      (clear-llm-count! tick-id)
+      (runtime/deliver-completion! tick-id
+        {:status (case root-status
+                   :success :success
+                   :failure :failure
+                   :failure)
+         :outputs (or outputs {})
+         :trace-id tick-id
+         :error error}))
     ;; No events to emit
     nil))
 

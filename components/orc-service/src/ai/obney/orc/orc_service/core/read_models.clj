@@ -35,6 +35,7 @@
     :sheet/node-deleted
     :sheet/node-name-set
     :sheet/node-instruction-set
+    :sheet/node-context-set
     :sheet/node-io-set
     :sheet/node-decorators-set
     :sheet/node-check-set
@@ -85,6 +86,7 @@
     :sheet/node-deleted
     :sheet/node-name-set
     :sheet/node-instruction-set
+    :sheet/node-context-set
     :sheet/node-io-set
     :sheet/node-decorators-set
     :sheet/node-check-set
@@ -321,6 +323,10 @@
   [state event]
   (assoc-in state [(:node-id event) :instruction] (:instruction event)))
 
+(defmethod nodes* :sheet/node-context-set
+  [state event]
+  (assoc-in state [(:node-id event) :context] (:context event)))
+
 (defmethod nodes* :sheet/node-io-set
   [state event]
   (-> state
@@ -375,6 +381,7 @@
       (assoc-in [(:node-id event) :reads] (:reads event))
       (assoc-in [(:node-id event) :writes] (:writes event))
       (assoc-in [(:node-id event) :mcp-tools] (:mcp-tools event))
+      (assoc-in [(:node-id event) :browser-tools] (:browser-tools event))
       (assoc-in [(:node-id event) :model] (:model event))
       (assoc-in [(:node-id event) :max-iterations] (:max-iterations event))))
 

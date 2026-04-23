@@ -285,6 +285,32 @@
                          :instruction instruction}
                   (:instruction node) (assoc :previous-instruction (:instruction node)))})]})))
 
+(defcommand :sheet set-node-context
+  {:authorized? authenticated?}
+  "Set the ontology context for a leaf node (for self-learning injection)."
+  [{{:keys [sheet-id node-id context]} :command
+    :as ctx}]
+  (let [node (rm/get-node ctx sheet-id node-id)]
+    (cond
+      (not node)
+      {::anom/category ::anom/not-found
+       ::anom/message "Node not found"}
+
+      (not= :leaf (:type node))
+      {::anom/category ::anom/incorrect
+       ::anom/message "Only leaf nodes can have context"}
+
+      :else
+      {:command-result/events
+       [(->event
+         {:type :sheet/node-context-set
+          :tags #{[:sheet sheet-id]
+                  [:node node-id]}
+          :body (cond-> {:sheet-id sheet-id
+                         :node-id node-id
+                         :context context}
+                  (:context node) (assoc :previous-context (:context node)))})]})))
+
 (defcommand :sheet set-node-io
   {:authorized? authenticated?}
   "Set the reads/writes (blackboard keys) for a leaf node."
@@ -557,7 +583,7 @@
 (defcommand :sheet set-repl-researcher-config
   {:authorized? authenticated?}
   "Set configuration for a repl-researcher node."
-  [{{:keys [sheet-id node-id instruction reads writes mcp-tools model max-iterations]} :command
+  [{{:keys [sheet-id node-id instruction reads writes mcp-tools browser-tools model max-iterations]} :command
     :as ctx}]
   (let [node (rm/get-node ctx sheet-id node-id)
         blackboard (rm/get-blackboard-by-key ctx sheet-id)
@@ -592,13 +618,15 @@
                          :instruction instruction
                          :reads (vec reads)
                          :writes (vec writes)
-                         :mcp-tools (vec mcp-tools)}
+                         :mcp-tools (vec (or mcp-tools []))}
+                  browser-tools (assoc :browser-tools (vec browser-tools))
                   model (assoc :model model)
                   max-iterations (assoc :max-iterations max-iterations)
                   (:instruction node) (assoc :previous-instruction (:instruction node))
                   (seq (:reads node)) (assoc :previous-reads (:reads node))
                   (seq (:writes node)) (assoc :previous-writes (:writes node))
                   (seq (:mcp-tools node)) (assoc :previous-mcp-tools (:mcp-tools node))
+                  (seq (:browser-tools node)) (assoc :previous-browser-tools (:browser-tools node))
                   (:model node) (assoc :previous-model (:model node))
                   (:max-iterations node) (assoc :previous-max-iterations (:max-iterations node)))})]})))
 

@@ -193,6 +193,7 @@
      :trace? - Enable tracing (passed to async pipeline via options)
      :langfuse-client - Langfuse client (passed to async pipeline via options)
      :store-trace? - Store trace in event store (default true, passed via options)
+     :max-ticks - Override re-tick budget for this execution (defaults to *max-tick-iterations*)
      :llm-call-budget - Max LLM calls before failing (opt-in only, NO default)
 
    Returns:
@@ -203,7 +204,7 @@
       :executed-version ...}     ;; Version number if published version was used"
   [context sheet-id inputs & {:keys [timeout-ms use-version force-draft
                                       trace? langfuse-client store-trace?
-                                      llm-call-budget]  ;; Opt-in only - NO default
+                                      max-ticks llm-call-budget]
                                :or {timeout-ms 300000 store-trace? true}}]
   (let [tick-id (random-uuid)
         p (register-completion! tick-id)
@@ -220,6 +221,7 @@
                                                         :store-trace? store-trace?}
                                                  trace? (assoc :trace? true)
                                                  langfuse-client (assoc :langfuse-client langfuse-client)
+                                                 max-ticks (assoc :max-ticks max-ticks)
                                                  llm-call-budget (assoc :llm-call-budget llm-call-budget))}
                               use-version (assoc :use-version use-version)
                               force-draft (assoc :force-draft force-draft))))]
