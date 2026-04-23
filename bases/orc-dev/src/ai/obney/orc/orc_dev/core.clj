@@ -122,7 +122,7 @@
   (let [event-store (:event-store context)]
     (pt/start-periodic-triggers!
      {:append-fn (fn [args] (es/append event-store args))
-      :tenant-ids-fn (fn [] (es/tenant-ids event-store))})))
+      :tenant-ids-fn (fn [] (set (keys (es/tenants event-store))))})))
 
 (defmethod ig/halt-key! ::periodic-tasks [_ triggers]
   (pt/stop-periodic-triggers! triggers))

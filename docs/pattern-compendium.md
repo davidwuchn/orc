@@ -233,12 +233,14 @@ Scheduled background jobs. Defined in `{service}/core/periodic_tasks.clj`.
 **Multi-tenant iteration** — periodic tasks run globally, so iterate over tenants:
 ```clojure
 (defn my-task [context _time]
-  (let [tenant-ids (get-active-tenant-ids context)]
-    (doseq [tid tenant-ids]
+  (let [tenants (es/tenants (:event-store context))]
+    (doseq [tid (keys tenants)]
       (let [ctx (assoc context :tenant-id tid)]
         ;; ... do work scoped to this tenant
         ))))
 ```
+
+`es/tenants` returns `{tenant-id {:tenant/last-event-id uuid-or-nil}}`. Use `(keys ...)` for just the ids, or read per-tenant metadata from the value.
 
 **CAS for idempotency** — when multiple instances run the same task, use CAS to prevent duplicate work:
 ```clojure
