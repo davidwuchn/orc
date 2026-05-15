@@ -824,12 +824,12 @@
                         :context bb-metadata
                         :history (or (build-iteration-history history) "None")
                         :tools (str/join ", " all-tools)}
-                ;; Ensure model is passed in options for DSCloj
-                dscloj-options (cond-> (assoc options :validate? false)
-                                 (:model node) (assoc :model (:model node)))
+                ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
+                ;; Passing :model causes response parsing issues in dscloj
+                dscloj-options (assoc options :validate? false)
 
-                ;; Generate code - use base provider, model is in dscloj-options
-                llm-result (dscloj/predict provider module inputs dscloj-options)
+                ;; Generate code - use effective-provider for correct model override
+                llm-result (dscloj/predict effective-provider module inputs dscloj-options)
                 ;; DSCloj returns {:code "..."} directly, not {:outputs {:code "..."}}
                 ;; Strip markdown code fences if present (some LLMs wrap code in ```clojure...```)
                 code (let [raw (or (:code llm-result) (get-in llm-result [:outputs :code]))]
