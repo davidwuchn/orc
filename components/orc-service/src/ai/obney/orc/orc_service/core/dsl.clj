@@ -219,20 +219,35 @@
      :mcp-tools - Vector of MCP tool names (require :call-tool-fn in context)
      :browser-tools - Vector of agent-browser tool names (e.g., [\"open\" \"snapshot\" \"click\"])
      :max-iterations - Max research iterations (default 10)
+     :rlm - Enable RLM mode with BT primitives (default: false)
 
    Browser tools are shell-based (no session management) and include:
      open, snapshot, click, fill, type, press, scroll, wait,
-     get-text, get-url, get-title, back, forward, screenshot"
-  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations]}]
-  {:node-type :repl-researcher
-   :name name
-   :model model
-   :instruction instruction
-   :reads (vec (or reads []))
-   :writes (vec (or writes []))
-   :mcp-tools (vec (or mcp-tools []))
-   :browser-tools (vec (or browser-tools []))
-   :max-iterations (or max-iterations 10)})
+     get-text, get-url, get-title, back, forward, screenshot
+
+   RLM Mode:
+     When :rlm true, the sandbox gains behavior tree primitives:
+     - (llm \"name\" :instruction \"...\" :writes [:key]) - Execute sub-LLM call
+     - (sequence \"name\" child1 child2 ...) - Execute in order
+     - (parallel \"name\" child1 child2 ...) - Execute concurrently
+     - (map-each \"name\" coll f) - Process collection items
+     - (fallback \"name\" child1 child2 ...) - First non-nil result
+     - (condition \"name\" pred then else) - Branch on predicate
+     - (code \"name\" :writes [:key] :body expr) - Pure computation
+     - (final! {:key value}) - Capture validated output
+     - (get-input :key) - Load full input value
+     - inputs - Preview map (metadata only)"
+  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations rlm]}]
+  (cond-> {:node-type :repl-researcher
+           :name name
+           :model model
+           :instruction instruction
+           :reads (vec (or reads []))
+           :writes (vec (or writes []))
+           :mcp-tools (vec (or mcp-tools []))
+           :browser-tools (vec (or browser-tools []))
+           :max-iterations (or max-iterations 10)}
+    (some? rlm) (assoc :rlm rlm)))
 
 (defn delegate
   "Define a delegate node for subworkflow execution.
@@ -469,7 +484,8 @@
             (:instruction node) (:reads node) (:writes node) (:mcp-tools node)
             :model (:model node)
             :max-iterations (:max-iterations node)
-            :browser-tools (:browser-tools node))))
+            :browser-tools (:browser-tools node)
+            :rlm (:rlm node))))
 
       :delegate
       (do
@@ -689,7 +705,8 @@
                    (seq (:writes node)) (assoc :writes (:writes node))
                    (seq (:mcp-tools node)) (assoc :mcp-tools (:mcp-tools node))
                    (:model node) (assoc :model (:model node))
-                   (:max-iterations node) (assoc :max-iterations (:max-iterations node))))
+                   (:max-iterations node) (assoc :max-iterations (:max-iterations node))
+                   (some? (:rlm node)) (assoc :rlm (:rlm node))))
           ;; Delegate-specific
           (= :delegate (:type node))
           (merge (cond-> {}
@@ -783,7 +800,8 @@
             (:instruction node) (vec (:reads node)) (vec (:writes node))
             (vec (:mcp-tools node))
             :model (:model node)
-            :max-iterations (:max-iterations node))))
+            :max-iterations (:max-iterations node)
+            :rlm (:rlm node))))
 
       :delegate
       (when (:target-sheet-id node)
@@ -1005,7 +1023,8 @@
                 :reads (:reads node)
                 :writes (:writes node)
                 :mcp-tools (:mcp-tools node)
-                :max-iterations (:max-iterations node)})]
+                :max-iterations (:max-iterations node)
+                :rlm (:rlm node)})]
     (if (empty? opts)
       (list (dsl-sym 'repl-researcher) (:name node))
       (apply list (dsl-sym 'repl-researcher) (:name node) opts))))
