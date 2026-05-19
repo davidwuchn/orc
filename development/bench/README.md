@@ -4,7 +4,9 @@ A set of five end-to-end benchmarks that prove ORC RLM (the Repl Researcher + `e
 
 **TL;DR:** Across 5 fundamentally different tasks, the model designs 4 distinct tree patterns + 1 "no tree" decision, all from goal-only instructions, with **zero hallucinations** across 37 spot-checked facts.
 
-See [`reports/07_final_generalization_report.md`](reports/07_final_generalization_report.md) for the complete story.
+📖 **Start here:** [`RESULTS.md`](RESULTS.md) — the headline story
+📂 **Per-task details:** [`tasks/`](tasks/)
+🌳 **Tree comparison:** [`appendix/tree-comparison.md`](appendix/tree-comparison.md)
 
 ---
 
@@ -97,29 +99,24 @@ Located in `development/bench/documents/`:
 
 ## Reports
 
-`development/bench/reports/` contains the per-task analysis:
+- **[`RESULTS.md`](RESULTS.md)** — the headline story, **start here**
+- **[`tasks/`](tasks/)** — per-task deep dive (current best run only):
+  - [`01-document-analysis.md`](tasks/01-document-analysis.md) — extraction on 280K
+  - [`02-risk-analysis.md`](tasks/02-risk-analysis.md) — analytical reasoning on 280K
+  - [`03-contract-comparison.md`](tasks/03-contract-comparison.md) — multi-doc diff
+  - [`04-contract-comparison-validated.md`](tasks/04-contract-comparison-validated.md) — diff with adversarial validation requirement
+  - [`05-legal-issue-detection.md`](tasks/05-legal-issue-detection.md) — small-doc analysis (model chose no tree)
+- **[`appendix/tree-comparison.md`](appendix/tree-comparison.md)** — side-by-side trees
 
-| Report | What it covers |
-|--------|----------------|
-| `00_overview.md` | Suite overview, goals, key findings |
-| `01_document_analysis.md` | Baseline run (synthetic 138K doc, template-driven) |
-| `02_risk_analysis.md` | G02/G07 — risk analysis on real 280K, including parallel speedup |
-| `03_contract_comparison.md` | G03/G08/G09 — multi-doc diff with full hallucination journey + validator extension |
-| `04_document_analysis_real_doc.md` | G06 — doc analysis on real 280K |
-| `05_concurrency_bug_investigation.md` | P01 — the two-bug max-concurrency story with diagnostic logs and the fix |
-| `06_legal_issue_detection.md` | G04 — model intelligently skips `emit-tree!` for small doc |
-| **`07_final_generalization_report.md`** | **The headline story — read this first.** |
-| `99_tree_comparison.md` | Side-by-side tree structures showing real generalization |
+## Performance characteristics
 
-## Performance characteristics (post-P01)
-
-| Task | Duration | Tokens | Speedup vs serial |
-|------|----------|--------|-------------------|
-| `:legal-issue-detection` | 8.8s | 5,706 | n/a (no tree) |
-| `:contract-comparison-validated` | 26.7s | 84,337 | n/a |
-| `:contract-comparison` | 35.6s | 64,336 | 3-6x |
-| `:risk-analysis` | 64.8s | 170,336 | 2.4x |
-| `:document-analysis` | 126.3s | 212,066 | 2.0x |
+| Task | Duration | Tokens |
+|------|----------|--------|
+| `:legal-issue-detection` | 8.8s | 5,706 |
+| `:contract-comparison-validated` | 26.7s | 84,337 |
+| `:contract-comparison` | 35.6s | 64,336 |
+| `:risk-analysis` | 64.8s | 170,336 |
+| `:document-analysis` | 126.3s | 212,066 |
 
 ## Configuration
 
@@ -139,11 +136,3 @@ Located in `development/bench/documents/`:
 - Model output is non-deterministic — exact tree structures may vary between runs (timings stay within 1.5x).
 - Token usage varies more than wall-clock time; budget at least ~$0.10–$0.50 per full suite run depending on model selection.
 
-## Related framework changes
-
-The P01 fix to `:max-concurrency` (see `reports/05_concurrency_bug_investigation.md`) lives in:
-- `components/orc-service/src/ai/obney/orc/orc_service/core/rlm_tree_executor.clj` (DSL → command compilation)
-- `components/orc-service/src/ai/obney/orc/orc_service/core/todo_processors.clj` (in-flight tracking)
-
-The behavioral test that locks in the fix:
-- `components/orc-service/test/ai/obney/orc/orc_service/rlm_tree_executor_test.clj` — `map-each-max-concurrency-runs-iterations-in-parallel`
