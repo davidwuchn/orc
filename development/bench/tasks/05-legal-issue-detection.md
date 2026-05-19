@@ -1,7 +1,7 @@
 # Task 05 — Legal Issue Detection (small doc)
 
 **Run file:** `generalization-results/legal-issue-detection_2026-05-19_132452.edn`
-**Task key:** `:legal-issue-detection`
+**Source:** `development/bench/legal_issue_detection.clj` (ns `legal-issue-detection`, var `task`)
 
 ## What the task is
 

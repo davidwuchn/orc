@@ -30,31 +30,37 @@ Five task types, deliberately chosen to be structurally different:
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
-(Configured for `google/gemini-3-flash-preview` via OpenRouter. To change, edit `config` in `development/bench/rlm_gen_bench.clj`.)
+(Configured for `google/gemini-3-flash-preview` via OpenRouter. To change, edit `config` in `development/bench/runner.clj`.)
 
 ### 2. Run a single task from a Clojure REPL
 
 ```clojure
-(require '[rlm-gen-bench :as bench])
-(bench/start!)
-(bench/run-task! :risk-analysis)        ; or any task keyword
-(bench/stop!)
+(require '[risk-analysis :as t])   ; or any per-task namespace
+(require '[runner])
+(runner/start!)
+(runner/run! t/task)
+(runner/stop!)
 ```
 
 Or from the command line:
 
 ```bash
 clj -M:dev -e '
-(require (quote [rlm-gen-bench :as bench]))
-(bench/start!)
-(bench/run-task! :risk-analysis)
-(bench/stop!)'
+(require (quote [risk-analysis :as t]))
+(require (quote [runner]))
+(runner/start!)
+(runner/run! t/task)
+(runner/stop!)'
 ```
 
-### 3. Run all tasks
+### 3. Run all 5 tasks
 
 ```clojure
-(bench/run-all-tasks!)
+(require '[all :as bench])
+(bench/start!)
+(bench/run-all!)
+(bench/summary!)
+(bench/stop!)
 ```
 
 This runs each task in sequence and saves results to `development/bench/generalization-results/`.
@@ -62,16 +68,21 @@ This runs each task in sequence and saves results to `development/bench/generali
 ### 4. Generate a summary table from saved runs
 
 ```clojure
-(bench/generate-summary-table!)
+(require '[all :as bench])
+(bench/summary!)
 ```
 
 ## Available tasks
 
-```clojure
-(keys rlm-gen-bench/tasks)
-;; => (:document-analysis :risk-analysis :contract-comparison
-;;     :contract-comparison-validated :legal-issue-detection)
-```
+Each lives in its own namespace + file:
+
+| Namespace | File | Task var |
+|-----------|------|----------|
+| `document-analysis`            | `document_analysis.clj`            | `document-analysis/task` |
+| `risk-analysis`                | `risk_analysis.clj`                | `risk-analysis/task` |
+| `contract-comparison`          | `contract_comparison.clj`          | `contract-comparison/task` |
+| `contract-comparison-validated`| `contract_comparison_validated.clj`| `contract-comparison-validated/task` |
+| `legal-issue-detection`        | `legal_issue_detection.clj`        | `legal-issue-detection/task` |
 
 ## Output
 
@@ -120,7 +131,7 @@ Located in `development/bench/documents/`:
 
 ## Configuration
 
-`rlm-gen-bench/config` lives at the top of `development/bench/rlm_gen_bench.clj`:
+`runner/config` lives at the top of `development/bench/runner.clj`:
 
 ```clojure
 (def config

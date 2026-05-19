@@ -81,13 +81,18 @@ The repo includes an end-to-end benchmark suite that demonstrates ORC RLM (`emit
 
 - Entry point: [`development/bench/README.md`](development/bench/README.md)
 - Headline report: [`development/bench/RESULTS.md`](development/bench/RESULTS.md)
-- Runner: `development/bench/rlm_gen_bench.clj`
+- Runner: `development/bench/runner.clj`
+- Aggregator: `development/bench/all.clj`
+- Per-task examples: `development/bench/{document_analysis,risk_analysis,contract_comparison,contract_comparison_validated,legal_issue_detection}.clj`
 
 5 task types tested with goal-only instructions (no hardcoded trees) on real documents. The model designed 4 distinct tree patterns + 1 "no tree" decision, with zero hallucinations across spot-checks. See the headline report for the story.
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
-clj -M:dev -e '(require (quote [rlm-gen-bench :as bench])) (bench/start!) (bench/run-task! :risk-analysis) (bench/stop!)'
+# Run a single task
+clj -M:dev -e '(require (quote [risk-analysis :as t])) (require (quote [runner])) (runner/start!) (runner/run! t/task) (runner/stop!)'
+# Or run the full 5-task suite
+clj -M:dev -e '(require (quote [all :as bench])) (bench/start!) (bench/run-all!) (bench/summary!) (bench/stop!)'
 ```
 
 ## Skills

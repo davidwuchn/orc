@@ -136,7 +136,10 @@ The verification approach was: take a specific quantitative or named claim from 
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
-clj -M:dev -e '(require (quote [rlm-gen-bench :as bench])) (bench/start!) (bench/run-task! :risk-analysis) (bench/stop!)'
+# Run a single task
+clj -M:dev -e '(require (quote [risk-analysis :as t])) (require (quote [runner])) (runner/start!) (runner/run! t/task) (runner/stop!)'
+# Or run the full 5-task suite
+clj -M:dev -e '(require (quote [all :as bench])) (bench/start!) (bench/run-all!) (bench/summary!) (bench/stop!)'
 ```
 
 See [README.md](README.md) for full instructions and task list.

@@ -1,7 +1,7 @@
 # Task 02 — Risk & Obligation Analysis (Analytical reasoning on 280K)
 
 **Run file:** `generalization-results/risk-analysis_2026-05-19_131031.edn`
-**Task key:** `:risk-analysis`
+**Source:** `development/bench/risk_analysis.clj` (ns `risk-analysis`, var `task`)
 
 ## What the task is
 

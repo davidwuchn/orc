@@ -1,7 +1,7 @@
 # Task 04 — Contract Comparison with Adversarial Validation
 
 **Run file:** `generalization-results/contract-comparison-validated_2026-05-19_132151.edn`
-**Task key:** `:contract-comparison-validated`
+**Source:** `development/bench/contract_comparison_validated.clj` (ns `contract-comparison-validated`, var `task`)
 
 ## What the task is
 

@@ -1,1 +1,0 @@
-{:cost-usd 0.0, :task "document_analysis", :duration-ms 120003, :document {:name "victoria-airport-rfp", :chars 138361}, :usage {:prompt-tokens 0, :completion-tokens 0, :total-tokens 0}, :status :timeout, :outputs nil, :stack "naive", :timestamp "2026-05-18T11:47:00.511141", :run-id "naive_03", :model "google/gemini-3-flash-preview"}

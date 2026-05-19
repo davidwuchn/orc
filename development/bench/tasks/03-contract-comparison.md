@@ -1,7 +1,7 @@
 # Task 03 — Contract Comparison (Cross-Document Diff)
 
 **Run file:** `generalization-results/contract-comparison_2026-05-19_131726.edn`
-**Task key:** `:contract-comparison`
+**Source:** `development/bench/contract_comparison.clj` (ns `contract-comparison`, var `task`)
 
 ## What the task is
 

@@ -1,7 +1,7 @@
 # Task 01 — Document Analysis (Extraction on 280K)
 
 **Run file:** `generalization-results/document-analysis_2026-05-19_131441.edn`
-**Task key:** `:document-analysis`
+**Source:** `development/bench/document_analysis.clj` (ns `document-analysis`, var `task`)
 
 ## What the task is
 
