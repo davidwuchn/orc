@@ -16,6 +16,7 @@
   (:require [ai.obney.orc.orc-service.core.runtime :as runtime]
             [ai.obney.orc.orc-service.core.commands] ;; Load command handlers
             [ai.obney.grain.command-processor-v2.interface :as cp]
+            [ai.obney.grain.event-store-v3.interface :as es]
             [ai.obney.grain.time.interface :as time]))
 
 ;; =============================================================================
@@ -24,6 +25,95 @@
 ;; For Phase 2 tree execution, code nodes have inline functions that can't be
 ;; serialized to the event store. We store them here temporarily and pass a
 ;; lookup key as the :fn symbol. The executor resolves the key back to the fn.
+
+;; =============================================================================
+;; Per-Node Usage Aggregation
+;; =============================================================================
+
+(defn- input-lookup
+  "Find a key in an inputs map by simple-name match, regardless of namespace.
+   Returns the value or nil. Used because map-each context keys are namespaced
+   keywords (::map-each-index, ::map-each-parent) and the namespace depends
+   on where they're defined."
+  [inputs simple-name]
+  (let [k (some (fn [k]
+                  (when (and (keyword? k) (= (name k) simple-name))
+                    k))
+                (keys (or inputs {})))]
+    (when k (get inputs k))))
+
+(defn compute-node-path
+  "Compute a structured path identifying a node's position in the execution
+   context. Returns a vector of segments:
+     - For a leaf executed outside any map-each:
+       [{:type :leaf :node-id <uuid>}]
+     - For a leaf executed under a map-each (iteration N of parent M):
+       [{:type :map-each :parent <uuid> :index N} {:type :leaf :node-id <uuid>}]
+
+   Pure function — testable in isolation. Used as the key for per-node usage
+   aggregation so that the same leaf node executed multiple times under
+   different map-each iterations produces distinct entries.
+
+   Args:
+     node-id - the leaf node's id
+     inputs  - the event :inputs map (may carry ::map-each-index / ::map-each-parent
+               keys from the execution context, regardless of source namespace)"
+  [node-id inputs]
+  (let [map-each-index (input-lookup inputs "map-each-index")
+        map-each-parent (input-lookup inputs "map-each-parent")
+        leaf-segment {:type :leaf :node-id node-id}]
+    (if (and (some? map-each-index) (some? map-each-parent))
+      [{:type :map-each :parent map-each-parent :index map-each-index}
+       leaf-segment]
+      [leaf-segment])))
+
+(defn- aggregate-by-node
+  "Given a seq of :sheet/node-execution-completed events, build a per-node
+   usage map keyed by the structured node-path. Each value is a map of
+   {:prompt-tokens N :completion-tokens N :total-tokens N} summed across
+   all completions matching that path.
+
+   When the same leaf node runs N times under a map-each, each iteration
+   gets its own entry (path includes the iteration index). This is critical
+   for benchmarks where map-each is the dominant token consumer.
+
+   Pure function — testable in isolation."
+  [completion-events]
+  (reduce
+    (fn [acc event]
+      (let [node-id (:node-id event)
+            inputs (:inputs event)
+            usage (:usage event)]
+        (if (and node-id usage)
+          (let [path (compute-node-path node-id inputs)]
+            (update acc path
+                    (fn [existing]
+                      (merge-with +
+                                  (or existing {:prompt-tokens 0
+                                                :completion-tokens 0
+                                                :total-tokens 0})
+                                  (select-keys usage
+                                               [:prompt-tokens
+                                                :completion-tokens
+                                                :total-tokens])))))
+          acc)))
+    {}
+    completion-events))
+
+(defn- compute-by-node-from-tick-events
+  "Read the event store for a tick's :sheet/node-execution-completed events
+   and aggregate per-node usage."
+  [event-store tenant-id tick-id]
+  (let [tick-events (into [] (es/read event-store
+                              (cond-> {:tags #{[:tick tick-id]}}
+                                tenant-id (assoc :tenant-id tenant-id))))
+        completions (filter #(= :sheet/node-execution-completed (:event/type %))
+                            tick-events)]
+    (aggregate-by-node completions)))
+
+;; =============================================================================
+;; Ephemeral Function Registry
+;; =============================================================================
 
 (defonce ^:private ephemeral-fn-registry (atom {}))
 
@@ -414,7 +504,48 @@
       (doseq [fn-key ephemeral-fn-keys]
         (clear-ephemeral-fn! fn-key))
 
-      (assoc result :duration-ms duration-ms))
+      ;; Enrich :usage with :by-node breakdown by reading the tick's
+      ;; node-execution-completed events from the event store. Universal
+      ;; per-node token tracking — works for any node type that emitted :usage.
+      (let [event-store (:event-store context)
+            tenant-id (:tenant-id context)
+            by-node (when event-store
+                      (compute-by-node-from-tick-events event-store tenant-id tick-id))
+            ;; Build trajectory by reading ALL events tagged with the tick.
+            ;; Per design: Grain methodology says every event is monitorable,
+            ;; so the bookend captures the full per-event log.
+            tick-events (when event-store
+                          (into [] (es/read event-store
+                                     (cond-> {:tags #{[:tick tick-id]}}
+                                       tenant-id (assoc :tenant-id tenant-id)))))
+            trajectory (vec
+                         (for [e (sort-by :event/timestamp tick-events)]
+                           (let [body (cond-> {:event-type (:event/type e)
+                                               :timestamp (:event/timestamp e)}
+                                        (:node-id e) (assoc :node-id (:node-id e))
+                                        (:status e) (assoc :status (:status e)))]
+                             body)))
+            ;; Emit the bookend event. Grain-flow: dispatch a command which
+            ;; emits the event. Best-effort — if emission fails, we still
+            ;; return the result; the bookend is for downstream learning,
+            ;; not for the caller's promise resolution.
+            _ (try
+                (cp/process-command
+                  (assoc context :command
+                         {:command/id (random-uuid)
+                          :command/timestamp (time/now)
+                          :command/name :sheet/record-rlm-tree-execution-completion
+                          :sheet-id sheet-id
+                          :tick-id tick-id
+                          :trajectory trajectory
+                          :total-usage (or (:usage result) {})}))
+                (catch Exception e
+                  (println "[DEBUG Tree] Bookend emission failed:" (.getMessage e))))
+            result-with-duration (assoc result :duration-ms duration-ms)]
+        (if (seq by-node)
+          (update result-with-duration :usage
+                  (fn [u] (assoc (or u {}) :by-node by-node)))
+          result-with-duration)))
     (catch Exception e
       (println "[DEBUG Tree] EXECUTION ERROR:" (.getMessage e))
       (.printStackTrace e)

@@ -276,6 +276,213 @@
                 "Should have 3 summaries in output")))))))
 
 ;; =============================================================================
+;; O02: Per-node usage propagation (Phase 2 observability)
+;; =============================================================================
+
+(deftest tree-execution-result-includes-per-node-usage
+  (testing "When emit-tree! runs sub-LLMs via map-each, each sub-LLM's usage
+            propagates into the result so callers can see per-node token costs,
+            not just a single aggregate. This is the universal token-tracking
+            piece (extends :sheet/node-execution-completed event with :usage)."
+    (with-provider-context [ctx]
+      (with-redefs [dscloj/predict
+                    (fn [_provider _module _inputs _opts]
+                      ;; Each sub-LLM call returns a deterministic usage map.
+                      ;; If 3 chunks → 3 calls → total should sum to 3 × 75 = 225 tokens.
+                      {:outputs {:chunk-summary "ok"}
+                       :usage {:prompt_tokens 50
+                               :completion_tokens 25
+                               :total_tokens 75}})]
+        (let [tree (rlm-dsl/rlm-dsl->orc-dsl
+                     [:sequence
+                      [:map-each {:from :chunks :as :chunk :into :summaries}
+                       [:llm {:instruction "Summarize"
+                              :reads [:chunk]
+                              :writes [:chunk-summary]}]]
+                      [:final {:keys [:summaries]}]])
+              blackboard {:chunks ["a" "b" "c"]}
+              result (tree-executor/execute-tree tree ctx
+                       {:blackboard blackboard
+                        :timeout-ms 15000})
+              usage (:usage result)
+              by-node (:by-node usage)]
+          (is (= :success (:status result))
+              (str "Phase 2 should succeed. Status: " (:status result)
+                   " error: " (:error result)))
+          (is (map? by-node)
+              ":usage should contain a :by-node map of per-node token costs")
+          ;; Expect at least 3 entries — one per chunk's sub-LLM call.
+          (is (>= (count by-node) 3)
+              (str ":by-node should have at least 3 entries (one per chunk), got: "
+                   (count by-node) " — keys: " (keys by-node)))
+          ;; Each entry should carry a usage map shape.
+          (doseq [[k v] by-node]
+            (is (some? (or (:total-tokens v) (:total_tokens v)))
+                (str "by-node entry for " k " should have :total-tokens, got: " v)))
+          ;; Sum of per-node tokens should approximately equal the aggregate.
+          (let [sum-by-node (apply + (keep #(or (:total-tokens %) (:total_tokens %))
+                                            (vals by-node)))
+                aggregate-total (or (:total-tokens usage) (:total_tokens usage) 0)]
+            (is (and (pos? sum-by-node) (pos? aggregate-total))
+                "Both per-node sum and aggregate total should be > 0")
+            (is (<= (Math/abs (- sum-by-node aggregate-total))
+                    (max 5 (* 0.01 aggregate-total)))
+                (str ":by-node totals (" sum-by-node ") should approximately equal "
+                     ":total-tokens (" aggregate-total ")"))))))))
+
+(deftest rlm-tree-node-completed-events-fire-with-paths
+  (testing "Each sub-LLM completion in a Phase 2 tree also emits an
+            :sheet/rlm-tree-node-completed event with the structured node-path.
+            This is the RLM-specific learning-signal event (separate from the
+            generic node-execution-completed) that future judge/fingerprint
+            work will consume."
+    (with-provider-context [ctx]
+      (with-redefs [dscloj/predict
+                    (fn [_provider _module _inputs _opts]
+                      {:outputs {:chunk-summary "ok"}
+                       :usage {:prompt_tokens 40 :completion_tokens 20 :total_tokens 60}})]
+        (let [tree (rlm-dsl/rlm-dsl->orc-dsl
+                     [:sequence
+                      [:map-each {:from :chunks :as :chunk :into :summaries}
+                       [:llm {:instruction "Summarize"
+                              :reads [:chunk]
+                              :writes [:chunk-summary]}]]
+                      [:final {:keys [:summaries]}]])
+              blackboard {:chunks ["x" "y" "z"]}
+              result (tree-executor/execute-tree tree ctx
+                       {:blackboard blackboard :timeout-ms 15000})
+              ;; Read events emitted during this tick from the event store
+              tick-id (:trace-id result)
+              all-events (when tick-id
+                           (into [] (es/read (:event-store ctx)
+                                      {:tags #{[:tick tick-id]}
+                                       :tenant-id (:tenant-id ctx)})))
+              rlm-events (filter #(= :sheet/rlm-tree-node-completed (:event/type %))
+                                 all-events)]
+          (is (= :success (:status result)))
+          (is (>= (count rlm-events) 3)
+              (str "Expected at least 3 rlm-tree-node-completed events (one per "
+                   "map-each iteration), got: " (count rlm-events)))
+          ;; Each event should carry a structured node-path
+          (doseq [e rlm-events]
+            (is (vector? (:node-path e))
+                "Event :node-path should be a vector of path segments")
+            (is (some #(= :leaf (:type %)) (:node-path e))
+                "Path should include a :leaf segment")
+            (is (some #(= :map-each (:type %)) (:node-path e))
+                "Path should include a :map-each segment (since this leaf runs under map-each)")
+            (is (some? (:usage e))
+                "Event should carry :usage"))
+          ;; The 3 events should have distinct map-each indices (0, 1, 2)
+          (let [indices (set (map (fn [e]
+                                    (->> (:node-path e)
+                                         (filter #(= :map-each (:type %)))
+                                         first
+                                         :index))
+                                  rlm-events))]
+            (is (= #{0 1 2} indices)
+                (str "Expected indices #{0 1 2}, got: " indices))))))))
+
+;; =============================================================================
+;; O03: Tree-execution bookend + input profile (Phase 2 observability slice 2)
+;; =============================================================================
+
+(deftest rlm-tree-node-completed-events-carry-input-profile
+  (testing "Each :sheet/rlm-tree-node-completed event includes :input-profile
+            describing per-read-key characteristics (length, word-count,
+            line-count). This is the per-node signal future judges/pattern
+            matchers will correlate to outcomes."
+    (with-provider-context [ctx]
+      (with-redefs [dscloj/predict
+                    (fn [_provider _module _inputs _opts]
+                      {:outputs {:chunk-summary "ok"}
+                       :usage {:prompt_tokens 30 :completion_tokens 15 :total_tokens 45}})]
+        (let [tree (rlm-dsl/rlm-dsl->orc-dsl
+                     [:sequence
+                      [:map-each {:from :chunks :as :chunk :into :summaries}
+                       [:llm {:instruction "Summarize"
+                              :reads [:chunk]
+                              :writes [:chunk-summary]}]]
+                      [:final {:keys [:summaries]}]])
+              ;; Use chunks of distinct lengths so we can verify :length tracking
+              blackboard {:chunks ["aaa" "longer chunk content" (apply str (repeat 50 "x"))]}
+              result (tree-executor/execute-tree tree ctx
+                       {:blackboard blackboard :timeout-ms 15000})
+              tick-id (:trace-id result)
+              all-events (when tick-id
+                           (into [] (es/read (:event-store ctx)
+                                      {:tags #{[:tick tick-id]}
+                                       :tenant-id (:tenant-id ctx)})))
+              rlm-events (filter #(= :sheet/rlm-tree-node-completed (:event/type %))
+                                 all-events)]
+          (is (= :success (:status result)))
+          (is (>= (count rlm-events) 3)
+              (str "Expected 3 RLM per-node events, got: " (count rlm-events)))
+          (doseq [e rlm-events]
+            (is (map? (:input-profile e))
+                ":input-profile should be a map")
+            (let [chunk-profile (get-in e [:input-profile :chunk])]
+              (is (map? chunk-profile)
+                  ":input-profile should have an entry for the :chunk read key")
+              (is (some? (:length chunk-profile))
+                  ":input-profile entry should have :length")))
+          ;; The lengths should reflect the actual chunk sizes (3, 20, 50).
+          (let [lengths (set (keep (fn [e] (get-in e [:input-profile :chunk :length]))
+                                   rlm-events))]
+            (is (= #{3 20 50} lengths)
+                (str "Expected chunk lengths #{3 20 50}, got: " lengths))))))))
+
+(deftest rlm-tree-execution-completed-bookend-event-fires
+  (testing "When a Phase 2 tree finishes, a single
+            :sheet/rlm-tree-execution-completed bookend event is emitted with
+            :trajectory (full per-event log), :total-usage, and a placeholder
+            :task-fingerprint (nil for now)."
+    (with-provider-context [ctx]
+      (with-redefs [dscloj/predict
+                    (fn [_provider _module _inputs _opts]
+                      {:outputs {:chunk-summary "ok"}
+                       :usage {:prompt_tokens 25 :completion_tokens 10 :total_tokens 35}})]
+        (let [tree (rlm-dsl/rlm-dsl->orc-dsl
+                     [:sequence
+                      [:map-each {:from :chunks :as :chunk :into :summaries}
+                       [:llm {:instruction "Summarize"
+                              :reads [:chunk]
+                              :writes [:chunk-summary]}]]
+                      [:final {:keys [:summaries]}]])
+              blackboard {:chunks ["c1" "c2"]}
+              result (tree-executor/execute-tree tree ctx
+                       {:blackboard blackboard :timeout-ms 15000})
+              tick-id (:trace-id result)
+              all-events (when tick-id
+                           (into [] (es/read (:event-store ctx)
+                                      {:tags #{[:tick tick-id]}
+                                       :tenant-id (:tenant-id ctx)})))
+              bookend-events (filter #(= :sheet/rlm-tree-execution-completed (:event/type %))
+                                     all-events)]
+          (is (= :success (:status result)))
+          (is (= 1 (count bookend-events))
+              (str "Expected exactly 1 bookend event, got: " (count bookend-events)))
+          (let [bookend (first bookend-events)]
+            (is (vector? (:trajectory bookend))
+                ":trajectory should be a vector")
+            (is (pos? (count (:trajectory bookend)))
+                ":trajectory should be non-empty")
+            ;; Per Q2 decision: trajectory captures ALL event types for the tick.
+            ;; Should include at minimum node-execution-started and node-execution-completed
+            ;; for the leaf-llm calls under map-each.
+            (let [event-types (set (map :event-type (:trajectory bookend)))]
+              (is (contains? event-types :sheet/node-execution-started)
+                  "Trajectory should include :sheet/node-execution-started entries")
+              (is (contains? event-types :sheet/node-execution-completed)
+                  "Trajectory should include :sheet/node-execution-completed entries"))
+            (is (contains? bookend :task-fingerprint)
+                "Bookend should have :task-fingerprint key (placeholder, may be nil)")
+            (is (some? (:total-usage bookend))
+                "Bookend should carry :total-usage")
+            (is (some? (:timestamp bookend))
+                "Bookend should carry :timestamp")))))))
+
+;; =============================================================================
 ;; P01: max-concurrency parallel execution in map-each
 ;; =============================================================================
 

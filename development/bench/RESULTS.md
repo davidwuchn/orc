@@ -144,6 +144,32 @@ clj -M:dev -e '(require (quote [all :as bench])) (bench/start!) (bench/run-all!)
 
 See [README.md](README.md) for full instructions and task list.
 
+## Observability Layer (O02 + O03)
+
+After the generalization story landed, a per-node observability layer was added
+so future judges and pattern-matchers can see what each tree actually did. The
+saved EDN now carries `:by-node` under `:usage` with structured paths (e.g.
+`[{:type :map-each :parent <uuid> :index 7} {:type :leaf :node-id <uuid>}]`).
+Each Phase 2 leaf emits a `:sheet/rlm-tree-node-completed` event carrying its
+usage, structured path, and `:input-profile` (length/word-count/line-count for
+each `:reads` key). A bookend `:sheet/rlm-tree-execution-completed` event closes
+each tree with the full trajectory and a placeholder `:task-fingerprint`.
+
+### First headline finding (risk-analysis canonical run)
+
+| Phase | Share of tokens |
+|---|---:|
+| Per-chunk analysis (24 map-each iterations) | **86.4%** |
+| Final synthesis | 13.6% |
+
+Per-chunk analysis dominates. The model spends most of its budget reasoning
+over each section, not on the consolidation step. This is *actionable signal*
+for future judges: optimization wins are most likely to come from reducing
+per-chunk waste (smaller chunks, terser prompts) rather than synthesis tweaks.
+
+See [`tasks/02-risk-analysis.md`](tasks/02-risk-analysis.md) for the full Token
+Breakdown section with min/max per-chunk distribution.
+
 ## Where to Read More
 
 - **Per-task deep dives**: [`tasks/`](tasks/) — clean, current-state-only analysis for each of the 5 tasks

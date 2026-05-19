@@ -1484,12 +1484,16 @@
                     ;; Merge Phase 1 + Phase 2 results
                     (let [p1-usage @total-usage
                           p2-usage (:usage phase2-result)
-                          combined-usage {:prompt-tokens (+ (:prompt-tokens p1-usage 0)
-                                                            (:prompt-tokens p2-usage 0))
-                                          :completion-tokens (+ (:completion-tokens p1-usage 0)
-                                                                (:completion-tokens p2-usage 0))
-                                          :total-tokens (+ (:total-tokens p1-usage 0)
-                                                           (:total-tokens p2-usage 0))}]
+                          ;; Preserve :by-node from Phase 2 (the per-node breakdown
+                          ;; of sub-LLM calls inside the generated tree).
+                          p2-by-node (:by-node p2-usage)
+                          combined-usage (cond-> {:prompt-tokens (+ (:prompt-tokens p1-usage 0)
+                                                                    (:prompt-tokens p2-usage 0))
+                                                  :completion-tokens (+ (:completion-tokens p1-usage 0)
+                                                                        (:completion-tokens p2-usage 0))
+                                                  :total-tokens (+ (:total-tokens p1-usage 0)
+                                                                   (:total-tokens p2-usage 0))}
+                                           (seq p2-by-node) (assoc :by-node p2-by-node))]
                       {:status (:status phase2-result)
                        :outputs (:outputs phase2-result)
                        :generated-tree-raw generated-tree-raw

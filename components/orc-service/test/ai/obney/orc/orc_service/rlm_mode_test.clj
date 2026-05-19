@@ -1011,8 +1011,19 @@
       (is (= 10000 (:size preview))
           "Preview should include original size"))))
 
-(deftest rlm-sub-llm-inputs-are-previews-test
-  (testing "When (llm ...) is called, inputs passed are previews"
+;; ARCHITECTURE NOTE (canonical doc at rlm_sandbox.clj:125-127):
+;; Sub-LLM calls receive FULL VALUES from :reads. The generated code is
+;; responsible for managing chunk sizes. Previews are only used for the
+;; CODE-GENERATING parent LLM to understand variable shapes in its
+;; :inputs-info — actual data processing by sub-LLMs uses full values
+;; because the sub-LLM cannot process content it cannot see.
+;;
+;; If you find yourself wanting to assert "sub-LLM sees preview" — that's
+;; the wrong contract. Update the parent LLM's :inputs-info instead.
+
+(deftest rlm-sub-llm-inputs-are-full-values-test
+  (testing "When (llm ...) is called, sub-LLM receives FULL values from :reads
+            (not previews) so it can actually process the content"
     (with-rlm-test-context [ctx]
       (let [captured-sub-llm-inputs (atom nil)
             iteration (atom 0)]
@@ -1051,14 +1062,16 @@
                                          :value large-doc})
                 {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:document large-doc})
                 result (wait-for-completion promise)]
-            ;; Check that sub-LLM received preview, not full data
+            ;; Check that sub-LLM received the FULL document, not a preview.
+            ;; The generated code is responsible for chunk sizing; the sub-LLM
+            ;; must see actual content to process it.
             (when @captured-sub-llm-inputs
               (let [doc-input (:document @captured-sub-llm-inputs)]
-                ;; If it's a preview map, it should have :type and :preview or :size
-                ;; If it's the full string, this test fails
-                (is (or (map? doc-input)  ;; It's a preview map
-                        (< (count (str doc-input)) 1000))  ;; Or it's truncated
-                    "Sub-LLM should receive preview, not full 60K+ char document")))))))))
+                ;; Should be the full string value, not a preview map and not truncated.
+                (is (string? doc-input)
+                    "Sub-LLM should receive the full document string, not a preview map")
+                (is (= (count large-doc) (count doc-input))
+                    "Sub-LLM should receive the document at its original length (no truncation)")))))))))
 
 (deftest rlm-sub-llm-token-count-bounded-test
   (testing "Token count for sub-LLM prompt stays bounded regardless of input size"
@@ -1206,8 +1219,12 @@
             (is (every? #(contains? % :current-chunk) @captured-inputs)
                 "Each sub-LLM should receive :current-chunk injection")))))))
 
-(deftest rlm-map-each-as-injects-preview-test
-  (testing "map-each injects items as previews, not full values"
+(deftest rlm-map-each-as-injects-full-value-test
+  (testing "map-each injects items as FULL VALUES (not previews) so the
+            inner fn body can pass them to sub-LLM :reads and the sub-LLM
+            can actually process the content.
+            See architecture note above rlm-sub-llm-inputs-are-full-values-test
+            and canonical doc at rlm_sandbox.clj:125-127."
     (let [captured-inputs (atom [])]
       (with-redefs [dscloj/predict
                     (fn [provider module inputs opts]
@@ -1226,15 +1243,15 @@
            ctx
            "(map-each \"process\" :chunks :as :item
               (fn [] (llm \"analyze\" :instruction \"Summarize\" :reads [:item] :writes [:summary])))")
-          ;; The injected :item should be a preview map, not the full 10K string
+          ;; The injected :item should be the FULL 10K string so the sub-LLM
+          ;; can process it. A preview map here would mean the sub-LLM only
+          ;; sees metadata and cannot do its job.
           (let [input (first @captured-inputs)
                 item-value (:item input)]
-            (is (map? item-value)
-                "Injected item should be a preview map")
-            (is (= :string (:type item-value))
-                "Preview should indicate string type")
-            (is (= 10000 (:size item-value))
-                "Preview should show original size")))))))
+            (is (string? item-value)
+                "Injected item should be the full string value, not a preview map")
+            (is (= 10000 (count item-value))
+                "Injected item should be the full 10K characters, not truncated")))))))
 
 (deftest rlm-map-each-collects-results-test
   (testing "map-each collects sub-LLM results into a vector"

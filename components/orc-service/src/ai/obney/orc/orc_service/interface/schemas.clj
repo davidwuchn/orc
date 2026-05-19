@@ -473,7 +473,14 @@
     [:status [:enum :success :failure :tree-generated]]
     [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
-    [:inputs {:optional true} [:map-of :keyword :any]]]
+    [:inputs {:optional true} [:map-of :keyword :any]]
+    ;; Optional per-node token usage from LLM calls. Universal — applies to
+    ;; any leaf node that calls an LLM, not just RLM Phase 2 contexts.
+    [:usage {:optional true}
+     [:map
+      [:prompt-tokens {:optional true} :int]
+      [:completion-tokens {:optional true} :int]
+      [:total-tokens {:optional true} :int]]]]
 
    :sheet/fail-node-execution
    [:map
@@ -482,6 +489,39 @@
     [:node-id :uuid]
     [:error :string]
     [:duration-ms {:optional true} :int]]
+
+   ;; Records an RLM-tree node completion. Emitted by execute-leaf-node
+   ;; alongside the generic complete-node-execution when an LLM call has
+   ;; usage. Produces a :sheet/rlm-tree-node-completed event with a
+   ;; precomputed node-path. Future fields (scores, feedback) get added
+   ;; by downstream judge work.
+   :sheet/record-rlm-tree-node-completion
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:node-path [:vector :map]]
+    [:usage
+     [:map
+      [:prompt-tokens {:optional true} :int]
+      [:completion-tokens {:optional true} :int]
+      [:total-tokens {:optional true} :int]]]
+    ;; Optional :input-profile keyed by node :reads — describes input
+    ;; characteristics so future judges/pattern-matchers can correlate
+    ;; outcomes to input shape.
+    [:input-profile {:optional true} [:map-of :keyword :map]]]
+
+   ;; Bookend event for an RLM Phase 2 tree-execution. Emitted once when
+   ;; the tree-tick finishes (success or failure). Carries the full
+   ;; trajectory of events, total token usage, and a placeholder for
+   ;; task-fingerprint (filled by later issue 012 work).
+   :sheet/record-rlm-tree-execution-completion
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    [:trajectory [:vector :map]]
+    [:total-usage [:map]]
+    [:task-fingerprint {:optional true} [:maybe :string]]]
 
    ;; -------------------------------------------------------------------------
    ;; Versioning Commands
@@ -839,7 +879,56 @@
     [:status [:enum :success :failure :running :tree-generated]]
     [:writes {:optional true} [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
-    [:inputs {:optional true} [:map-of :keyword :any]]]
+    [:inputs {:optional true} [:map-of :keyword :any]]
+    ;; Optional per-node token usage when the node was an LLM call.
+    [:usage {:optional true}
+     [:map
+      [:prompt-tokens {:optional true} :int]
+      [:completion-tokens {:optional true} :int]
+      [:total-tokens {:optional true} :int]]]]
+
+   ;; RLM-specific learning-signal event. Fires alongside the generic
+   ;; node-execution-completed when an LLM call completes inside an RLM
+   ;; Phase 2 tree. Carries a precomputed :node-path identifying the
+   ;; node's position in map-each iterations, plus :usage. Future
+   ;; iterations of this PRD's work (O03+) will extend this event with
+   ;; :input-profile, and downstream judge work will add :scores and
+   ;; :feedback. Kept distinct from the generic event so the RLM-specific
+   ;; fields don't pollute universal node lifecycle.
+   :sheet/rlm-tree-node-completed
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    ;; Structured path: [{:type :map-each :parent uuid :index N} ... {:type :leaf :node-id uuid}]
+    [:node-path [:vector :map]]
+    [:usage
+     [:map
+      [:prompt-tokens {:optional true} :int]
+      [:completion-tokens {:optional true} :int]
+      [:total-tokens {:optional true} :int]]]
+    ;; :input-profile keyed by :reads keys. Each value is
+    ;; {:length N :word-count N :line-count N}. Captures input shape
+    ;; so future judges can correlate quality outcomes to inputs.
+    [:input-profile {:optional true} [:map-of :keyword :map]]
+    ;; Future-expansion placeholders documented for forward compatibility
+    [:scores {:optional true} :map]
+    [:feedback {:optional true} :string]]
+
+   ;; Bookend event emitted when a Phase 2 RLM tree-execution finishes.
+   :sheet/rlm-tree-execution-completed
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    ;; Full event log for the tick — vec of {:event-type :timestamp
+    ;; :node-id (optional) ...}. Consistent with Grain "all events
+    ;; flow through the log" methodology.
+    [:trajectory [:vector :map]]
+    ;; Aggregate usage at completion time.
+    [:total-usage [:map]]
+    ;; Placeholder for task-fingerprint (filled by issue 012).
+    [:task-fingerprint {:optional true} [:maybe :string]]
+    [:timestamp [:fn inst?]]]
 
    :sheet/tree-tick-completed
    [:map

@@ -236,6 +236,49 @@
   [inputs]
   (select-keys inputs [::map-each-index ::map-each-parent]))
 
+;; =============================================================================
+;; Input Profile Computation (deep module — pure function, testable in isolation)
+;; =============================================================================
+
+(defn- profile-value
+  "Profile a single value's shape. Returns a map of size/density indicators.
+   Pure function — no side effects, deterministic."
+  [v]
+  (cond
+    (string? v)
+    {:type :string
+     :length (count v)
+     :word-count (count (clojure.string/split v #"\s+"))
+     :line-count (count (clojure.string/split-lines v))}
+
+    (sequential? v)
+    {:type :vector
+     :length (count v)}
+
+    (map? v)
+    {:type :map
+     :length (count v)}
+
+    :else
+    {:type :other
+     :length (count (str v))}))
+
+(defn compute-input-profile
+  "Given a node's :reads list and a blackboard, build an input-profile map
+   keyed by read key. Each value is a map of size/density indicators
+   (see profile-value).
+
+   Pure function — testable in isolation."
+  [reads blackboard]
+  (reduce
+    (fn [acc k]
+      (let [v (get-in blackboard [k :value])]
+        (if (nil? v)
+          acc
+          (assoc acc k (profile-value v)))))
+    {}
+    (or reads [])))
+
 (defn execute-leaf-node
   "Execute a leaf node when node-execution-started is emitted.
    Supports multiple executor types:
@@ -339,7 +382,32 @@
                                 :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
-                         (seq exec-context) (assoc :inputs exec-context)))))
+                         (seq exec-context) (assoc :inputs exec-context)
+                         (seq usage) (assoc :usage usage))))
+              ;; ALSO emit the RLM-specific learning-signal event when an LLM
+              ;; call has usage. Carries a precomputed structured node-path
+              ;; and an :input-profile derived from the node's :reads so
+              ;; downstream judges/aggregators don't need to recompute.
+              (when (and is-llm-call? (seq usage))
+                (let [node-path (cond-> [{:type :leaf :node-id node-id}]
+                                  (::map-each-parent exec-context)
+                                  (#(into [{:type :map-each
+                                            :parent (::map-each-parent exec-context)
+                                            :index (::map-each-index exec-context)}]
+                                          %)))
+                      input-profile (compute-input-profile (:reads node) blackboard)]
+                  (cp/process-command
+                    (assoc context :command
+                           (cond-> {:command/id (random-uuid)
+                                    :command/timestamp (time/now)
+                                    :command/name :sheet/record-rlm-tree-node-completion
+                                    :sheet-id sheet-id
+                                    :tick-id tick-id
+                                    :node-id node-id
+                                    :node-path node-path
+                                    :usage usage}
+                             (seq input-profile)
+                             (assoc :input-profile input-profile)))))))
             (catch Exception e
               ;; Use process-command to emit failure event
               (cp/process-command
@@ -420,7 +488,10 @@
                                 :writes (normalize-output-keys (or effective-outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
-                         (seq exec-context) (assoc :inputs exec-context)))))
+                         (seq exec-context) (assoc :inputs exec-context)
+                         ;; Propagate :usage (including :by-node from Phase 2)
+                         ;; so per-node detail bubbles up to the parent tick.
+                         (seq usage) (assoc :usage usage)))))
             (catch Exception e
               (cp/process-command
                 (assoc context :command
@@ -1472,6 +1543,72 @@
 ;; Execution Completion Delivery
 ;; =============================================================================
 
+(defn- aggregate-tick-by-node
+  "Read all :sheet/node-execution-completed events for the given tick-id
+   from the event store, and aggregate per-node usage with a structured
+   node-path key.
+
+   When a node's :usage already contains a :by-node breakdown (i.e. it
+   was a parent node like repl-researcher that aggregated child-tick
+   per-node usage), we PASS THROUGH those structured entries instead of
+   reducing to a single entry — this preserves the full path detail from
+   Phase 2 child ticks back into the parent tick's saved result."
+  [event-store tenant-id tick-id]
+  (when event-store
+    (let [tick-events (into [] (es/read event-store
+                                (cond-> {:tags #{[:tick tick-id]}}
+                                  tenant-id (assoc :tenant-id tenant-id))))
+          completions (filter #(= :sheet/node-execution-completed (:event/type %))
+                              tick-events)]
+      (reduce
+        (fn [acc event]
+          (let [node-id (:node-id event)
+                inputs (:inputs event)
+                usage (:usage event)
+                child-by-node (:by-node usage)]
+            (cond
+              ;; Pass-through: this node already has a per-child breakdown
+              ;; (it was a parent that aggregated Phase 2 sub-LLM calls).
+              ;; Inherit those entries directly so the structured paths
+              ;; are preserved.
+              (and node-id (seq child-by-node))
+              (merge-with (fn [a b]
+                            (merge-with + a b))
+                          acc child-by-node)
+
+              ;; Simple case: this node had its own usage but no sub-breakdown.
+              ;; Build a path from map-each context (if present) and add as
+              ;; a single entry.
+              (and node-id usage)
+              (let [map-each-parent (some (fn [k]
+                                            (when (and (keyword? k)
+                                                       (= (name k) "map-each-parent"))
+                                              (get inputs k)))
+                                          (keys (or inputs {})))
+                    map-each-index (some (fn [k]
+                                           (when (and (keyword? k)
+                                                      (= (name k) "map-each-index"))
+                                             (get inputs k)))
+                                         (keys (or inputs {})))
+                    path (if (and (some? map-each-parent) (some? map-each-index))
+                           [{:type :map-each :parent map-each-parent :index map-each-index}
+                            {:type :leaf :node-id node-id}]
+                           [{:type :leaf :node-id node-id}])]
+                (update acc path
+                        (fn [existing]
+                          (merge-with +
+                                      (or existing {:prompt-tokens 0
+                                                    :completion-tokens 0
+                                                    :total-tokens 0})
+                                      (select-keys usage
+                                                   [:prompt-tokens
+                                                    :completion-tokens
+                                                    :total-tokens])))))
+
+              :else acc)))
+        {}
+        completions))))
+
 (defn deliver-execution-result
   "When a tick completes, deliver the result to any waiting promise.
    This bridges the async todo processor pipeline back to sync callers
@@ -1481,7 +1618,7 @@
    re-tick signals, not final results. The final delivery happens when
    the tree completes with :success/:failure, or when max iterations
    is hit (complete-tree-tick converts :running to :failure)."
-  [{:keys [event]}]
+  [{:keys [event event-store tenant-id]}]
   (let [tick-id (:tick-id event)
         root-status (:root-status event)
         outputs (:outputs event)
@@ -1491,7 +1628,10 @@
     ;; when max iterations are exhausted.
     (when (not= root-status :running)
       ;; Get aggregated usage before clearing
-      (let [usage (get-tick-usage tick-id)]
+      (let [usage (get-tick-usage tick-id)
+            by-node (aggregate-tick-by-node event-store tenant-id tick-id)
+            usage-with-breakdown (cond-> usage
+                                   (seq by-node) (assoc :by-node by-node))]
         ;; Clean up budget and usage tracking for this tick
         (clear-llm-count! tick-id)
         (clear-tick-usage! tick-id)
@@ -1507,7 +1647,7 @@
                    :trace-id tick-id
                    :error error}
             ;; Include usage if any LLM calls were made
-            (pos? (:total-tokens usage 0)) (assoc :usage usage)))))
+            (pos? (:total-tokens usage 0)) (assoc :usage usage-with-breakdown)))))
     ;; No events to emit
     nil))
 

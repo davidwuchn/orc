@@ -144,3 +144,54 @@ Perform analytical risk and obligation analysis on a large RFP from the bidder's
 ### Notable analytical inventions
 
 The model invented the **"Difficulty vs Severity"** framework as a risk-matrix methodology — not present in the source documents or task instructions. It also coined the **"27% Trap"** as strategic framing for the high-interest penalty clause. Both are accurate distillations grounded in actual source text.
+
+## Token Breakdown (O03 — observability slice 2)
+
+After landing the Phase 2 observability layer (O02 + O03), the saved EDN now
+contains a `:by-node` map under `:usage` keyed by structured node-path. Each
+entry shows that node's per-call token cost.
+
+**Run sampled:** `generalization-results/risk-analysis_2026-05-19_182902.edn` (162,614 total tokens)
+
+### Distribution
+
+| Phase | Entries | Tokens | Share |
+|---|---:|---:|---:|
+| Per-chunk analysis (map-each iterations) | 24 | 138,112 | **86.4%** |
+| Final synthesis | 1 | 21,703 | 13.6% |
+
+### Per-chunk statistics
+
+| Metric | Value |
+|---|---:|
+| Avg tokens per chunk | 5,754 |
+| Min tokens (smallest chunk's analysis) | 3,026 |
+| Max tokens (largest chunk's analysis) | 12,405 |
+| Spread (max ÷ min) | 4.1× |
+
+### Headline observation
+
+**Per-chunk analysis dominates token cost (86.4%)** — the model spends most of
+its budget reasoning over each section, not on the final synthesis. This
+matches the analytical pattern: the heavy lifting is per-section risk
+assessment; synthesis is a relatively cheap consolidation step.
+
+The 4.1× spread between min and max per-chunk tokens indicates the model
+spends real effort proportional to section complexity — denser RFP sections
+(operational requirements, indemnification clauses) generate more analysis
+than thinner sections (header pages, table of contents).
+
+### How to inspect for any run
+
+```clojure
+(require '[clojure.edn :as edn])
+(def r (edn/read-string (slurp "<path-to-result.edn>")))
+(get-in r [:usage :by-node])
+;; => {[{:type :map-each :parent <uuid> :index 0} {:type :leaf :node-id <uuid>}]
+;;     {:prompt-tokens N :completion-tokens N :total-tokens N}
+;;     ...}
+```
+
+The same data is available in the event store as `:sheet/rlm-tree-node-completed`
+events, each tagged with the tick-id. A bookend `:sheet/rlm-tree-execution-completed`
+event closes the trace with the full trajectory.

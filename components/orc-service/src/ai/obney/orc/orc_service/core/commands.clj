@@ -1008,8 +1008,10 @@
   {:authorized? authenticated?}
   "Complete a node execution (internal command from todo processor).
    For tick-scoped executions, also emits execution-value-written events
-   atomically with the completion event to avoid race conditions."
-  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs]} :command
+   atomically with the completion event to avoid race conditions.
+
+   Optional :usage carries per-node token counts from LLM calls."
+  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs usage]} :command
     :as ctx}]
   (let [completion-event (->event
                            {:type :sheet/node-execution-completed
@@ -1023,7 +1025,8 @@
                                     (seq writes) (assoc :writes writes)
                                     duration-ms (assoc :duration-ms duration-ms)
                                     error (assoc :error error)
-                                    (seq inputs) (assoc :inputs inputs))})
+                                    (seq inputs) (assoc :inputs inputs)
+                                    (seq usage) (assoc :usage usage))})
         ;; For tick-scoped executions with successful writes, emit bb writes atomically
         ;; Also handle :tree-generated status (RLM two-phase execution)
         tick-scoped? (some? (rm/get-tick-execution-context ctx tick-id))
@@ -1042,6 +1045,50 @@
      (if bb-write-events
        (into bb-write-events [completion-event])
        [completion-event])}))
+
+(defcommand :sheet record-rlm-tree-node-completion
+  {:authorized? authenticated?}
+  "Emit a :sheet/rlm-tree-node-completed event with the precomputed
+   structured node-path, the node's :usage, and an optional :input-profile
+   capturing input characteristics for each :reads key. Fires alongside
+   the generic complete-node-execution event for LLM leaf calls.
+   Reserved for the RLM learning loop — future fields (scores, feedback)
+   will be added by downstream judges."
+  [{{:keys [sheet-id tick-id node-id node-path usage input-profile]} :command
+    :as _ctx}]
+  {:command-result/events
+   [(->event
+      {:type :sheet/rlm-tree-node-completed
+       :tags #{[:sheet sheet-id]
+               [:node node-id]
+               [:tick tick-id]}
+       :body (cond-> {:sheet-id sheet-id
+                      :tick-id tick-id
+                      :node-id node-id
+                      :node-path node-path
+                      :usage usage}
+               (seq input-profile) (assoc :input-profile input-profile))})]})
+
+(defcommand :sheet record-rlm-tree-execution-completion
+  {:authorized? authenticated?}
+  "Emit a :sheet/rlm-tree-execution-completed bookend event when a Phase 2
+   RLM tree-execution finishes. Carries the full trajectory of events for
+   the tick, total usage, and a placeholder for task-fingerprint."
+  [{{:keys [sheet-id tick-id trajectory total-usage task-fingerprint]} :command
+    :as _ctx}]
+  {:command-result/events
+   [(->event
+      {:type :sheet/rlm-tree-execution-completed
+       :tags #{[:sheet sheet-id]
+               [:tick tick-id]}
+       :body {:sheet-id sheet-id
+              :tick-id tick-id
+              :trajectory trajectory
+              :total-usage total-usage
+              :timestamp (java.time.Instant/now)
+              ;; Always include :task-fingerprint as a stable contract.
+              ;; nil placeholder for now — issue 012 will populate it.
+              :task-fingerprint task-fingerprint}})]})
 
 (defcommand :sheet fail-node-execution
   {:authorized? authenticated?}
