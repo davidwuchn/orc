@@ -80,8 +80,8 @@ components/{service}/
 The repo includes an end-to-end benchmark suite that demonstrates ORC RLM (`emit-tree!`) genuinely adapts behavior tree design to task type:
 
 - Entry point: [`development/bench/README.md`](development/bench/README.md)
-- Headline report: [`development/bench/reports/07_final_generalization_report.md`](development/bench/reports/07_final_generalization_report.md)
-- Runner: `development/src/rlm_gen_bench.clj`
+- Headline report: [`development/bench/RESULTS.md`](development/bench/RESULTS.md)
+- Runner: `development/bench/rlm_gen_bench.clj`
 
 5 task types tested with goal-only instructions (no hardcoded trees) on real documents. The model designed 4 distinct tree patterns + 1 "no tree" decision, with zero hallucinations across spot-checks. See the headline report for the story.
 

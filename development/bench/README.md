@@ -30,7 +30,7 @@ Five task types, deliberately chosen to be structurally different:
 export OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
-(Configured for `google/gemini-3-flash-preview` via OpenRouter. To change, edit `config` in `development/src/rlm_gen_bench.clj`.)
+(Configured for `google/gemini-3-flash-preview` via OpenRouter. To change, edit `config` in `development/bench/rlm_gen_bench.clj`.)
 
 ### 2. Run a single task from a Clojure REPL
 
@@ -120,7 +120,7 @@ Located in `development/bench/documents/`:
 
 ## Configuration
 
-`rlm-gen-bench/config` lives at the top of `development/src/rlm_gen_bench.clj`:
+`rlm-gen-bench/config` lives at the top of `development/bench/rlm_gen_bench.clj`:
 
 ```clojure
 (def config
