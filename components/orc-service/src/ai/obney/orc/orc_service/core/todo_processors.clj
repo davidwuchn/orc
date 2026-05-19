@@ -9,7 +9,7 @@
   (:require [ai.obney.orc.orc-service.core.read-models :as rm]
             [ai.obney.orc.orc-service.core.executor :as executor]
             [ai.obney.orc.orc-service.core.runtime :as runtime]
-            [ai.obney.grain.event-store-v3.interface :as event-store :refer [->event]]
+            [ai.obney.grain.event-store-v3.interface :as es :refer [->event]]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]
@@ -57,6 +57,37 @@
   "Clear LLM count for a tick (called on tick completion)."
   [tick-id]
   (swap! tick-llm-counts dissoc tick-id))
+
+;; =============================================================================
+;; Tick-Scoped Usage Tracking
+;; =============================================================================
+;; Tracks token usage per tick-id for aggregation across sub-LLM calls.
+
+(defonce ^:private tick-usage (atom {}))
+
+(defn- add-usage!
+  "Add usage from a single LLM call to the tick's total."
+  [tick-id usage]
+  (when (and tick-id usage)
+    (swap! tick-usage update tick-id
+           (fn [u]
+             (let [current (or u {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})]
+               {:prompt-tokens (+ (:prompt-tokens current 0)
+                                  (or (:prompt-tokens usage) (:prompt_tokens usage) 0))
+                :completion-tokens (+ (:completion-tokens current 0)
+                                      (or (:completion-tokens usage) (:completion_tokens usage) 0))
+                :total-tokens (+ (:total-tokens current 0)
+                                 (or (:total-tokens usage) (:total_tokens usage) 0))})))))
+
+(defn get-tick-usage
+  "Get aggregated usage for a tick."
+  [tick-id]
+  (get @tick-usage tick-id {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0}))
+
+(defn clear-tick-usage!
+  "Clear usage for a tick (called on tick completion)."
+  [tick-id]
+  (swap! tick-usage dissoc tick-id))
 
 (defn- check-llm-budget
   "Check if LLM budget exceeded. Returns nil if no budget set (unlimited).
@@ -254,11 +285,27 @@
                     :error (str "LLM call budget exceeded: "
                                (:current exceeded) "/" (:budget exceeded))}))
           ;; Run execution in a future to avoid blocking
-          (future
+          (do
+            (when is-llm-call?
+              (let [map-idx (::map-each-index exec-context)]
+                (println (format "[EVENT RECEIVED] map-idx=%s thread=%s"
+                                (or map-idx "n/a")
+                                (.getName (Thread/currentThread))))))
+            (future
             (try
               ;; Increment LLM count before making the call (if applicable)
               (when is-llm-call? (increment-llm-count! tick-id))
-              (let [result (cond
+              (let [start-ms (System/currentTimeMillis)
+                    _ (when is-llm-call?
+                        (let [instr (or (:instruction node) "")
+                              instr-preview (if (> (count instr) 80) (str (subs instr 0 80) "...") instr)
+                              map-idx (::map-each-index exec-context)]
+                          (println (format "[SUBCALL START] node=%s%s thread=%s instr=%s"
+                                          (subs (str node-id) 0 (min 8 (count (str node-id))))
+                                          (if map-idx (str " map-idx=" map-idx) "")
+                                          (.getName (Thread/currentThread))
+                                          instr-preview))))
+                    result (cond
                              ;; Code executor doesn't need provider
                              (= :code executor-type)
                              (executor/execute-leaf node blackboard nil
@@ -270,7 +317,15 @@
                              ;; No provider - use mock
                              :else
                              (executor/execute-leaf-mock node blackboard))
-                  {:keys [status outputs error duration-ms]} result]
+                  {:keys [status outputs error duration-ms usage]} result
+                  _ (when is-llm-call?
+                      (println (format "[SUBCALL DONE]  node=%s status=%s duration=%dms tokens=%s"
+                                      (subs (str node-id) 0 (min 8 (count (str node-id))))
+                                      (name status)
+                                      (or duration-ms (- (System/currentTimeMillis) start-ms))
+                                      (or (:total-tokens usage) "?"))))]
+              ;; Track usage for this tick (aggregates across all LLM calls)
+              (when usage (add-usage! tick-id usage))
               ;; Use process-command to emit completion event
               (cp/process-command
                 (assoc context :command
@@ -295,7 +350,7 @@
                         :sheet-id sheet-id
                         :tick-id tick-id
                         :node-id node-id
-                        :error (.getMessage e)}))))))
+                        :error (.getMessage e)})))))))
         ;; Return nil - completion will be handled by the future via process-command
         nil))))
 
@@ -331,7 +386,28 @@
             (let [result (if provider
                            (executor/execute-repl-researcher node blackboard provider context)
                            {:status :failure :error "No DSCloj provider configured"})
-                  {:keys [status outputs error duration-ms]} result]
+                  {:keys [status outputs error duration-ms generated-tree-raw usage]} result
+                  ;; Track usage for this tick (RLM mode aggregates all LLM calls)
+                  _ (when usage (add-usage! tick-id usage))
+                  ;; Handle :tree-generated status - only propagate raw tree (canonical contains fns)
+                  ;; The raw S-expr DSL is pure data and can be serialized to event store
+                  effective-status (if (= :tree-generated status) :tree-generated status)
+                  ;; Include generated-tree-raw in outputs when present (for Phase 2 auto-execution observability)
+                  effective-outputs (cond-> (or outputs {})
+                                      generated-tree-raw (assoc :generated-tree-raw generated-tree-raw))]
+              ;; Emit :rlm/tree-generated event when tree is generated
+              ;; Check for generated-tree-raw presence (Phase 2 auto-execution returns :success with this field)
+              (when (some? generated-tree-raw)
+                (es/append event-store
+                           {:tenant-id (:tenant-id context)
+                            :events [(->event
+                                      {:type :rlm/tree-generated
+                                       :tags #{[:sheet sheet-id]
+                                               [:tick tick-id]}
+                                       :body {:tree-id (random-uuid)
+                                              :execution-id tick-id
+                                              :raw-dsl generated-tree-raw
+                                              :generated-at (str (java.time.Instant/now))}})]}))
               (cp/process-command
                 (assoc context :command
                        (cond-> {:command/id (random-uuid)
@@ -340,8 +416,8 @@
                                 :sheet-id sheet-id
                                 :tick-id tick-id
                                 :node-id node-id
-                                :status status
-                                :writes (normalize-output-keys (or outputs {}))}
+                                :status effective-status
+                                :writes (normalize-output-keys (or effective-outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
                          (seq exec-context) (assoc :inputs exec-context)))))
@@ -729,7 +805,7 @@
   (let [children-ids (:children-ids parent-node)
         total (count children-ids)
         ;; Read all execution completed events for this tick and these children
-        events (vec (event-store/read event-store
+        events (vec (es/read event-store
                                       {:types #{:sheet/node-execution-completed}
                                        :tags #{[:tick tick-id]}
                                        :tenant-id tenant-id}))
@@ -791,6 +867,7 @@
         tick-id (:tick-id event)
         child-id (:node-id event)
         child-status (:status event)
+        child-writes (:writes event)  ;; Capture writes from completed child
         event-inputs (:inputs event)
         exec-context (extract-execution-context event-inputs)
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
@@ -801,11 +878,19 @@
             siblings (:children-ids parent)
             child-index (.indexOf (vec siblings) child-id)
             next-child-id (get (vec siblings) (inc child-index))
-            blackboard (resolve-blackboard context sheet-id tick-id)]
+            blackboard (resolve-blackboard context sheet-id tick-id)
+            ;; Merge child's writes into blackboard - handles race condition where
+            ;; read model hasn't yet processed the execution-value-written events
+            blackboard-with-writes (reduce (fn [bb [k v]]
+                                             (assoc-in bb [k :value] v))
+                                           blackboard
+                                           child-writes)]
         (case (:type parent)
           :sequence
-          (case child-status
-            :success
+          (cond
+            ;; :success and :tree-generated both mean the child completed successfully
+            ;; :tree-generated is from RLM two-phase execution (tree was generated)
+            (#{:success :tree-generated} child-status)
             (if next-child-id
               ;; Continue to next child
               (let [next-child (get nodes-by-id next-child-id)
@@ -813,14 +898,16 @@
                     total-children (count siblings)
                     bb-inputs (if (= :leaf (:type next-child))
                                 (reduce (fn [acc k]
-                                          (if-let [entry (get blackboard k)]
+                                          (if-let [entry (get blackboard-with-writes k)]
                                             (assoc acc k (:value entry))
                                             acc))
                                         {}
                                         (:reads next-child))
                                 {})
-                    ;; Merge execution context with blackboard inputs
-                    inputs (merge exec-context bb-inputs)]
+                    ;; Merge execution context with blackboard inputs AND child writes
+                    ;; Child writes are needed for non-leaf nodes (map-each, etc.) that
+                    ;; read from the blackboard - ensures they see the previous child's outputs
+                    inputs (merge exec-context bb-inputs child-writes)]
                 {:result/events
                  [;; Emit sequence progress event
                   (->event
@@ -842,20 +929,25 @@
                            :tick-id tick-id
                            :node-id next-child-id
                            :inputs inputs}})]})
-              ;; All children succeeded - sequence succeeds
-              {:result/events
-               [(->event
-                 {:type :sheet/node-execution-completed
-                  :tags #{[:sheet sheet-id]
-                          [:node parent-id]
-                          [:tick tick-id]}
-                  :body (cond-> {:sheet-id sheet-id
-                                 :tick-id tick-id
-                                 :node-id parent-id
-                                 :status :success}
-                          (seq exec-context) (assoc :inputs exec-context))})]})
-            :failure
-            ;; Child failed - sequence fails
+              ;; All children succeeded - sequence completes with child's status
+              ;; Preserves :tree-generated status for RLM two-phase execution
+              ;; Use cp/process-command to ensure event is properly published
+              (do
+                (cp/process-command
+                  (assoc context :command
+                         (cond-> {:command/id (random-uuid)
+                                  :command/timestamp (time/now)
+                                  :command/name :sheet/complete-node-execution
+                                  :sheet-id sheet-id
+                                  :tick-id tick-id
+                                  :node-id parent-id
+                                  :status child-status
+                                  :writes (or (:writes event) {})}  ;; Propagate writes, default to empty map
+                           (seq exec-context) (assoc :inputs exec-context))))
+                nil))
+
+            (= child-status :failure)
+            ;; Child failed - sequence fails, propagate error
             {:result/events
              [(->event
                {:type :sheet/node-execution-completed
@@ -866,8 +958,10 @@
                                :tick-id tick-id
                                :node-id parent-id
                                :status :failure}
+                        (:error event) (assoc :error (:error event))
                         (seq exec-context) (assoc :inputs exec-context))})]}
-            :running
+
+            (= child-status :running)
             ;; Child returned running - propagate up
             {:result/events
              [(->event
@@ -880,8 +974,9 @@
                                :node-id parent-id
                                :status :running}
                         (seq exec-context) (assoc :inputs exec-context))})]}
+
             ;; Unknown status - do nothing
-            nil)
+            :else nil)
 
           :fallback
           (case child-status
@@ -972,7 +1067,7 @@
                                      (seq exec-context) (assoc :inputs exec-context))})]
                 ;; CAS: only append if no completion for this node+tick exists yet.
                 ;; Event-store handles publishing, so no need to return events.
-                (event-store/append event-store
+                (es/append event-store
                   {:events [event]
                    :tenant-id tenant-id
                    :cas {:types #{:sheet/node-execution-completed}
@@ -1013,6 +1108,7 @@
   (let [sheet-id (:sheet-id event)
         tick-id (:tick-id event)
         node-id (:node-id event)
+        event-inputs (:inputs event)  ;; May contain writes from previous sequence child
         nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
         node (get nodes-by-id node-id)]
     (when (= :map-each (:type node))
@@ -1023,7 +1119,11 @@
             children-ids (:children-ids node)
             child-id (first children-ids) ;; map-each has exactly one child subtree
             blackboard (resolve-blackboard context sheet-id tick-id)
-            source-list (get-in blackboard [source-key :value])]
+            ;; Check event inputs first (may contain writes from previous sequence child),
+            ;; then fall back to blackboard. This handles race condition where read model
+            ;; hasn't yet processed the execution-value-written events.
+            source-list (or (get event-inputs source-key)
+                            (get-in blackboard [source-key :value]))]
         (cond
           (not (sequential? source-list))
           ;; Source is not a list - fail
@@ -1073,18 +1173,20 @@
                 items (vec source-list)
                 total-items (count items)
                 ;; Pre-allocate results with nils to handle out-of-order completions
+                ;; Determine how many to start
+                batch-size (min max-concurrency total-items)
+                batch-indices (vec (range batch-size))
                 initial-state {:items items
                                :current-index 0
                                :results (vec (repeat total-items nil))
-                               :in-flight #{}
+                               ;; Track items that have been started but not yet completed
+                               :in-flight (set batch-indices)
                                :max-concurrency max-concurrency
                                :child-id child-id
                                :item-key item-key
                                :output-key output-key
                                :source-key source-key}
-                ;; Determine how many to start
-                batch-size (min max-concurrency total-items)
-                batch-indices (range batch-size)]
+                ]
             ;; Store state
             (swap! map-each-state assoc state-key initial-state)
             ;; Start first batch - set item value and start child for each
@@ -1186,6 +1288,7 @@
                                          :__error (:error event)))
                 ;; Atomically update state and determine action.
                 ;; This prevents race conditions when multiple children complete concurrently.
+                ;; Track :in-flight so concurrent completions don't all pick the same next-to-start.
                 action (atom nil)
                 _ (swap! map-each-state
                          (fn [all-state]
@@ -1196,17 +1299,22 @@
                                (let [new-results (assoc (:results s) item-index computed-result)
                                      completed-count (count (filter some? new-results))
                                      total (count (:items s))
-                                     max-conc (:max-concurrency s)]
+                                     ;; Remove the just-completed index from in-flight
+                                     in-flight-after-removal (disj (:in-flight s) item-index)]
                                  (if (= completed-count total)
                                    ;; All done — remove state, action = :complete
                                    (do (reset! action {:type :complete
                                                        :results new-results
                                                        :completed-count completed-count})
                                        (dissoc all-state state-key))
-                                   ;; Find next item to start (if any)
-                                   (let [next-to-start (first (filter #(and (>= % max-conc)
-                                                                            (nil? (get new-results %)))
-                                                                      (range total)))]
+                                   ;; Find next item to start: must be nil in results AND not in flight
+                                   (let [next-to-start (first
+                                                        (filter #(and (nil? (get new-results %))
+                                                                      (not (contains? in-flight-after-removal %)))
+                                                                (range total)))
+                                         in-flight-after-start (if next-to-start
+                                                                 (conj in-flight-after-removal next-to-start)
+                                                                 in-flight-after-removal)]
                                      (reset! action (if (and next-to-start (< next-to-start total))
                                                       {:type :start-next
                                                        :next-index next-to-start
@@ -1214,7 +1322,9 @@
                                                       {:type :wait
                                                        :completed-count completed-count}))
                                      (assoc all-state state-key
-                                            (assoc s :results new-results)))))))))
+                                            (assoc s
+                                                   :results new-results
+                                                   :in-flight in-flight-after-start)))))))))
                 act @action
                 total-items (count items)
                 nodes-by-id (resolve-nodes-by-id context sheet-id tick-id)
@@ -1289,6 +1399,7 @@
         tick-id (:tick-id event)
         node-id (:node-id event)
         status (:status event)
+        error (:error event)  ;; Extract error from node completion
         tick-ctx (rm/get-tick-execution-context context tick-id)
         root-node-id (:root-node-id tick-ctx)
         ;; Per-execution override from options, else global dynamic default
@@ -1353,7 +1464,9 @@
                              :tick-id tick-id
                              :iteration current-iteration
                              :root-status final-status}
-                      outputs (assoc :outputs outputs))})]})))))
+                      outputs (assoc :outputs outputs)
+                      error (assoc :error error))})]})))))
+
 
 ;; =============================================================================
 ;; Execution Completion Delivery
@@ -1377,16 +1490,24 @@
     ;; not final results. complete-tree-tick converts :running to :failure
     ;; when max iterations are exhausted.
     (when (not= root-status :running)
-      ;; Clean up budget tracking for this tick
-      (clear-llm-count! tick-id)
-      (runtime/deliver-completion! tick-id
-        {:status (case root-status
-                   :success :success
-                   :failure :failure
-                   :failure)
-         :outputs (or outputs {})
-         :trace-id tick-id
-         :error error}))
+      ;; Get aggregated usage before clearing
+      (let [usage (get-tick-usage tick-id)]
+        ;; Clean up budget and usage tracking for this tick
+        (clear-llm-count! tick-id)
+        (clear-tick-usage! tick-id)
+        (runtime/deliver-completion! tick-id
+          (cond-> {:status (case root-status
+                             :success :success
+                             :failure :failure
+                             :tree-generated :tree-generated
+                             :failure)
+                   :outputs (or outputs {})
+                   ;; Include raw tree for :tree-generated status (canonical form generated at execution time)
+                   :generated-tree-raw (get outputs :generated-tree-raw)
+                   :trace-id tick-id
+                   :error error}
+            ;; Include usage if any LLM calls were made
+            (pos? (:total-tokens usage 0)) (assoc :usage usage)))))
     ;; No events to emit
     nil))
 
@@ -1410,7 +1531,7 @@
       (let [nodes-by-id (:nodes-by-id tick-ctx)
             version-number (:version-number tick-ctx)
             ;; Read all events for this tick (into [] to realize reducible)
-            tick-events (into [] (event-store/read event-store {:tags #{[:tick tick-id]} :tenant-id (:tenant-id context)}))
+            tick-events (into [] (es/read event-store {:tags #{[:tick tick-id]} :tenant-id (:tenant-id context)}))
             ;; Find tick-started event for timing
             started-event (first (filter #(= :sheet/tree-tick-started (:event/type %)) tick-events))
             started-at (when started-event (:event/timestamp started-event))
@@ -1801,3 +1922,84 @@
   "Assemble and store execution trace from events."
   [context]
   (assemble-execution-trace context))
+
+;; =============================================================================
+;; RLM Rolling Judge Processor
+;; =============================================================================
+
+(defn- evaluate-tree-structure
+  "Evaluate an RLM-generated tree structure heuristically.
+   Returns a map with :score (0.0-1.0), :feedback, and :dimensions."
+  [raw-dsl]
+  (let [;; Check for key structural elements
+        has-sequence? (and (vector? raw-dsl) (= :sequence (first raw-dsl)))
+        has-llm-node? (some (fn find-llm [node]
+                              (cond
+                                (not (vector? node)) false
+                                (= :llm (first node)) true
+                                :else (some find-llm (rest node))))
+                            (if (vector? raw-dsl) raw-dsl []))
+        has-final? (some (fn find-final [node]
+                           (cond
+                             (not (vector? node)) false
+                             (= :final (first node)) true
+                             :else (some find-final (rest node))))
+                         (if (vector? raw-dsl) raw-dsl []))
+        has-map-each? (some (fn find-map-each [node]
+                              (cond
+                                (not (vector? node)) false
+                                (= :map-each (first node)) true
+                                :else (some find-map-each (rest node))))
+                            (if (vector? raw-dsl) raw-dsl []))
+        ;; Calculate dimension scores
+        structure-score (cond
+                          (and has-sequence? has-final?) 1.0
+                          has-sequence? 0.7
+                          :else 0.3)
+        decomposition-score (cond
+                              has-map-each? 1.0
+                              has-llm-node? 0.6
+                              :else 0.2)
+        ;; Weighted average
+        overall-score (* 0.5 (+ (* 0.6 structure-score)
+                                 (* 0.4 decomposition-score)))
+        feedback (cond
+                   (and has-sequence? has-map-each? has-final?)
+                   "Excellent tree structure with proper decomposition pattern."
+                   (and has-sequence? has-llm-node? has-final?)
+                   "Good tree structure but could use map-each for better decomposition."
+                   has-sequence?
+                   "Basic tree structure. Consider adding sub-LLM calls for analysis."
+                   :else
+                   "Tree structure needs improvement. Use :sequence as root.")]
+    {:score overall-score
+     :feedback feedback
+     :dimensions [{:name "Structure" :weight 0.6 :score structure-score
+                   :feedback (if has-sequence? "Valid sequence root" "Missing sequence root")}
+                  {:name "Decomposition" :weight 0.4 :score decomposition-score
+                   :feedback (if has-map-each? "Uses map-each for parallelism" "Could benefit from map-each")}]}))
+
+(defn evaluate-rlm-tree
+  "Rolling judge processor for :rlm/tree-generated events.
+   Evaluates the tree structure and emits :rlm/tree-evaluated event."
+  [{:keys [event event-store] :as context}]
+  (let [tree-id (:tree-id event)
+        execution-id (:execution-id event)
+        raw-dsl (:raw-dsl event)
+        {:keys [score feedback dimensions]} (evaluate-tree-structure raw-dsl)]
+    {:result/events
+     [(->event
+       {:type :rlm/tree-evaluated
+        :tags #{[:tree tree-id]}
+        :body {:tree-id tree-id
+               :execution-id execution-id
+               :score score
+               :feedback feedback
+               :dimensions dimensions
+               :evaluated-at (str (java.time.Instant/now))}})]}))
+
+(defprocessor :rlm evaluate-rlm-tree
+  {:topics #{:rlm/tree-generated}}
+  "Rolling judge: evaluate RLM-generated tree structure."
+  [context]
+  (evaluate-rlm-tree context))

@@ -583,7 +583,7 @@
 (defcommand :sheet set-repl-researcher-config
   {:authorized? authenticated?}
   "Set configuration for a repl-researcher node."
-  [{{:keys [sheet-id node-id instruction reads writes mcp-tools browser-tools model max-iterations]} :command
+  [{{:keys [sheet-id node-id instruction reads writes mcp-tools browser-tools model max-iterations rlm]} :command
     :as ctx}]
   (let [node (rm/get-node ctx sheet-id node-id)
         blackboard (rm/get-blackboard-by-key ctx sheet-id)
@@ -622,6 +622,7 @@
                   browser-tools (assoc :browser-tools (vec browser-tools))
                   model (assoc :model model)
                   max-iterations (assoc :max-iterations max-iterations)
+                  (some? rlm) (assoc :rlm rlm)
                   (:instruction node) (assoc :previous-instruction (:instruction node))
                   (seq (:reads node)) (assoc :previous-reads (:reads node))
                   (seq (:writes node)) (assoc :previous-writes (:writes node))
@@ -1024,8 +1025,9 @@
                                     error (assoc :error error)
                                     (seq inputs) (assoc :inputs inputs))})
         ;; For tick-scoped executions with successful writes, emit bb writes atomically
+        ;; Also handle :tree-generated status (RLM two-phase execution)
         tick-scoped? (some? (rm/get-tick-execution-context ctx tick-id))
-        bb-write-events (when (and tick-scoped? (= :success status) (seq writes))
+        bb-write-events (when (and tick-scoped? (#{:success :tree-generated} status) (seq writes))
                           (mapv (fn [[k v]]
                                   (->event
                                     {:type :sheet/execution-value-written

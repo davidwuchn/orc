@@ -75,6 +75,21 @@ components/{service}/
 └── test/ai/obney/orc/{service}/
 ```
 
+## RLM Generalization Benchmark
+
+The repo includes an end-to-end benchmark suite that demonstrates ORC RLM (`emit-tree!`) genuinely adapts behavior tree design to task type:
+
+- Entry point: [`development/bench/README.md`](development/bench/README.md)
+- Headline report: [`development/bench/reports/07_final_generalization_report.md`](development/bench/reports/07_final_generalization_report.md)
+- Runner: `development/src/rlm_gen_bench.clj`
+
+5 task types tested with goal-only instructions (no hardcoded trees) on real documents. The model designed 4 distinct tree patterns + 1 "no tree" decision, with zero hallucinations across spot-checks. See the headline report for the story.
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+clj -M:dev -e '(require (quote [rlm-gen-bench :as bench])) (bench/start!) (bench/run-task! :risk-analysis) (bench/stop!)'
+```
+
 ## Skills
 
 ### ORC Domain

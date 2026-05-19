@@ -373,7 +373,8 @@
     [:writes [:vector :keyword]]                        ;; Output keys (final-answer, iterations, etc.)
     [:mcp-tools [:vector :string]]                      ;; Available MCP tool names
     [:model {:optional true} :string]                   ;; OpenRouter model ID
-    [:max-iterations {:optional true} :int]]            ;; Default 10
+    [:max-iterations {:optional true} :int]             ;; Default 10
+    [:rlm {:optional true} [:or :boolean :map]]]        ;; Enable RLM mode (true or {:debug? true})
 
    :sheet/set-delegate-config
    [:map
@@ -469,7 +470,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure]]
+    [:status [:enum :success :failure :tree-generated]]
     [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]]
@@ -732,12 +733,14 @@
     [:mcp-tools [:vector :string]]
     [:model {:optional true} :string]
     [:max-iterations {:optional true} :int]
+    [:rlm {:optional true} [:or :boolean :map]]
     [:previous-instruction {:optional true} :string]
     [:previous-reads {:optional true} [:vector :keyword]]
     [:previous-writes {:optional true} [:vector :keyword]]
     [:previous-mcp-tools {:optional true} [:vector :string]]
     [:previous-model {:optional true} :string]
-    [:previous-max-iterations {:optional true} :int]]
+    [:previous-max-iterations {:optional true} :int]
+    [:previous-rlm {:optional true} [:or :boolean :map]]]
 
    :sheet/delegate-config-set
    [:map
@@ -833,7 +836,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure :running]]
+    [:status [:enum :success :failure :running :tree-generated]]
     [:writes {:optional true} [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]]
@@ -843,7 +846,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:iteration {:optional true} :int]
-    [:root-status [:enum :success :failure :running]]
+    [:root-status [:enum :success :failure :running :tree-generated]]
     [:outputs {:optional true} :map]
     [:error {:optional true} :string]]
 
@@ -958,7 +961,46 @@
    :sheet/tree-metadata-extracted
    [:map
     [:sheet-id :uuid]
-    [:metadata :any]]})
+    [:metadata :any]]
+
+   ;; -------------------------------------------------------------------------
+   ;; RLM (Research Language Model) Events
+   ;; -------------------------------------------------------------------------
+
+   :rlm/tree-generated
+   [:map
+    [:tree-id :uuid]
+    [:execution-id :uuid]
+    [:raw-dsl :any]                              ;; S-expr literal from LLM (serializable)
+    [:iteration-count {:optional true} :int]    ;; How many REPL iterations
+    [:input-metadata {:optional true} [:map
+                                       [:size :int]
+                                       [:type :keyword]]]
+    [:generated-at :string]]
+
+   :rlm/tree-executed
+   [:map
+    [:tree-id :uuid]
+    [:execution-id :uuid]
+    [:status [:enum :success :failure]]
+    [:outputs {:optional true} :map]
+    [:duration-ms :int]
+    [:node-traces {:optional true} [:vector :any]]
+    [:error {:optional true} :string]]
+
+   :rlm/tree-evaluated
+   [:map
+    [:tree-id :uuid]
+    [:execution-id :uuid]
+    [:score :double]                             ;; 0.0 to 1.0
+    [:feedback :string]                          ;; Actionable feedback
+    [:dimensions {:optional true} [:vector       ;; Optional breakdown by dimension
+                                   [:map
+                                    [:name :string]
+                                    [:weight :double]
+                                    [:score :double]
+                                    [:feedback :string]]]]
+    [:evaluated-at :string]]})
 
 ;; =============================================================================
 ;; Query Schemas (Fat Query Model - one query per screen)

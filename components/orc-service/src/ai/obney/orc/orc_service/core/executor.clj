@@ -19,22 +19,94 @@
   (:require [dscloj.core :as dscloj]
             [litellm.router :as litellm-router]
             [clojure.string :as str]
+            [clojure.set]
             [cheshire.core :as json]
             [malli.core :as m]
             [ai.obney.orc.orc-service.core.observability :as obs]
-            [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]))
+            [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]
+            [ai.obney.orc.orc-service.core.rlm-sandbox :as rlm-sandbox]
+            [ai.obney.orc.orc-service.core.rlm-tree-executor :as tree-executor]))
+
+;; Forward declarations
+(declare execute-repl-researcher-rlm)
+
+;; =============================================================================
+;; Levenshtein Distance and Variable Suggestions
+;; =============================================================================
+
+(defn levenshtein-distance
+  "Calculate the Levenshtein (edit) distance between two strings."
+  [s1 s2]
+  (let [len1 (count s1)
+        len2 (count s2)]
+    (cond
+      (zero? len1) len2
+      (zero? len2) len1
+      :else
+      (let [matrix (make-array Long/TYPE (inc len1) (inc len2))]
+        ;; Initialize first row and column
+        (doseq [i (range (inc len1))]
+          (aset matrix i 0 (long i)))
+        (doseq [j (range (inc len2))]
+          (aset matrix 0 j (long j)))
+        ;; Fill in the rest of the matrix
+        (doseq [i (range 1 (inc len1))
+                j (range 1 (inc len2))]
+          (let [cost (if (= (nth s1 (dec i)) (nth s2 (dec j))) 0 1)]
+            (aset matrix i j
+                  (long (min (inc (aget matrix (dec i) j))           ; deletion
+                             (inc (aget matrix i (dec j)))           ; insertion
+                             (+ (aget matrix (dec i) (dec j)) cost)))))) ; substitution
+        (aget matrix len1 len2)))))
+
+(defn suggest-similar-key
+  "Suggest a similar key from available keys using Levenshtein distance.
+   Returns the most similar key if:
+   - The distance is <= half the longer string's length + 1
+   - Or one is a prefix/substring of the other
+   This allows 'doc' to match 'document' and 'chunk' to match 'chunks'."
+  [missing-key available-keys]
+  (let [missing-str (name missing-key)
+        scored-keys (for [k available-keys
+                         :let [k-str (name k)
+                               dist (levenshtein-distance missing-str k-str)
+                               max-len (max (count missing-str) (count k-str))
+                               ;; Allow edit distance up to half the longer string + 1
+                               threshold (inc (quot max-len 2))
+                               ;; Also match if one is prefix of the other
+                               is-prefix? (or (str/starts-with? k-str missing-str)
+                                             (str/starts-with? missing-str k-str))]
+                         :when (or (<= dist threshold) is-prefix?)]
+                     [k dist])
+        best (first (sort-by second scored-keys))]
+    (first best)))
+
+(defn format-error-with-suggestions
+  "Format an error message with helpful suggestions.
+   For missing variable errors, includes available variables and suggestions."
+  [error-msg available-vars]
+  (let [;; Try to extract the missing key from error message
+        missing-key-match (re-find #":(\w+)" error-msg)
+        missing-key (when missing-key-match (keyword (second missing-key-match)))
+        suggestion (when missing-key (suggest-similar-key missing-key available-vars))]
+    (str error-msg
+         (when (seq available-vars)
+           (str "\nAvailable variables: " (str/join ", " (map str available-vars))))
+         (when suggestion
+           (str "\nDid you mean: " suggestion "?")))))
 
 ;; =============================================================================
 ;; Usage Normalization
 ;; =============================================================================
 
 (defn- normalize-usage
-  "Normalize DSCloj/litellm usage map from snake_case to kebab-case."
+  "Normalize DSCloj/litellm usage map to kebab-case.
+   Handles both snake_case (raw API) and kebab-case (already normalized) inputs."
   [usage]
   (when usage
-    {:prompt-tokens (:prompt_tokens usage 0)
-     :completion-tokens (:completion_tokens usage 0)
-     :total-tokens (:total_tokens usage 0)}))
+    {:prompt-tokens (or (:prompt-tokens usage) (:prompt_tokens usage) 0)
+     :completion-tokens (or (:completion-tokens usage) (:completion_tokens usage) 0)
+     :total-tokens (or (:total-tokens usage) (:total_tokens usage) 0)}))
 
 ;; =============================================================================
 ;; Schema Description Generation
@@ -380,21 +452,31 @@
 
 (defn resolve-fn
   "Resolve a fully-qualified function symbol string to a function.
+   Also supports ephemeral functions registered via tree-executor for Phase 2.
    Returns {:fn f} on success or {:error msg} on failure."
   [fn-symbol-str]
-  (try
-    (let [[ns-str fn-str] (str/split fn-symbol-str #"/")
-          ns-sym (symbol ns-str)
-          fn-sym (symbol fn-str)]
-      ;; Try to find namespace first (may already be loaded)
-      (when-not (find-ns ns-sym)
-        ;; Only require if namespace not already loaded
-        (require ns-sym))
-      (if-let [f (ns-resolve (find-ns ns-sym) fn-sym)]
-        {:fn (if (var? f) @f f)}
-        {:error (str "Function not found: " fn-symbol-str)}))
-    (catch Exception e
-      {:error (str "Failed to resolve function: " fn-symbol-str " - " (.getMessage e))})))
+  (cond
+    ;; Check ephemeral function registry first (for Phase 2 tree execution)
+    (str/starts-with? fn-symbol-str "ephemeral-fn-")
+    (if-let [f (tree-executor/lookup-ephemeral-fn fn-symbol-str)]
+      {:fn f}
+      {:error (str "Ephemeral function not found: " fn-symbol-str)})
+
+    ;; Standard namespace/function resolution
+    :else
+    (try
+      (let [[ns-str fn-str] (str/split fn-symbol-str #"/")
+            ns-sym (symbol ns-str)
+            fn-sym (symbol fn-str)]
+        ;; Try to find namespace first (may already be loaded)
+        (when-not (find-ns ns-sym)
+          ;; Only require if namespace not already loaded
+          (require ns-sym))
+        (if-let [f (ns-resolve (find-ns ns-sym) fn-sym)]
+          {:fn (if (var? f) @f f)}
+          {:error (str "Function not found: " fn-symbol-str)}))
+      (catch Exception e
+        {:error (str "Failed to resolve function: " fn-symbol-str " - " (.getMessage e))}))))
 
 (defn execute-code
   "Execute a Clojure function as a leaf node.
@@ -406,7 +488,7 @@
    The function should return a map of blackboard key -> value for writes.
 
    Args:
-     node - The leaf node map with :fn (fully-qualified symbol string)
+     node - The leaf node map with :fn (fully-qualified symbol string or inline fn)
      blackboard - Map of key -> {:key, :type, :value, :version}
      context - Additional context (event-store, etc.)
 
@@ -417,8 +499,11 @@
       :duration-ms int}"
   [node blackboard context]
   (let [start-time (System/currentTimeMillis)
-        fn-symbol (:fn node)
-        resolved (resolve-fn fn-symbol)]
+        fn-or-symbol (:fn node)
+        ;; Support both inline functions and symbol strings
+        resolved (if (fn? fn-or-symbol)
+                   {:fn fn-or-symbol}
+                   (resolve-fn fn-or-symbol))]
     (if (:error resolved)
       {:status :failure
        :error (:error resolved)
@@ -426,8 +511,6 @@
       (try
         (let [f (:fn resolved)
               ;; Gather inputs from blackboard
-              ;; Code executors use keyword keys: (get inputs :site-url)
-              ;; DSCloj handles keyword→string translation when sending to LLM
               inputs (reduce (fn [acc key-name]
                                (if-let [entry (get blackboard key-name)]
                                  (assoc acc key-name (:value entry))
@@ -435,8 +518,6 @@
                              {}
                              (:reads node))
               ;; Call the function with context
-              ;; Include :execution-context so code executors can access event-store
-              ;; for recording learnings via ontology (auto-learning)
               result (f (assoc context :inputs inputs :execution-context context))
               duration-ms (- (System/currentTimeMillis) start-time)]
           ;; Result should be a map of key -> value
@@ -517,9 +598,10 @@
         dscloj-module (dissoc module :output-mapping)
         ;; Build effective provider config with model override if specified
         effective-provider (get-provider-with-model provider (:model node))
-        ;; Request metadata for usage tracking
+        ;; Request metadata for usage tracking via :with-metadata? true
         ;; Disable validation since we serialize complex inputs to JSON strings
-        dscloj-options (assoc options :validate? false)
+        ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
+        dscloj-options (assoc options :validate? false :with-metadata? true :use-function-calling? false)
         ;; Retry config - defaults to 1 retry with 500ms delay
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
@@ -672,18 +754,34 @@
                                desc (malli-schema->description schema)]]
                      (str "- " key-name ": " desc))))))
 
+(defn- truncate-code
+  "Truncate code if it's too long, preserving the start and end."
+  [code max-len]
+  (if (> (count code) max-len)
+    (let [half (quot (- max-len 20) 2)]
+      (str (subs code 0 half) "\n... [truncated] ...\n" (subs code (- (count code) half))))
+    code))
+
 (defn- build-iteration-history
-  "Format iteration history for LLM context."
+  "Format iteration history for LLM context.
+
+   Includes code executed, result, errors, and variables created in each iteration.
+   Long code is truncated for conciseness."
   [history]
   (when (seq history)
     (str "\n\n## Previous Iterations\n"
          (str/join "\n\n"
                    (map-indexed
-                    (fn [idx {:keys [code result stdout]}]
-                      (str "### Iteration " (inc idx) "\n"
-                           "Code:\n```clojure\n" code "\n```\n"
-                           (when (seq stdout) (str "Output:\n" stdout "\n"))
-                           "Result: " result))
+                    (fn [idx {:keys [code result stdout error vars-created]}]
+                      (let [truncated-code (truncate-code code 500)]
+                        (str "### Iteration " (inc idx) "\n"
+                             "Code:\n```clojure\n" truncated-code "\n```\n"
+                             (when (seq stdout) (str "Output:\n" stdout "\n"))
+                             (if error
+                               (str "Error: " error)
+                               (str "Result: " result))
+                             (when (seq vars-created)
+                               (str "\nVariables created: " (str/join ", " (map str vars-created)))))))
                     history)))))
 
 (defn- build-code-generation-module
@@ -753,6 +851,11 @@
    3. Results feed back to LLM for next iteration
    4. Converges when FINAL_ANSWER is detected
 
+   When :rlm is true on the node, uses RLM mode with BT primitives:
+   - (llm ...) for sub-LLM calls
+   - (final! ...) for validated output capture
+   - (get-input ...) for loading input values
+
    Args:
      node - The repl-researcher node map with :instruction, :reads, :writes, :mcp-tools
      blackboard - Map of key -> {:key, :schema, :value, :version}
@@ -769,8 +872,11 @@
       :duration-ms int
       :usage {:prompt-tokens N :completion-tokens N :total-tokens N}}"
   [node blackboard provider context & {:keys [options] :or {options {}}}]
-  (let [start-time (System/currentTimeMillis)
-        max-iterations (or (:max-iterations node) 10)
+  ;; Route to RLM mode if enabled
+  (if (:rlm node)
+    (execute-repl-researcher-rlm node blackboard provider context :options options)
+    (let [start-time (System/currentTimeMillis)
+          max-iterations (or (:max-iterations node) 10)
         mcp-tools (or (:mcp-tools node) [])
         browser-tools (or (:browser-tools node) [])
         call-tool-fn (:call-tool-fn context)
@@ -826,27 +932,35 @@
                         :tools (str/join ", " all-tools)}
                 ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
                 ;; Passing :model causes response parsing issues in dscloj
-                dscloj-options (assoc options :validate? false)
+                ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
+                dscloj-options (assoc options :validate? false :with-metadata? true)
 
                 ;; Generate code - use effective-provider for correct model override
                 llm-result (dscloj/predict effective-provider module inputs dscloj-options)
-                ;; DSCloj returns {:code "..."} directly, not {:outputs {:code "..."}}
-                ;; Strip markdown code fences if present (some LLMs wrap code in ```clojure...```)
+                ;; Extract code from LLM result
+                ;; With :with-metadata? true, dscloj returns {:outputs {:code "..."} :usage {...}}
+                ;; Code may be a string or a parsed Clojure form (if function calling mode parsed it)
                 code (let [raw (or (:code llm-result) (get-in llm-result [:outputs :code]))]
-                       (if (string? raw)
+                       (cond
+                         (string? raw)
                          (-> raw
                              (str/replace #"^```(?:clojure|clj|edn)?\s*\n?" "")
                              (str/replace #"\n?```\s*$" "")
                              str/trim)
-                         raw))
 
-                ;; Update usage tracking
-                _ (when-let [usage (:usage llm-result)]
+                         (some? raw)
+                         ;; Already parsed Clojure form - convert back to string for sandbox
+                         (pr-str raw)
+
+                         :else nil))
+
+                ;; Update usage tracking (normalize handles snake_case -> kebab-case)
+                _ (when-let [u (normalize-usage (:usage llm-result))]
                     (swap! total-usage
-                           (fn [u]
-                             {:prompt-tokens (+ (:prompt-tokens u 0) (:prompt_tokens usage 0))
-                              :completion-tokens (+ (:completion-tokens u 0) (:completion_tokens usage 0))
-                              :total-tokens (+ (:total-tokens u 0) (:total_tokens usage 0))})))]
+                           (fn [acc]
+                             {:prompt-tokens (+ (:prompt-tokens acc 0) (:prompt-tokens u))
+                              :completion-tokens (+ (:completion-tokens acc 0) (:completion-tokens u))
+                              :total-tokens (+ (:total-tokens acc 0) (:total-tokens u))})))]
 
             (cond
               ;; No code generated
@@ -911,6 +1025,495 @@
                    :iterations new-history
                    :duration-ms (- (System/currentTimeMillis) start-time)
                    :usage @total-usage}
+
+                  ;; Continue iteration
+                  :else
+                  (recur (inc iteration) new-history)))))))
+
+      (catch Exception e
+        {:status :failure
+         :error (.getMessage e)
+         :duration-ms (- (System/currentTimeMillis) start-time)
+         :usage @total-usage})))))
+
+;; =============================================================================
+;; RLM Mode Execution (BT as Primitive)
+;; =============================================================================
+
+(defn- format-variable-preview
+  "Format a single variable preview for the Available Variables section."
+  [k preview source]
+  (let [type-str (name (or (:type preview) :unknown))
+        size-str (cond
+                   (:size preview) (str (:size preview) " chars")
+                   (:length preview) (str (:length preview) " items")
+                   :else nil)
+        type-size (if size-str
+                    (str "(" type-str ", " size-str ")")
+                    (str "(" type-str ")"))
+        preview-str (cond
+                      (:preview preview) (str "  Preview: \"" (:preview preview) "\"")
+                      (:value preview) (str "  Value: " (pr-str (:value preview)))
+                      (:sample preview) (str "  Sample: " (pr-str (:sample preview)))
+                      (:keys preview) (str "  Keys: " (pr-str (:keys preview)))
+                      :else nil)]
+    (str k " " type-size " " source
+         (when preview-str (str "\n" preview-str)))))
+
+(defn- build-available-variables-section
+  "Build the Available Variables section for the RLM prompt."
+  [blackboard sandbox-vars-map var-creation-times]
+  (let [;; Format blackboard variables
+        blackboard-entries (for [[k v] blackboard
+                                 :let [preview (rlm-sandbox/preview-value (:value v))]]
+                             (format-variable-preview k preview "[from blackboard]"))
+        ;; Format sandbox variables (created during execution)
+        sandbox-entries (for [[k v] sandbox-vars-map
+                              :when (not (contains? blackboard k))]  ;; Don't duplicate blackboard keys
+                          (let [preview (rlm-sandbox/preview-value v)
+                                iteration (get var-creation-times k 0)
+                                source (str "[created iteration " iteration "]")]
+                            (format-variable-preview k preview source)))]
+    (when (or (seq blackboard-entries) (seq sandbox-entries))
+      (str "## Available Variables\n\n"
+           (str/join "\n\n" (concat blackboard-entries sandbox-entries))
+           "\n\n"))))
+
+(defn- build-ontology-examples-section
+  "Build a section of the prompt with few-shot examples from ontology.
+   Returns nil if no examples available."
+  [node]
+  (when-let [examples-fn (get-in node [:rlm :examples-fn])]
+    (let [examples (try (examples-fn {}) (catch Exception _ []))]
+      (when (seq examples)
+        (str "## Example from ontology (successful patterns)\n\n"
+             (str/join "\n\n"
+                       (for [{:keys [task tree score]} examples]
+                         (str "**Task**: " task "\n"
+                              "**Score**: " (when score (format "%.2f" (double score))) "\n"
+                              "```clojure\n"
+                              "(emit-tree! " (pr-str tree) ")\n"
+                              "```")))
+             "\n\n")))))
+
+(defn- build-rlm-code-generation-module
+  "Build DSCloj module for generating code in RLM mode.
+
+   In RLM mode, the LLM generates code that can:
+   - Call (llm \"name\" :instruction \"...\" :writes [:key]) to execute sub-LLM calls
+   - Call (final! {:key value}) to return validated results
+   - Call (get-input :key) to load input values into variable space
+   - Call store!/get-var to manage computed variables
+   - Access 'inputs' map for metadata previews of available data"
+  [node inputs-preview history blackboard sandbox-vars-map var-creation-times]
+  {:inputs [{:name :task
+             :spec :string
+             :description "The research task to complete"}
+            {:name :inputs-info
+             :spec :string
+             :description "Available inputs with metadata previews (type, size, sample)"}
+            {:name :history
+             :spec :string
+             :description "Results from previous iterations (if any)"}]
+   :outputs [{:name :code
+              :spec :string
+              :description "Clojure code to execute"}]
+   :instructions (str "You are an RLM (Research Language Model) that constructs behavior trees to solve tasks.\n\n"
+                      ;; Two-space architecture explanation
+                      "## Two-Space Architecture\n\n"
+                      "RLM separates **Variable Space** (full data in sandbox memory) from **Token Space** (what LLMs see).\n"
+                      "- Available Variables show PREVIEWS (type, size, sample) - not full content\n"
+                      "- Use (get-input :key) to load full values into variable space\n"
+                      "- Sub-LLM calls via :reads receive previews, keeping token usage bounded\n\n"
+                      ;; Add Available Variables section
+                      (build-available-variables-section blackboard sandbox-vars-map var-creation-times)
+                      "## Available Primitives\n\n"
+                      "### llm - Execute a sub-LLM call\n"
+                      "```clojure\n"
+                      "(llm \"name\" :instruction \"What to do\" :reads [:key] :writes [:output-key])\n"
+                      "```\n"
+                      "- Returns a map with the :writes keys populated\n"
+                      "- :reads [...] passes FULL values to the sub-LLM (no truncation)\n"
+                      "- You control chunk sizes in your code - sub-LLMs receive exactly what you pass\n"
+                      "- :reads keys MUST match exact names from Available Variables section\n\n"
+                      "### final! - Return validated result\n"
+                      "```clojure\n"
+                      "(final! {:key value})\n"
+                      "```\n"
+                      "- MUST include exactly the keys declared in :writes\n"
+                      "- Validates output matches contract\n\n"
+                      "### get-input - Load full value into variable space\n"
+                      "```clojure\n"
+                      "(get-input :key)\n"
+                      "```\n"
+                      "- Returns the full value (not just preview)\n"
+                      "- Use this to access input data for processing\n\n"
+                      "### store!/get-var - Manage computed variables\n"
+                      "```clojure\n"
+                      "(store! :name value)  ;; Store and return value\n"
+                      "(get-var :name)       ;; Retrieve stored value (nil if not found)\n"
+                      "(list-vars)           ;; List all variables with previews\n"
+                      "```\n\n"
+                      "### sequence - Execute children in order\n"
+                      "```clojure\n"
+                      "(sequence \"name\" child1 child2 ...)\n"
+                      "```\n"
+                      "- Executes each child in sequence\n"
+                      "- Merges all result maps together\n\n"
+                      "### map-each - Process collection items\n"
+                      "```clojure\n"
+                      "(map-each \"name\" :collection-key :as :item-name\n"
+                      "  (fn [] (llm \"process\" :reads [:item-name] :writes [:result])))\n"
+                      "```\n"
+                      "- Iterates over collection from :collection-key in variables\n"
+                      "- Injects each item as :item-name (as preview)\n"
+                      "- Body function called for each item\n"
+                      "- Returns vector of results\n\n"
+                      "### code - Pure computation (no LLM)\n"
+                      "```clojure\n"
+                      "(code \"name\" :writes [:result] :body (+ 1 2))\n"
+                      "```\n"
+                      "- Executes pure Clojure computation\n"
+                      "- No LLM call involved\n"
+                      "- Result stored in :writes key\n\n"
+                      "### emit-tree! - Generate a behavior tree for execution\n"
+                      "```clojure\n"
+                      "(emit-tree! [:sequence\n"
+                      "              [:chunk-document {:from :document :size 5000 :into :chunks}]\n"
+                      "              [:map-each {:from :chunks :as :chunk :into :results}\n"
+                      "                [:llm {:instruction \"Extract key info\" :reads [:chunk] :writes [:info]}]]\n"
+                      "              [:aggregate {:from :results :writes [:all-info]}]\n"
+                      "              [:final {:keys [:summary]}]])\n"
+                      "```\n"
+                      "- Emits a behavior tree S-expression for two-phase execution\n"
+                      "- Use this when you need to design a processing pipeline\n"
+                      "- Available node types:\n"
+                      "  - :sequence - Execute children in order\n"
+                      "  - :llm - Execute a sub-LLM call with {:instruction :reads :writes}\n"
+                      "  - :map-each - Process collection items with {:from :as :into :max-concurrency N} (N=1 default, use 3-5 for parallel independent items)\n"
+                      "  - :chunk-document - Split document into chunks with {:from :size :into}\n"
+                      "  - :aggregate - Combine results with {:from :writes}\n"
+                      "  - :final - Return validated output with {:keys [...]}\n"
+                      "- The tree is stored for learning and can be reused\n\n"
+                      "## When to Use emit-tree! (Large Data Processing)\n\n"
+                      "For any large data that exceeds token limits, use emit-tree! to design a processing pipeline:\n"
+                      "- **Documents**: Use :chunk-document to split text, then :map-each + :llm per chunk\n"
+                      "- **Graphs/Ontology**: Traverse by neighborhood or sample subgraphs, then :map-each + :llm\n"
+                      "- **Collections**: Partition into batches, then :map-each + :llm per batch\n\n"
+                      "The pattern is always: break into bounded sub-problems → sub-LLM per piece → aggregate.\n"
+                      "Previews adapt to data type: text samples for documents, T-box/A-box summaries for graphs.\n\n"
+                      ;; Include ontology examples if available
+                      (or (build-ontology-examples-section node) "")
+                      "## Output Contract\n"
+                      "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
+                      "## Example: Simple Analysis (small data)\n"
+                      "```clojure\n"
+                      "(let [data (get-input :document)\n"
+                      "      result (llm \"analyze\" \n"
+                      "               :instruction \"Analyze this text\"\n"
+                      "               :reads [:document]\n"
+                      "               :writes [:analysis])]\n"
+                      "  (final! {:answer (:analysis result)}))\n"
+                      "```\n\n"
+                      "## Example: Processing Large Data (PREFERRED - use emit-tree!)\n"
+                      "For ANY large data (documents, collections, etc.), ALWAYS use emit-tree!:\n"
+                      "```clojure\n"
+                      "(emit-tree!\n"
+                      "  [:sequence\n"
+                      "   [:chunk-document {:from :document :size 8000 :into :chunks}]\n"
+                      "   [:map-each {:from :chunks :as :chunk :into :chunk_results}\n"
+                      "    [:llm {:instruction \"Extract key information from this section\"\n"
+                      "           :reads [:chunk]\n"
+                      "           :writes [:info]}]]\n"
+                      "   [:aggregate {:from :chunk_results :writes [:all_info]}]\n"
+                      "   [:llm {:instruction \"Synthesize the extracted information into a final summary\"\n"
+                      "          :reads [:all_info]\n"
+                      "          :writes [:summary]}]\n"
+                      "   [:final {:keys [:summary]}]])\n"
+                      "```\n"
+                      "This is the PREFERRED approach because:\n"
+                      "- Tree structure is stored for learning and reuse\n"
+                      "- Proper chunking with :chunk-document\n"
+                      "- Clean separation of concerns\n"
+                      "- Integrates with ORC behavior tree engine\n\n"
+                      "## Your Task\n"
+                      (:instruction node))})
+
+(defn execute-repl-researcher-rlm
+  "Execute a repl-researcher node in RLM mode.
+
+   RLM mode provides BT primitives in the sandbox:
+   - (llm ...) executes sub-LLM calls
+   - (final! ...) validates and captures output
+   - (get-input ...) loads input values
+
+   This separates variable space (sandbox memory) from token space (LLM context).
+
+   Options:
+   - :debug? - Enable verbose debug output for troubleshooting (default: false)"
+  [node blackboard provider context & {:keys [options] :or {options {}}}]
+  (let [start-time (System/currentTimeMillis)
+        max-iterations (or (:max-iterations node) 10)
+        mcp-tools (or (:mcp-tools node) [])
+        browser-tools (or (:browser-tools node) [])
+        call-tool-fn (:call-tool-fn context)
+        declared-writes (:writes node)
+        ;; Extract debug? from node's :rlm config (can be {:debug? true}) or from options
+        rlm-config (let [rlm (:rlm node)] (if (map? rlm) rlm {}))
+        debug? (or (get rlm-config :debug? false) (get options :debug? false))
+
+        ;; Debug helper
+        dbg (fn [& args] (when debug? (apply println "[DEBUG RLM]" args)))
+
+        ;; Build inputs preview for LLM context
+        inputs-preview (rlm-sandbox/build-inputs-preview blackboard)
+
+        ;; Track usage across iterations
+        total-usage (atom {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})
+
+        ;; Persistent sandbox-vars across iterations (for store!/get-var)
+        sandbox-vars (atom {})
+
+        ;; Track when each variable was created (iteration number)
+        var-creation-times (atom {})]
+
+    (try
+      (loop [iteration 0
+             history []]
+        (if (>= iteration max-iterations)
+          {:status :failure
+           :error "Max iterations reached without final!"
+           :iterations history
+           :duration-ms (- (System/currentTimeMillis) start-time)
+           :usage @total-usage}
+
+          ;; Generate code using LLM
+          (let [module (build-rlm-code-generation-module node inputs-preview history
+                                                          blackboard @sandbox-vars @var-creation-times)
+                inputs {:task (:instruction node)
+                        :inputs-info (pr-str inputs-preview)
+                        :history (or (build-iteration-history history) "None")}
+                ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
+                ;; Passing :model causes response parsing issues in dscloj
+                ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
+                ;; DSCloj marker-based parsing works better for structured output extraction
+                ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
+                dscloj-options (assoc options :validate? false :use-function-calling? false :with-metadata? true)
+                effective-provider (get-provider-with-model provider (:model node))
+
+                _ (dbg "\n========== ITERATION" (inc (count history)) "==========")
+                _ (dbg "node :model =" (:model node))
+                _ (dbg "provider =" provider)
+                _ (dbg "effective-provider =" effective-provider)
+                _ (dbg "dscloj-options =" dscloj-options)
+                _ (dbg "module :outputs =" (:outputs module))
+                _ (dbg "module :instructions length =" (count (:instructions module)))
+                _ (dbg "inputs :task =" (subs (:task inputs) 0 (min 100 (count (:task inputs)))) "...")
+                _ (dbg "inputs :inputs-info =" (subs (:inputs-info inputs) 0 (min 200 (count (:inputs-info inputs)))) "...")
+                _ (dbg "calling dscloj/predict...")
+                llm-result (try
+                             (dscloj/predict effective-provider module inputs dscloj-options)
+                             (catch Exception e
+                               (dbg "dscloj/predict EXCEPTION:" (.getMessage e))
+                               {:code nil :error (.getMessage e)}))
+                _ (dbg "dscloj/predict returned")
+                _ (dbg "llm-result keys:" (keys llm-result))
+                _ (when (and debug? (:usage llm-result))
+                    (dbg "usage:" (:usage llm-result)))
+                _ (dbg ":code type:" (type (:code llm-result)))
+                _ (dbg ":code nil?:" (nil? (:code llm-result)))
+                _ (dbg "[:outputs :code] nil?:" (nil? (get-in llm-result [:outputs :code])))
+                _ (dbg "[:outputs] keys:" (keys (:outputs llm-result)))
+                _ (when debug?
+                    (dbg "FULL llm-result:" (pr-str (update llm-result :outputs #(into {} (map (fn [[k v]] [k (if (string? v) (subs v 0 (min 500 (count v))) v)]) %))))))
+                _ (when (and debug? (get-in llm-result [:outputs :code]))
+                    (dbg "GENERATED CODE (first 1000 chars):" (subs (get-in llm-result [:outputs :code]) 0 (min 1000 (count (get-in llm-result [:outputs :code]))))))
+                _ (dbg ":code blank?:" (if (string? (:code llm-result))
+                                         (str/blank? (:code llm-result))
+                                         "N/A"))
+                _ (when (and debug? (string? (:code llm-result)))
+                    (dbg ":code length:" (count (:code llm-result)))
+                    (dbg ":code first 200 chars:" (subs (:code llm-result) 0 (min 200 (count (:code llm-result))))))
+                _ (dbg "========================================\n")
+                ;; Extract code from LLM result
+                ;; With function calling mode, code may be returned as:
+                ;; 1. A string (normal case) - strip markdown fences and whitespace
+                ;; 2. A parsed Clojure data structure (function calling parsed the JSON) - convert to string
+                code (let [raw (or (:code llm-result) (get-in llm-result [:outputs :code]))]
+                       (cond
+                         (string? raw)
+                         (-> raw
+                             (str/replace #"^```(?:clojure|clj|edn)?\s*\n?" "")
+                             (str/replace #"\n?```\s*$" "")
+                             str/trim)
+
+                         (some? raw)
+                         ;; Already parsed Clojure form - convert back to string for sandbox
+                         (pr-str raw)
+
+                         :else nil))
+
+                ;; Update usage tracking (normalize handles snake_case -> kebab-case)
+                _ (when-let [u (normalize-usage (:usage llm-result))]
+                    (swap! total-usage
+                           (fn [acc]
+                             {:prompt-tokens (+ (:prompt-tokens acc 0) (:prompt-tokens u))
+                              :completion-tokens (+ (:completion-tokens acc 0) (:completion-tokens u))
+                              :total-tokens (+ (:total-tokens acc 0) (:total-tokens u))})))]
+
+            (cond
+                (str/blank? code)
+                {:status :failure
+                 :error "LLM did not generate code"
+                 :iterations history
+                 :duration-ms (- (System/currentTimeMillis) start-time)
+                 :usage @total-usage}
+
+                :else
+                ;; Build RLM sandbox context with BT primitives
+                ;; Pass persistent sandbox-vars so variables survive across iterations
+                (let [vars-before (set (keys @sandbox-vars))
+                    rlm-ctx (rlm-sandbox/build-rlm-context
+                            {:provider provider
+                             :blackboard blackboard
+                             :declared-writes declared-writes
+                             :call-tool-fn call-tool-fn
+                             :mcp-tools mcp-tools
+                             :browser-tools browser-tools
+                             :sandbox-vars sandbox-vars})
+                    exec-result (rlm-sandbox/execute-rlm-code rlm-ctx code)
+                    ;; Track new variables created in this iteration
+                    vars-after (set (keys @sandbox-vars))
+                    new-vars (clojure.set/difference vars-after vars-before)
+                    _ (doseq [k new-vars]
+                        (swap! var-creation-times assoc k (inc iteration)))
+                    new-history (conj history
+                                      {:code code
+                                       :result (:result exec-result)
+                                       :stdout (:stdout exec-result)
+                                       :error (:error exec-result)
+                                       :vars-created (vec new-vars)})
+                    final-output (:final-output exec-result)
+                    ;; Aggregate sub-LLM usage into total usage
+                    sub-llm-usage (:sub-llm-usage exec-result)
+                    _ (when (and sub-llm-usage (pos? (:total-tokens sub-llm-usage 0)))
+                        (swap! total-usage
+                               (fn [acc]
+                                 {:prompt-tokens (+ (:prompt-tokens acc 0) (:prompt-tokens sub-llm-usage 0))
+                                  :completion-tokens (+ (:completion-tokens acc 0) (:completion-tokens sub-llm-usage 0))
+                                  :total-tokens (+ (:total-tokens acc 0) (:total-tokens sub-llm-usage 0))})))
+                    _ (when debug?
+                        (dbg "exec-result :error:" (:error exec-result))
+                        (dbg "exec-result :final-output:" final-output)
+                        (when (pos? (:total-tokens sub-llm-usage 0))
+                          (dbg "sub-llm-usage:" sub-llm-usage)))]
+
+                (cond
+                  ;; Security violation - fail immediately (no retry)
+                  (and (:error exec-result)
+                       (str/includes? (str (:error exec-result)) "Security"))
+                  {:status :failure
+                   :error (:error exec-result)
+                   :iterations new-history
+                   :duration-ms (- (System/currentTimeMillis) start-time)
+                   :usage @total-usage}
+
+                  ;; Recoverable error - add to history and continue iteration
+                  ;; This gives the model a chance to self-correct
+                  (:error exec-result)
+                  (let [error-msg (:error exec-result)
+                        available-vars (concat (keys blackboard) (keys @sandbox-vars))
+                        enhanced-error (format-error-with-suggestions error-msg available-vars)
+                        error-history (conj history
+                                           {:code code
+                                            :result nil
+                                            :stdout (:stdout exec-result)
+                                            :error enhanced-error
+                                            :vars-created []})]
+                    (recur (inc iteration) error-history))
+
+                  ;; final! was called - return the validated output
+                  final-output
+                  {:status :success
+                   :outputs final-output
+                   :final-answer final-output
+                   :iterations new-history
+                   :duration-ms (- (System/currentTimeMillis) start-time)
+                   :usage @total-usage}
+
+                  ;; emit-tree! was called - trigger Phase 2 execution automatically
+                  ;; Phase 1 generated the tree, now execute it via child ORC tick
+                  (contains? @sandbox-vars :generated-tree)
+                  (let [generated-tree (:generated-tree @sandbox-vars)
+                        generated-tree-raw (:generated-tree-raw @sandbox-vars)
+                        ;; Debug: Print the generated tree
+                        _ (when debug?
+                            (println "\n[DEBUG RLM] Phase 2 triggered - emit-tree! was called")
+                            (println "[DEBUG RLM] Generated tree (raw S-expr):")
+                            (clojure.pprint/pprint generated-tree-raw)
+                            (println "\n[DEBUG RLM] Generated tree (canonical ORC DSL):")
+                            (clojure.pprint/pprint generated-tree))
+                        ;; Execute Phase 2: spawn child tick with the generated tree
+                        ;; Pass all sandbox-vars (except the tree itself) as inputs
+                        phase2-vars (dissoc @sandbox-vars :generated-tree :generated-tree-raw)
+                        _ (when debug?
+                            (println "\n[DEBUG RLM] Phase 2 sandbox vars:" (keys phase2-vars)))
+                        phase2-result (try
+                                        (tree-executor/execute-tree
+                                          generated-tree
+                                          context
+                                          {:sandbox-vars phase2-vars
+                                           :blackboard (reduce-kv
+                                                         (fn [acc k entry]
+                                                           (assoc acc k (:value entry)))
+                                                         {}
+                                                         blackboard)
+                                           :timeout-ms 900000})  ;; 15 min for Phase 2 (parallel chunk processing + multi-stage synthesis can be slow on large docs)
+                                        (catch Exception e
+                                          (println "[DEBUG RLM] Phase 2 execution ERROR:" (.getMessage e))
+                                          (.printStackTrace e)
+                                          {:status :failure
+                                           :error (str "Phase 2 execution failed: " (.getMessage e))}))
+                        phase1-duration (- (System/currentTimeMillis) start-time)
+                        _ (when debug?
+                            (println "\n[DEBUG RLM] Phase 2 result:")
+                            (println "  status:" (:status phase2-result))
+                            (println "  error:" (:error phase2-result))
+                            (println "  outputs keys:" (keys (:outputs phase2-result)))
+                            (println "  duration-ms:" (:duration-ms phase2-result)))]
+                    ;; Merge Phase 1 + Phase 2 results
+                    (let [p1-usage @total-usage
+                          p2-usage (:usage phase2-result)
+                          combined-usage {:prompt-tokens (+ (:prompt-tokens p1-usage 0)
+                                                            (:prompt-tokens p2-usage 0))
+                                          :completion-tokens (+ (:completion-tokens p1-usage 0)
+                                                                (:completion-tokens p2-usage 0))
+                                          :total-tokens (+ (:total-tokens p1-usage 0)
+                                                           (:total-tokens p2-usage 0))}]
+                      {:status (:status phase2-result)
+                       :outputs (:outputs phase2-result)
+                       :generated-tree-raw generated-tree-raw
+                       :iterations new-history
+                       :duration-ms (+ phase1-duration (or (:duration-ms phase2-result) 0))
+                       :usage combined-usage
+                       :breakdown {:phase1 p1-usage :phase2 p2-usage}
+                       :phase2-duration-ms (:duration-ms phase2-result)
+                       :phase2-error (:error phase2-result)}))
+
+                  ;; Check for FINAL_ANSWER pattern (fallback)
+                  (or (sci-sandbox/contains-final-answer? (:result exec-result))
+                      (sci-sandbox/contains-final-answer? (:stdout exec-result)))
+                  (let [final-answer (or (sci-sandbox/extract-final-answer (:result exec-result))
+                                         (sci-sandbox/extract-final-answer (:stdout exec-result)))
+                        outputs (if (map? final-answer)
+                                  final-answer
+                                  {(first declared-writes) final-answer})]
+                    {:status :success
+                     :outputs outputs
+                     :final-answer final-answer
+                     :iterations new-history
+                     :duration-ms (- (System/currentTimeMillis) start-time)
+                     :usage @total-usage})
 
                   ;; Continue iteration
                   :else
