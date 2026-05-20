@@ -12,77 +12,108 @@ RLM fits problems where the *right tree shape isn't known up front*. The model d
 
 If your tree shape is fixed and known, use the regular ORC DSL directly — don't pay the Phase 1 code-gen overhead.
 
-## Composition: `:repl-researcher` as a node inside a larger tree
+## Composition: `repl-researcher` as a node inside a larger workflow
 
-`:repl-researcher` is a leaf node type like `:llm` or `:code` — it can sit anywhere in your behavior tree, not just at the root. Upstream nodes can write to blackboard keys the researcher reads, and downstream nodes can consume what the researcher wrote.
+`orc/repl-researcher` is a leaf-style node like `orc/llm` or `orc/code` — it sits anywhere in your behavior tree, not just at the root. Upstream nodes can write to blackboard keys the researcher reads; downstream nodes can consume what the researcher wrote.
 
-A common pattern is **pre-process → research → post-process**:
+A common pattern is **pre-process → research → post-process**, using the high-level DSL:
 
-```
-[:sequence
-  [:leaf :ai pre-process
-    :reads [:raw-input]
-    :writes [:cleaned-input]
-    :instruction "Clean the raw input. Remove extra whitespace, normalize punctuation."]
+```clojure
+(require '[ai.obney.orc.orc-service.interface :as orc])
 
-  [:repl-researcher
-    :reads [:cleaned-input]
-    :writes [:researched-summary]
-    :instruction "Produce a one-paragraph summary highlighting key facts."
-    :max-iterations 3
-    :rlm {:debug? true}]              ;; or {:recursive? true} for the recursive flow
+(def my-workflow
+  (orc/workflow "research-pipeline"
+    (orc/blackboard
+      {:raw-input          :string
+       :cleaned-input      :string
+       :researched-summary :string
+       :final-report       :string})
 
-  [:leaf :ai post-process
-    :reads [:researched-summary]
-    :writes [:final-report]
-    :instruction "Wrap the summary as a brief executive report."]]
+    (orc/sequence "main"
+      (orc/llm "pre-process"
+        :model "google/gemini-2.5-flash"
+        :instruction "Clean the raw input. Remove extra whitespace, normalize punctuation."
+        :reads  [:raw-input]
+        :writes [:cleaned-input])
+
+      (orc/repl-researcher "research"
+        :model "google/gemini-2.5-flash"
+        :instruction "Produce a one-paragraph summary highlighting key facts."
+        :reads  [:cleaned-input]
+        :writes [:researched-summary]
+        :max-iterations 3
+        :rlm true)                       ; or {:recursive? true} / {:debug? true}
+
+      (orc/llm "post-process"
+        :model "google/gemini-2.5-flash"
+        :instruction "Wrap the summary as a brief executive report."
+        :reads  [:researched-summary]
+        :writes [:final-report]))))
+
+;; Build (idempotent — no-op if definition hasn't changed) and execute.
+;; build-workflow! returns the deterministic sheet-id derived from the
+;; workflow name, so you can pipe it straight into execute.
+(let [sheet-id (orc/build-workflow! ctx my-workflow)]
+  (orc/execute ctx sheet-id {:raw-input some-text}))
 ```
 
 Execution flow:
 
-1. The `:sequence` node runs its children in order.
+1. The `sequence` node runs its children in order.
 2. `pre-process` writes `:cleaned-input` to the blackboard.
-3. The researcher reads `:cleaned-input` (now available on the blackboard), runs its iterative Phase 1 (and Phase 2 if `emit-tree!` is called), and writes `:researched-summary`.
+3. The researcher reads `:cleaned-input`, runs its iterative Phase 1 (and Phase 2 if it calls `emit-tree!`), writes `:researched-summary`.
 4. `post-process` reads `:researched-summary` and writes `:final-report`.
-5. The sequence's outputs include everything written to the blackboard.
+5. The execute call's `:outputs` includes everything written to the blackboard.
 
 There's nothing special about being a child — the researcher emits the same `:sheet/node-execution-completed` event as any other leaf, and sequence/fallback/parallel parents react to it the same way.
 
 ### Things to be aware of when composing
 
-- **Blackboard keys must be declared up front** (via `make-declare-key-command` or your sheet-builder equivalent). The researcher's `:reads` only see declared keys that prior nodes have written.
+- **Blackboard keys must be declared up front** in `orc/blackboard`. The researcher's `:reads` only see declared keys that prior nodes have written.
 - **The researcher reports `:status :success` / `:failure` / `:partial` / `:timeout` like any other node.** Sequence parents continue on `:success` and `:partial`, halt on `:failure`. Fallback continues on `:failure` to the next sibling. So you can place the researcher anywhere in those compositions.
 - **Budget composition.** If you set `:timeout-ms` on the researcher, it bounds total Phase 1 + cumulative tree-execution wall-time *for that researcher only* — it doesn't account for sibling nodes. If your overall workflow has a deadline, the researcher's `:timeout-ms` should be set lower than the remaining time you want to allow.
-- **Multiple researchers in one tree** are supported — each gets its own Phase 1 loop and (if it calls `emit-tree!`) its own Phase 2 child tick. Their iteration counts and budgets are independent.
+- **Multiple researchers in one workflow** are supported — each gets its own Phase 1 loop and (if it calls `emit-tree!`) its own Phase 2 child tick. Their iteration counts and budgets are independent.
 
 ## Basic usage (terminal mode — default)
+
+The simplest case: a workflow whose root is a single `repl-researcher` node.
 
 ```clojure
 (require '[ai.obney.orc.orc-service.interface :as orc])
 
-;; Build a sheet with a repl-researcher node
-;; ... declare blackboard keys, create the node ...
+(def risk-analysis
+  (orc/workflow "risk-analysis"
+    (orc/blackboard
+      {:document          :string
+       :risk-matrix       :string
+       :executive-summary :string})
 
-;; Configure the researcher
-(orc/set-repl-researcher-config!
-  ctx sheet-id node-id
-  {:instruction "Analyze the document for risks and obligations..."
-   :reads [:document]
-   :writes [:risk-matrix :executive-summary]
-   :mcp-tools []
-   :model "google/gemini-2.5-flash"
-   :max-iterations 5
-   :rlm {:debug? true}})
+    (orc/repl-researcher "researcher"
+      :model "google/gemini-2.5-flash"
+      :instruction "Analyze the document for risks and obligations. Produce
+                    a :risk-matrix mapping each obligation to HIGH/MEDIUM/LOW
+                    with justification, and an :executive-summary."
+      :reads  [:document]
+      :writes [:risk-matrix :executive-summary]
+      :max-iterations 5
+      :rlm true)))                       ; or {:debug? true} for verbose logging
 
-;; Execute
-(orc/execute ctx sheet-id {:document doc-text})
+;; Build (idempotent — no-op if definition hasn't changed) and execute.
+;; build-workflow! returns the deterministic sheet-id derived from the
+;; workflow name.
+(let [sheet-id (orc/build-workflow! ctx risk-analysis)]
+  (orc/execute ctx sheet-id {:document doc-text}))
+;; => {:status :success
+;;     :outputs {:risk-matrix "..." :executive-summary "..."}
+;;     :duration-ms ...}
 ```
 
 The model:
-1. Iterates up to `:max-iterations` times, generating Clojure code each iteration
+
+1. Iterates up to `:max-iterations` times, generating Clojure code each iteration.
 2. Code can call `(llm ...)`, `(code ...)`, `(store! ...)`, `(get-var ...)`, etc.
-3. Optionally calls `(emit-tree! [...])` to design a behavior tree for ORC to execute
-4. Terminal `emit-tree!`: Phase 2 runs and the result returns to the caller — loop ends.
+3. Optionally calls `(emit-tree! [...])` to design a behavior tree for ORC to execute.
+4. Terminal mode: when the model calls `emit-tree!`, Phase 2 runs and the result returns to the caller — the loop ends immediately.
 
 ## Recursive mode (`:rlm {:recursive? true}`)
 
