@@ -95,6 +95,38 @@ clj -M:dev -e '(require (quote [risk-analysis :as t])) (require (quote [runner])
 clj -M:dev -e '(require (quote [all :as bench])) (bench/start!) (bench/run-all!) (bench/summary!) (bench/stop!)'
 ```
 
+## RLM Mode (repl-researcher node)
+
+The `:repl-researcher` node type provides a two-phase execution pattern. See [`docs/RLM-GUIDE.md`](docs/RLM-GUIDE.md) for the comprehensive guide.
+
+**Two modes**, controlled by the `:rlm` config on the node:
+
+```clojure
+;; Terminal mode (default) — model designs ONE tree, Phase 2 runs, result returns to caller
+{:rlm true}                          ; or {:rlm {:debug? true}}
+
+;; Recursive mode (R-1, opt-in) — emit-tree! returns to Phase 1; model can inspect and continue
+{:rlm {:recursive? true}}            ; or {:rlm {:recursive? true :debug? true}}
+```
+
+In recursive mode, after Phase 2 completes (any status):
+- Tree's `:writes`-declared outputs merge into sandbox-vars (model calls `(get-var :summary)` naturally)
+- A lightweight summary entry appends to `:tree-results` (chronological history with `:status`, `:elapsed-ms`, `:nodes-succeeded/failed`, `:failure-indices`/`:failure-reasons` on `:partial`/`:failure`, timeout fields on `:timeout`)
+- Control returns to Phase 1 — model can run follow-up `(llm ...)` / `(code ...)`, emit another tree, or call `(final! ...)` to terminate
+
+Existing callers using `:rlm true` are unaffected — terminal behavior is preserved.
+
+### Recent observability + resilience additions
+
+The repo recently shipped foundational work that the RLM layers build on:
+
+- **O01–O03**: per-node usage events with structured `:node-path`, per-node `:input-profile` (length, word-count, line-count), bookend `:sheet/rlm-tree-execution-completed` event with full trajectory + `:task-fingerprint` placeholder
+- **D-008**: first-class `:partial` map-each status with `:partial-summary` block (verbatim failure-indices + failure-reasons); successes-only output blackboard key; sticky `:partial` propagation through sequences
+- **D-003**: `:timeout-ms` on the repl-researcher node bounds total Phase-1+Phase-2 wall-time; on Phase-2 timeout, dispatches existing `:sheet cancel-tick` command + ~500 ms drain so in-flight nodes settle their writes
+- **R-1**: recursive `emit-tree!` (opt-in via `:rlm {:recursive? true}`)
+
+All build on Grain v2's event-sourcing patterns — commands emit events, processors react. Detailed PRDs and per-slice issues live as local-only files under `docs/prd/` and `docs/issues/` on the `feature/core-orc-upgrades` branch.
+
 ## Skills
 
 ### ORC Domain

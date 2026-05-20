@@ -189,6 +189,7 @@ ORC is a library — consumers provide:
 |-------|-------------|
 | [ORC Service Guide](docs/ORC-SERVICE-GUIDE.md) | Core execution engine and DSL reference |
 | [DSL Tutorial](docs/dsl-tutorial.md) | Step-by-step workflow building tutorial |
+| [**RLM Guide**](docs/RLM-GUIDE.md) | Research Language Model — two-phase execution + recursive `emit-tree!` |
 | [Architecture](docs/ARCHITECTURE.md) | System architecture and design decisions |
 | [GEPA Guide](docs/GEPA-GUIDE.md) | Prompt optimization with GEPA |
 | [Evaluation](docs/EVALUATION-COMPONENT.md) | LLM-as-judge evaluation framework |
@@ -197,6 +198,20 @@ ORC is a library — consumers provide:
 | [MCP Sheet Builder](docs/MCP-SHEET-BUILDER-GUIDE.md) | Dynamic workflow generation |
 | [Event Store Patterns](docs/EVENT-STORE-PATTERNS.md) | Grain event sourcing patterns |
 | [Pattern Compendium](docs/pattern-compendium.md) | Complete pattern reference |
+
+### Benchmarks
+
+| Document | Description |
+|---|---|
+| [Bench README](development/bench/README.md) | How to run the 5-task generalization benchmark suite |
+| [Bench RESULTS](development/bench/RESULTS.md) | Headline report — RLM designs 4 distinct tree patterns + 1 "no-tree" decision across structurally different tasks; zero hallucinations across 37+ spot-checks |
+
+## Recent Work
+
+- **R-1** — Recursive `emit-tree!` (opt-in via `:rlm {:recursive? true}`): the model can now inspect tree outputs and continue reasoning, rather than `emit-tree!` being a one-shot terminator. See [RLM Guide](docs/RLM-GUIDE.md).
+- **D-008** — Map-each partial results: first-class `:partial` status with `:partial-summary` block on the map-each completion event, successes-only output blackboard key, sticky `:partial` propagation through sequences.
+- **D-003** — Phase 2 budget-aware timeout: `:timeout-ms` on the repl-researcher node bounds total Phase-1+Phase-2 wall-time, with clean `:sheet cancel-tick` dispatch and ~500 ms drain on timeout.
+- **O01–O03** — Observability layer: per-node usage events with structured paths, input-profile capture, bookend `:sheet/rlm-tree-execution-completed` event with full trajectory.
 
 ## License
 
