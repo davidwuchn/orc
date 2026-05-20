@@ -273,29 +273,24 @@ Per the Grain methodology — every event is monitorable.
 
 Judges in future work can subscribe to any of these for granular signal.
 
-## Generated tree result EDN
+## Result shape
 
-When you run a Phase 2 tree, the saved EDN result has:
+When you call `orc/execute`, the result delivered to your caller has:
 
 ```clojure
 {:status :success | :partial | :failure | :timeout
- :outputs {<your :writes keys> ...}
+ :outputs {<your declared :writes keys> ...}
  :usage {:prompt-tokens N :completion-tokens N :total-tokens N
          :by-node {<structured-path> {tokens per node}}}      ; per-node breakdown
- :duration-ms N
- :trace-id <uuid>                                              ; for drill-down
- ;; Phase timing breakdown:
- :phase1-elapsed-ms N
- :phase2-elapsed-ms N
- :phase2-tick-id <uuid>}
+ :duration-ms N                                                ; total wall-time
+ :trace-id <uuid>                                              ; the tick-id, for drill-down via event store
+ :error <string?>                                              ; present when :status is :failure / :timeout
+ :generated-tree-raw [...]}                                    ; the raw S-expr tree when the model emitted one
 ```
 
-When recursive mode is on, additional response fields:
+This is what `runtime/deliver-completion!` forwards to the synchronous caller — same shape regardless of whether the researcher ran in terminal or recursive mode.
 
-```clojure
-{:cumulative-thinking-ms N    ; sum of Phase 1 code-gen wall-time
- :cumulative-tree-ms N}       ; sum of tree-execution wall-time
-```
+**Phase-level timing breakdown** (`:phase1-elapsed-ms`, `:phase2-elapsed-ms`, `:phase2-tick-id`, `:cumulative-thinking-ms`, `:cumulative-tree-ms`) is **not currently surfaced through the `sheet/execute` envelope**. It exists in the inner researcher response (visible if you invoke `execute-repl-researcher-rlm` directly), and the underlying events (`:sheet/node-execution-completed`, `:sheet/rlm-tree-execution-completed`) carry the per-node and per-tick timing data that observability consumers can reconstruct from the event store. Surfacing the breakdown on the top-level execute result is a planned enhancement.
 
 ## Generalization benchmark
 
