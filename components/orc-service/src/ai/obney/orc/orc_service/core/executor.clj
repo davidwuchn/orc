@@ -876,34 +876,28 @@
                                desc (malli-schema->description schema)]]
                      (str "- " key-name ": " desc))))))
 
-(defn- truncate-code
-  "Truncate code if it's too long, preserving the start and end."
-  [code max-len]
-  (if (> (count code) max-len)
-    (let [half (quot (- max-len 20) 2)]
-      (str (subs code 0 half) "\n... [truncated] ...\n" (subs code (- (count code) half))))
-    code))
-
 (defn- build-iteration-history
   "Format iteration history for LLM context.
 
-   Includes code executed, result, errors, and variables created in each iteration.
-   Long code is truncated for conciseness."
+   The model sees its own prior code, results, stdout, errors, and the
+   variables each iteration created — VERBATIM. Truncating any of this
+   second-guesses the model and hides what it actually did, degrading
+   its ability to reason across iterations (and, in recursive mode,
+   to see the full trees it has already emitted)."
   [history]
   (when (seq history)
     (str "\n\n## Previous Iterations\n"
          (str/join "\n\n"
                    (map-indexed
                     (fn [idx {:keys [code result stdout error vars-created]}]
-                      (let [truncated-code (truncate-code code 500)]
-                        (str "### Iteration " (inc idx) "\n"
-                             "Code:\n```clojure\n" truncated-code "\n```\n"
-                             (when (seq stdout) (str "Output:\n" stdout "\n"))
-                             (if error
-                               (str "Error: " error)
-                               (str "Result: " result))
-                             (when (seq vars-created)
-                               (str "\nVariables created: " (str/join ", " (map str vars-created)))))))
+                      (str "### Iteration " (inc idx) "\n"
+                           "Code:\n```clojure\n" code "\n```\n"
+                           (when (seq stdout) (str "Output:\n" stdout "\n"))
+                           (if error
+                             (str "Error: " error)
+                             (str "Result: " result))
+                           (when (seq vars-created)
+                             (str "\nVariables created: " (str/join ", " (map str vars-created))))))
                     history)))))
 
 (defn- build-code-generation-module
