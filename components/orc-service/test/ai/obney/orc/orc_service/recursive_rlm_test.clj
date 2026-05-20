@@ -7,6 +7,12 @@
    non-recursive mode."
   (:require [clojure.test :refer [deftest testing is]]
             [dscloj.core :as dscloj]
+            ;; Loading interface.schemas registers the malli command schemas
+            ;; (:sheet/create-sheet, :sheet/tick-tree, etc.) that the command
+            ;; processor uses during Phase 2 execution. Without this, the tree
+            ;; executor's :sheet/create-sheet command fails malli/schema lookup
+            ;; and Phase 2 silently aborts before any tree events are emitted.
+            [ai.obney.orc.orc-service.interface.schemas]
             [ai.obney.orc.orc-service.core.executor :as executor]
             [ai.obney.orc.orc-service.core.todo-processors :as tp-core]
             [ai.obney.grain.event-store-v3.interface :as es]
@@ -426,3 +432,77 @@
                 ":cumulative-tree-ms is non-negative (>= 0)")
             (is (>= (:cumulative-thinking-ms result) 0)
                 ":cumulative-thinking-ms is non-negative (>= 0)")))))))
+
+;; =============================================================================
+;; R-2: Drill-down primitives — end-to-end against the live event store
+;; =============================================================================
+
+(deftest recursive-mode-drill-down-primitives-read-event-store-after-recur
+  (testing "Iter 2 can call drill-down primitives against the real event store"
+    (with-test-ctx [ctx]
+      (let [outer-call-count (atom 0)
+            phase1-module? (fn [module]
+                             (boolean (some #(= :code (:name %)) (:outputs module))))]
+        (with-redefs [dscloj/predict
+                      (fn [_provider module _inputs _opts]
+                        (cond
+                          (phase1-module? module)
+                          (let [n (swap! outer-call-count inc)]
+                            (if (= 1 n)
+                              ;; Iter 1: emit a small tree that produces :summary
+                              {:outputs {:code "(emit-tree!
+                                                  [:sequence
+                                                    [:llm {:instruction \"summarize\"
+                                                           :reads [:document]
+                                                           :writes [:summary]}]
+                                                    [:final {:keys [:summary]}]])"}
+                               :usage {:prompt_tokens 50 :completion_tokens 25 :total_tokens 75}}
+                              ;; Iter 2: call EACH drill-down primitive, fold into final!.
+                              ;; The code captures structural properties — not raw values
+                              ;; that depend on internal ids/timing.
+                              {:outputs {:code "(let [d (tree-detail)
+                                                       t (tree-trajectory)
+                                                       f (tree-failures)]
+                                                   (final! {:summary (get (:outputs d) :summary)
+                                                            :detail-status (:status d)
+                                                            :node-count (count (:nodes d))
+                                                            :trajectory-count (count t)
+                                                            :failure-count (count f)}))"}
+                               :usage {:prompt_tokens 60 :completion_tokens 30 :total_tokens 90}}))
+
+                          :else
+                          ;; Phase 2 sub-LLM produces :summary
+                          {:outputs {:summary "tree-produced summary"}
+                           :usage {:prompt_tokens 10 :completion_tokens 5 :total_tokens 15}}))]
+          (let [node {:type :repl-researcher
+                      :instruction "Summarize then introspect"
+                      :reads [:document]
+                      :writes [:summary :detail-status :node-count
+                               :trajectory-count :failure-count]
+                      :rlm {:recursive? true}
+                      :max-iterations 5}
+                blackboard {:document {:key :document :schema :string
+                                       :value "doc text" :version 1}}
+                result (executor/execute-repl-researcher-rlm
+                         node blackboard :openrouter ctx)
+                outs (:outputs result)]
+            (is (= :success (:status result))
+                (str "Expected :success, got: " (:status result)
+                     " error: " (:error result)))
+            (is (= 2 @outer-call-count)
+                "Two outer predict calls — iter 1 emits, iter 2 inspects + final!")
+            ;; tree-detail returned an object — these fields prove it's the real
+            ;; event-store projection, not a stub.
+            (is (= :success (:detail-status outs))
+                ":detail-status was pulled out of (tree-detail) result")
+            (is (pos? (:node-count outs))
+                "(tree-detail) returned a :nodes vector with at least one entry")
+            (is (= "tree-produced summary" (:summary outs))
+                ":outputs map from (tree-detail) carried the sub-LLM's :summary value")
+            ;; trajectory + failures should be queryable. Trajectory may be empty
+            ;; if the bookend event isn't yet in the store; failures must be 0 for
+            ;; a successful tree.
+            (is (number? (:trajectory-count outs))
+                "(tree-trajectory) result has a counted shape")
+            (is (= 0 (:failure-count outs))
+                "(tree-failures) returned empty for a successful tree")))))))

@@ -341,13 +341,21 @@
         {:node-id map-each-id
          :ephemeral-fn-keys (:ephemeral-fn-keys child-result)}))
 
-    ;; Code node: (sheet/code :reads [...] :writes [...] :fn <function>)
-    ;; For inline functions, register in ephemeral registry and pass lookup key
+    ;; Code node: (sheet/code :reads [...] :writes [...] :fn <function-or-string>)
+    ;; Two cases for :fn:
+    ;;   (a) An inline Clojure function (from :chunk-document / :aggregate
+    ;;       transformers in rlm_dsl.clj, OR a model-authored inline fn in
+    ;;       an emit-tree! :code node) — register in the ephemeral registry
+    ;;       so it survives serialization across the child sheet boundary.
+    ;;   (b) A fully-qualified symbol string (rare; ns-resolve at execution
+    ;;       time) — pass through directly; ephemeral registry untouched.
     (and (seq? tree) (= 'sheet/code (first tree)))
     (let [opts (parse-keyword-args (rest tree))
           f (:fn opts)
-          ;; Register inline function in ephemeral registry
-          fn-key (register-ephemeral-fn! f)
+          string-fn? (string? f)
+          ;; Inline-fn → ephemeral registry; symbol-string → use directly
+          fn-value (if string-fn? f (register-ephemeral-fn! f))
+          ephemeral-keys (if string-fn? [] [fn-value])
           ;; Create leaf node
           leaf-result (run-command! context
                         (make-create-node-command sheet-id :leaf :parent-id parent-id :index index))
@@ -363,7 +371,7 @@
          :node-id leaf-id
          :reads reads
          :writes writes})
-      ;; Set executor to :code with the ephemeral fn key
+      ;; Set executor to :code with the fn reference (qualified symbol or ephemeral key)
       (run-command! context
         {:command/name :sheet/set-node-executor
          :command/id (random-uuid)
@@ -371,9 +379,9 @@
          :sheet-id sheet-id
          :node-id leaf-id
          :executor :code
-         :fn fn-key})
+         :fn fn-value})
       {:node-id leaf-id
-       :ephemeral-fn-keys [fn-key]})
+       :ephemeral-fn-keys ephemeral-keys})
 
     ;; Final node: (final! {:keys [...]})
     ;; This is a marker for output keys - we don't need to create a node

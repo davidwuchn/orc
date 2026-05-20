@@ -130,6 +130,28 @@
       (let [opts (first args)]
         (list 'final! opts))
 
+      :code
+      ;; Model-authored pure-Clojure transform inside a Phase 2 tree.
+      ;; :fn may be either:
+      ;;   (a) an inline function value, e.g.
+      ;;       (fn [{:keys [inputs]}] {:n (count (:chunks inputs))})
+      ;;       — registered in the ephemeral-fn-registry by the tree
+      ;;       compiler so it survives the child-sheet boundary.
+      ;;   (b) a non-empty qualified-symbol string, e.g. "my.ns/transform"
+      ;;       — resolved at execution time via ns-resolve.
+      ;; Code nodes let the model design transforms (counts, joins, simple
+      ;; reductions) without spending sub-LLM tokens on deterministic work.
+      (let [{:keys [reads writes] :as opts} (first args)
+            fn-ref (:fn opts)]
+        (when-not (or (and (string? fn-ref) (seq fn-ref))
+                      (fn? fn-ref))
+          (throw (ex-info ":code node missing required :fn (qualified-symbol string or inline function)"
+                          {:node-type :code :tree tree :opts opts})))
+        (list 'sheet/code
+              :fn fn-ref
+              :reads reads
+              :writes writes))
+
       ;; Default: unknown node type
       (throw (ex-info (str "Unknown node type: " node-type)
                       {:node-type node-type :tree tree})))))

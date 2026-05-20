@@ -1311,10 +1311,14 @@
                       "- Use this when you need to design a processing pipeline\n"
                       "- Available node types:\n"
                       "  - :sequence - Execute children in order\n"
+                      "  - :parallel - Execute children concurrently (independent work only)\n"
                       "  - :llm - Execute a sub-LLM call with {:instruction :reads :writes}\n"
                       "  - :map-each - Process collection items with {:from :as :into :max-concurrency N} (N=1 default, use 3-5 for parallel independent items)\n"
                       "  - :chunk-document - Split document into chunks with {:from :size :into}\n"
                       "  - :aggregate - Combine results with {:from :writes}\n"
+                      "  - :code - Pure Clojure transform with {:reads [...] :writes [...] :fn (fn [{:keys [inputs]}] {<write-key> <value> ...})}.\n"
+                      "    The :fn receives {:inputs <map-of-read-keys>} and must return a map keyed by the declared :writes.\n"
+                      "    Use this for deterministic transforms (counts, joins, simple reductions) instead of spending a sub-LLM call.\n"
                       "  - :final - Return validated output with {:keys [...]}\n"
                       "- The tree is stored for learning and can be reused\n\n"
                       "## When to Use emit-tree! (Large Data Processing)\n\n"
@@ -1355,7 +1359,20 @@
                              "You can:\n"
                              "  - Call `(emit-tree! ...)` again to run another tree\n"
                              "  - Run `(llm ...)` or `(code ...)` inline for follow-up work\n"
-                             "  - Call `(final! {...})` to terminate and return your answer\n\n")
+                             "  - Call `(final! {...})` to terminate and return your answer\n\n"
+                             "### Drill-down primitives — use only when the summary is insufficient\n"
+                             "If `:tree-results` summary fields don't give you enough to decide your next step, "
+                             "you can read the full event-store record of the most-recent (or a specific) tree:\n"
+                             "  - `(tree-detail)` / `(tree-detail tick-id)` — full structured record: per-node "
+                             "`:status`, `:duration-ms`, `:writes`, `:usage`, `:input-profile`, and any `:partial-summary`\n"
+                             "  - `(tree-trajectory)` / `(tree-trajectory tick-id)` — chronological per-event "
+                             "log of what happened inside the tree\n"
+                             "  - `(tree-failures)` — failure entries with errors + per-failure input profiles "
+                             "(joins direct leaf failures with map-each `:partial-summary` failure indices)\n"
+                             "  - `(node-output node-id)` — writes map of a specific completed node\n"
+                             "  - `(node-input-profile node-id)` — input profile (chunk shape, etc.) of a specific node\n\n"
+                             "These return potentially large data — prefer the `:tree-results` summary first and only "
+                             "drill down when you genuinely need the extra detail to make a decision.\n\n")
                         "")
                       "## Output Contract\n"
                       "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
@@ -1555,7 +1572,10 @@
                              :call-tool-fn call-tool-fn
                              :mcp-tools mcp-tools
                              :browser-tools browser-tools
-                             :sandbox-vars sandbox-vars})
+                             :sandbox-vars sandbox-vars
+                             :recursive? recursive-mode?
+                             :event-store (:event-store context)
+                             :tenant-id (:tenant-id context)})
                     exec-result (rlm-sandbox/execute-rlm-code rlm-ctx code)
                     ;; Track new variables created in this iteration
                     vars-after (set (keys @sandbox-vars))
