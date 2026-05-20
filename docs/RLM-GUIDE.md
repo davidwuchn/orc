@@ -162,6 +162,22 @@ Each entry in `:tree-results` (visible via `(get-var :tree-results)`):
 
 The summary is **descriptive, not prescriptive** — raw enums, factual counts, verbatim error strings. The model interprets for its own task. No `:severity :high`, no `:recommended-action`. The executor doesn't editorialize.
 
+### Drill-down primitives (when the summary isn't enough)
+
+In recursive mode the SCI sandbox also exposes five primitives that read directly from the event store for any tree the model has run. These let the model pull structural detail on demand — per-node `:status`, `:input-profile`, full trajectories, per-failure errors — without us baking everything into the lightweight `:tree-results` summary.
+
+| Primitive | Returns |
+|---|---|
+| `(tree-detail)` / `(tree-detail tick-id)` | `{:tick-id :status :tree-raw :outputs :nodes [...]}` for the most-recent / specific tree. Each node entry has `:node-id :status :duration-ms :writes :usage :input-profile` and (for map-each parents) a verbatim `:partial-summary`. |
+| `(tree-trajectory)` / `(tree-trajectory tick-id)` | Chronological per-event log from the tree's `:sheet/rlm-tree-execution-completed` bookend `:trajectory` field. |
+| `(tree-failures)` | Vector of failure entries for the most-recent tree — joins direct leaf failures and map-each `:partial-summary` failure indices into one list, each with `:error` and (where available) `:input-profile`. |
+| `(node-output node-id)` | `:writes` map of the named node's `:sheet/node-execution-completed` event in the most-recent tree. |
+| `(node-input-profile node-id)` | `:input-profile` (chunk shape, byte/word counts, etc.) of the named node's `:sheet/rlm-tree-node-completed` event in the most-recent tree. |
+
+Usage guidance baked into the system prompt: **prefer the `:tree-results` summary; drill down only when the summary doesn't give you enough to decide your next step.** A `(tree-trajectory)` call can return multi-KB data — pulling it into every iteration's history bloats the next prompt.
+
+These primitives are bound in the sandbox **only when `:recursive? true`** — non-recursive callers (`:rlm true`, `:rlm {:debug? true}`) get unresolved-symbol if they try to call them.
+
 ### Example: two-step task
 
 ```clojure
@@ -210,6 +226,25 @@ When the model's Phase 1 code executes in the SCI sandbox, the following primiti
 | `(emit-tree! [...])` | Emit a behavior tree for Phase 2 execution |
 
 All primitives execute IMMEDIATELY and return results to sandbox-vars. The model can compose them freely, reason about results across iterations (the history is rebuilt into each subsequent prompt), and decide its next move.
+
+## Phase 2 tree DSL node types
+
+When the model calls `(emit-tree! [...])`, the literal S-expression it writes is the **Phase 2 tree DSL** — a separate language from the Phase 1 SCI sandbox above. The supported node types are:
+
+| Node | Shape | Purpose |
+|---|---|---|
+| `:sequence` | `[:sequence child1 child2 ...]` | Run children in order, stop on first failure |
+| `:parallel` | `[:parallel child1 child2 ...]` | Run children concurrently (must be independent) |
+| `:fallback` | `[:fallback child1 child2 ...]` | Run children in order, return first success |
+| `:map-each` | `[:map-each {:from :coll :as :item :into :results :max-concurrency N} child]` | Apply child to each item; `:max-concurrency` defaults to 1 |
+| `:llm` | `[:llm {:instruction "..." :reads [...] :writes [...]}]` | Sub-LLM call with declared I/O |
+| `:code` | `[:code {:reads [...] :writes [...] :fn (fn [{:keys [inputs]}] ...)}]` | Pure-Clojure transform inside the tree. `:fn` receives `{:inputs <map-of-read-keys>}` and must return a map keyed by the declared `:writes`. Use for deterministic transforms (counts, joins, reductions) instead of paying a sub-LLM. `:fn` may also be a `"qualified.symbol/string"` resolved at execution time. |
+| `:chunk-document` | `[:chunk-document {:from :doc :size 8000 :into :chunks}]` | Helper: split a string into chunks |
+| `:aggregate` | `[:aggregate {:from :coll :writes [...]}]` | Helper: merge map-each results into per-key vectors |
+| `:condition` | `[:condition pred then-child else-child]` | Conditional execution |
+| `:final` | `[:final {:keys [...]}]` | Marker — declares which sandbox keys form the tree's outputs |
+
+Note that `:code` here is a **tree-DSL node** (Phase 2, runs inside a child sheet), distinct from the Phase 1 sandbox `(code ...)` primitive listed in the table above. The Phase 1 primitive runs immediately in the model's SCI context; a Phase 2 `:code` node compiles down to a `sheet/code` leaf, registered via the ephemeral-fn registry so the inline function value survives the child-sheet boundary.
 
 ## Output Contract
 
@@ -301,16 +336,24 @@ The bench tasks use the *terminal* `emit-tree!` mode (`:rlm {:debug? true}`). Th
 ## Quick reference
 
 ```clojure
-;; Terminal mode (existing — model designs ONE tree, Phase 2 runs, done)
+;; Terminal mode (model designs ONE tree, Phase 2 runs, done)
 {:rlm true}
 {:rlm {:debug? true}}
 
-;; Recursive mode (new — emit-tree! returns to Phase 1; model decides next move)
+;; Recursive mode (emit-tree! returns to Phase 1; model decides next move)
 {:rlm {:recursive? true}}
 {:rlm {:recursive? true :debug? true}}
 ```
 
-Same node config either way. The flag controls one thing: whether Phase 2's result is returned to the caller (terminal) or merged back into sandbox-vars + recurred (recursive).
+Same node config either way. The `:recursive?` flag controls one thing: whether Phase 2's result is returned to the caller (terminal) or merged back into sandbox-vars + recurred (recursive).
+
+### Recursive-mode extras
+
+When `:recursive? true` is set, the sandbox also exposes the drill-down primitives `tree-detail`, `tree-trajectory`, `tree-failures`, `node-output`, and `node-input-profile` for reading the full event-store record of any tree the model has already run. The lightweight `:tree-results` summary is the primary signal; drill-downs are there for when the summary isn't enough. See [Drill-down primitives](#drill-down-primitives-when-the-summary-isnt-enough) above.
+
+### Phase 2 tree DSL
+
+The DSL the model writes inside `(emit-tree! [...])` supports `:sequence`, `:parallel`, `:fallback`, `:map-each`, `:llm`, `:code`, `:chunk-document`, `:aggregate`, `:condition`, and `:final`. See [Phase 2 tree DSL node types](#phase-2-tree-dsl-node-types) above for the full shape of each.
 
 ## Related guides
 
