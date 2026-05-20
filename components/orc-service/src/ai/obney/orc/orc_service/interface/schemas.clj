@@ -23,9 +23,13 @@
 (def node-status
   "Node execution status.
 
-   :partial is emitted by map-each when 0 < failed < total items.
-   Sequence/fallback parents treat :partial as continuation (same as :success)."
-  [:enum :idle :running :success :failure :partial])
+   :partial is emitted by map-each when 0 < failed < total items (D-008).
+   Sequence/fallback parents treat :partial as continuation (same as :success).
+
+   :timeout is emitted by RLM repl-researcher nodes when Phase 2 exceeds the
+   budget (D-003). Surfaces to the parent so callers can distinguish 'no
+   useful output' from a deliberate failure."
+  [:enum :idle :running :success :failure :partial :timeout])
 
 (def partial-summary
   "Denormalized at-a-glance synopsis of partial/failure outcome on a map-each.
@@ -151,6 +155,10 @@
     ;; Repl-researcher-only fields
     [:mcp-tools {:optional true} [:vector :string]] ;; Available MCP tool names for research
     [:max-iterations {:optional true} :int]         ;; Max research iterations (default 10)
+    ;; D-003: total budget (Phase 1 + Phase 2) in ms. When set, takes precedence
+    ;; over the parent tick :options :timeout-ms and the 900_000ms hardcoded
+    ;; fallback. Phase 2 receives the remaining budget after Phase 1 completes.
+    [:timeout-ms {:optional true} :int]
     ;; Delegate-only fields
     [:target-sheet-id {:optional true} :uuid]       ;; Sheet to delegate execution to
     [:delegate-timeout-ms {:optional true} :int]    ;; Timeout for delegated execution
@@ -202,7 +210,7 @@
     [:parent-id {:optional true} :uuid]           ;; Parent node ID (for reference only)
     [:path [:vector :string]]                     ;; Path from root e.g. ["root" "fallback-1" "task-a"]
     [:child-index {:optional true} :int]          ;; Which child of parent (0-indexed)
-    [:status [:enum :success :failure :running :skipped :partial]]
+    [:status [:enum :success :failure :running :skipped :partial :timeout]]
     [:started-at :any]
     [:completed-at {:optional true} :any]
     [:duration-ms {:optional true} :int]
@@ -392,7 +400,8 @@
     [:mcp-tools [:vector :string]]                      ;; Available MCP tool names
     [:model {:optional true} :string]                   ;; OpenRouter model ID
     [:max-iterations {:optional true} :int]             ;; Default 10
-    [:rlm {:optional true} [:or :boolean :map]]]        ;; Enable RLM mode (true or {:debug? true})
+    [:rlm {:optional true} [:or :boolean :map]]         ;; Enable RLM mode (true or {:debug? true})
+    [:timeout-ms {:optional true} :int]]                ;; D-003: total Phase-1+Phase-2 budget
 
    :sheet/set-delegate-config
    [:map
@@ -488,7 +497,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure :tree-generated :partial]]
+    [:status [:enum :success :failure :tree-generated :partial :timeout]]
     [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]
@@ -794,13 +803,15 @@
     [:model {:optional true} :string]
     [:max-iterations {:optional true} :int]
     [:rlm {:optional true} [:or :boolean :map]]
+    [:timeout-ms {:optional true} :int]                            ;; D-003
     [:previous-instruction {:optional true} :string]
     [:previous-reads {:optional true} [:vector :keyword]]
     [:previous-writes {:optional true} [:vector :keyword]]
     [:previous-mcp-tools {:optional true} [:vector :string]]
     [:previous-model {:optional true} :string]
     [:previous-max-iterations {:optional true} :int]
-    [:previous-rlm {:optional true} [:or :boolean :map]]]
+    [:previous-rlm {:optional true} [:or :boolean :map]]
+    [:previous-timeout-ms {:optional true} :int]]                  ;; D-003
 
    :sheet/delegate-config-set
    [:map
@@ -896,7 +907,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure :running :tree-generated :partial]]
+    [:status [:enum :success :failure :running :tree-generated :partial :timeout]]
     [:writes {:optional true} [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]
@@ -957,9 +968,10 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:iteration {:optional true} :int]
-    ;; D-008: :partial added so map-each can surface partial outcomes
-    ;; at the tree-tick level. complete-tree-tick passes the root status through.
-    [:root-status [:enum :success :failure :running :tree-generated :partial]]
+    ;; D-008: :partial added so map-each can surface partial outcomes.
+    ;; D-003: :timeout added so RLM repl-researcher can surface Phase 2
+    ;; budget cancellation as a tree-level signal.
+    [:root-status [:enum :success :failure :running :tree-generated :partial :timeout]]
     [:outputs {:optional true} :map]
     [:error {:optional true} :string]]
 

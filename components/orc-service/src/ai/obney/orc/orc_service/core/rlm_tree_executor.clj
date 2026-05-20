@@ -492,9 +492,15 @@
                       :inputs (merge blackboard sandbox-vars)
                       :options {:timeout-ms timeout-ms}}))
 
-          ;; Wait for completion
+          ;; Wait for completion. D-003: the timeout default includes :sheet-id
+          ;; and :trace-id so the caller (execute-repl-researcher-rlm) can
+          ;; dispatch :sheet cancel-tick on the child tick when Phase 2 exceeds
+          ;; its budget.
           _ (println "[DEBUG Tree] Waiting for tick completion (timeout:" timeout-ms "ms)...")
-          result (deref p timeout-ms {:status :timeout :error "Tree execution timed out"})
+          result (deref p timeout-ms {:status :timeout
+                                      :error "Tree execution timed out"
+                                      :sheet-id sheet-id
+                                      :trace-id tick-id})
           duration-ms (- (System/currentTimeMillis) start-time)
           _ (println "[DEBUG Tree] Tick completed. Status:" (:status result))
           _ (when (:error result) (println "[DEBUG Tree] Error:" (:error result)))

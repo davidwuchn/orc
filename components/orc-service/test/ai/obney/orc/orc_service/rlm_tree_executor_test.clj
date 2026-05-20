@@ -687,6 +687,150 @@
               (is (= 300 (get-in result [:usage :total-tokens] 0))
                   (str "Expected 300 total tokens, got: " (get-in result [:usage :total-tokens]))))))))))
 
+;; =============================================================================
+;; D-003: Budget-aware Phase 2 timeout with cancellation
+;; =============================================================================
+
+(deftest budget-exhausted-in-phase1-skips-phase2
+  (testing "When Phase 1 elapsed >= :timeout-ms, Phase 2 is skipped entirely with clean :failure"
+    (with-provider-context [ctx]
+      (let [call-count (atom 0)]
+        ;; Mock predict: first call (Phase 1 code-gen) sleeps > budget then
+        ;; returns valid emit-tree! code. Any subsequent call would indicate
+        ;; Phase 2 sub-LLM was invoked — which should NOT happen here because
+        ;; budget is already exhausted.
+        (with-redefs [dscloj/predict
+                      (fn [_provider _module _inputs _opts]
+                        (let [n (swap! call-count inc)]
+                          (if (= 1 n)
+                            (do (Thread/sleep 150)
+                                {:outputs {:code "(emit-tree!
+                                                   [:sequence
+                                                     [:llm {:instruction \"x\"
+                                                            :reads [:doc]
+                                                            :writes [:summary]}]
+                                                     [:final {:keys [:summary]}]])"}
+                                 :usage {:prompt_tokens 100 :completion_tokens 50 :total_tokens 150}})
+                            {:outputs {:summary "should not be reached"}
+                             :usage {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}})))]
+          (let [node {:type :repl-researcher
+                      :instruction "Anything"
+                      :reads [:doc]
+                      :writes [:summary]
+                      :rlm true
+                      :max-iterations 1
+                      :timeout-ms 100}  ;; Tiny budget — Phase 1's 150ms sleep exhausts it
+                blackboard {:doc {:key :doc :schema :string :value "hello" :version 1}}
+                result (executor/execute-repl-researcher-rlm
+                         node blackboard :openrouter ctx)]
+            (is (= :failure (:status result))
+                (str "Expected :failure when budget exhausted in Phase 1, got: "
+                     (:status result) " error: " (:error result)))
+            (is (re-find #"Budget exhausted in Phase 1" (str (:error result)))
+                ":error should mention budget exhaustion")
+            (is (= 1 @call-count)
+                "Exactly ONE predict call should fire (Phase 1). Phase 2 must NOT trigger sub-LLM calls.")
+            (is (number? (:phase1-elapsed-ms result))
+                ":phase1-elapsed-ms must be present in the response")
+            (is (>= (:phase1-elapsed-ms result) 100)
+                ":phase1-elapsed-ms reflects actual Phase 1 wall-time")))))))
+
+(deftest phase2-timeout-dispatches-cancel-tick
+  (testing "When Phase 2 exceeds remaining budget, :sheet cancel-tick is dispatched on the child tick"
+    (with-provider-context [ctx]
+      ;; Phase 1: fast — return valid emit-tree! code immediately.
+      ;; Phase 2: each sub-LLM call sleeps long enough to exceed the small budget.
+      (with-redefs [dscloj/predict
+                    (let [call-count (atom 0)]
+                      (fn [_provider _module _inputs _opts]
+                        (let [n (swap! call-count inc)]
+                          (if (= 1 n)
+                            ;; Phase 1 code-gen — quick, returns emit-tree!
+                            {:outputs {:code "(emit-tree!
+                                               [:sequence
+                                                 [:llm {:instruction \"slow-summarize\"
+                                                        :reads [:doc]
+                                                        :writes [:summary]}]
+                                                 [:final {:keys [:summary]}]])"}
+                             :usage {:prompt_tokens 50 :completion_tokens 25 :total_tokens 75}}
+                            ;; Phase 2 sub-LLM — slow, sleeps past the budget
+                            (do (Thread/sleep 800)
+                                {:outputs {:summary "would-be-summary"}
+                                 :usage {:prompt_tokens 10 :completion_tokens 10 :total_tokens 20}})))))]
+        (let [node {:type :repl-researcher
+                    :instruction "Summarize the doc"
+                    :reads [:doc]
+                    :writes [:summary]
+                    :rlm true
+                    :max-iterations 1
+                    ;; Total budget 500ms. Phase 1 is fast (<100ms), Phase 2's
+                    ;; first sub-LLM sleeps 800ms → cancellation must fire.
+                    :timeout-ms 500}
+              blackboard {:doc {:key :doc :schema :string :value "hello" :version 1}}
+              result (executor/execute-repl-researcher-rlm
+                       node blackboard :openrouter ctx)
+              ;; After Phase 2 timeout + 500ms drain, the child tick should have
+              ;; been cancelled. Find the :sheet/tick-cancelled event for that tick.
+              all-events (into [] (es/read (:event-store ctx)
+                                    {:types #{:sheet/tick-cancelled}
+                                     :tenant-id (:tenant-id ctx)}))]
+          (is (= :timeout (:status result))
+              (str "Expected :timeout, got: " (:status result) " error: " (:error result)))
+          (is (number? (:phase1-elapsed-ms result))
+              ":phase1-elapsed-ms present on timeout response")
+          (is (number? (:phase2-elapsed-ms result))
+              ":phase2-elapsed-ms present on timeout response")
+          (is (pos? (count all-events))
+              "Expected at least one :sheet/tick-cancelled event after Phase 2 timeout")
+          ;; Verify cancellation targeted the actual child tick (not some other tick)
+          (when (pos? (count all-events))
+            (let [cancelled-tick-ids (set (map :tick-id all-events))]
+              (is (contains? cancelled-tick-ids (:phase2-tick-id result))
+                  (str "Cancelled tick-ids " cancelled-tick-ids
+                       " should include the Phase 2 child tick " (:phase2-tick-id result))))))))))
+
+(deftest happy-path-response-includes-elapsed-ms-fields
+  (testing "Normal Phase 1 + Phase 2 success carries :phase1-elapsed-ms + :phase2-elapsed-ms"
+    (with-provider-context [ctx]
+      (with-redefs [dscloj/predict
+                    (let [call-count (atom 0)]
+                      (fn [_provider _module _inputs _opts]
+                        (let [n (swap! call-count inc)]
+                          (if (= 1 n)
+                            ;; Phase 1
+                            {:outputs {:code "(emit-tree!
+                                               [:sequence
+                                                 [:llm {:instruction \"summarize\"
+                                                        :reads [:doc]
+                                                        :writes [:summary]}]
+                                                 [:final {:keys [:summary]}]])"}
+                             :usage {:prompt_tokens 50 :completion_tokens 25 :total_tokens 75}}
+                            ;; Phase 2 sub-LLM
+                            {:outputs {:summary "fast summary"}
+                             :usage {:prompt_tokens 30 :completion_tokens 20 :total_tokens 50}}))))]
+        (let [node {:type :repl-researcher
+                    :instruction "Summarize"
+                    :reads [:doc]
+                    :writes [:summary]
+                    :rlm true
+                    :max-iterations 1
+                    :timeout-ms 60000}  ;; Generous budget — happy path
+              blackboard {:doc {:key :doc :schema :string :value "hello" :version 1}}
+              result (executor/execute-repl-researcher-rlm
+                       node blackboard :openrouter ctx)]
+          (is (= :success (:status result))
+              (str "Expected :success, got: " (:status result) " error: " (:error result)))
+          (is (number? (:phase1-elapsed-ms result))
+              ":phase1-elapsed-ms must be present on happy path")
+          (is (number? (:phase2-elapsed-ms result))
+              ":phase2-elapsed-ms must be present on happy path")
+          (is (>= (:phase1-elapsed-ms result) 0))
+          (is (>= (:phase2-elapsed-ms result) 0))
+          (is (some? (:budget result))
+              "Budget metadata available for debugging/observability")
+          (is (= :node (get-in result [:budget :source]))
+              "Budget source reflects the node's :timeout-ms taking precedence"))))))
+
 (comment
   ;; Run individual test
   (clojure.test/run-tests 'ai.obney.orc.orc-service.rlm-tree-executor-test))

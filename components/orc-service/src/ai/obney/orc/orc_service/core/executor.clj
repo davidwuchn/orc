@@ -22,6 +22,8 @@
             [clojure.set]
             [cheshire.core :as json]
             [malli.core :as m]
+            [ai.obney.grain.command-processor-v2.interface :as cp]
+            [ai.obney.grain.time.interface :as time]
             [ai.obney.orc.orc-service.core.observability :as obs]
             [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]
             [ai.obney.orc.orc-service.core.rlm-sandbox :as rlm-sandbox]
@@ -29,6 +31,43 @@
 
 ;; Forward declarations
 (declare execute-repl-researcher-rlm)
+
+;; =============================================================================
+;; D-003: resolve-phase2-budget — pure deep module
+;; =============================================================================
+
+(def ^:private phase2-default-budget-ms
+  "Hardcoded fallback budget when no :timeout-ms is set on the repl-researcher
+   node and no :timeout-ms is set in the parent tick options. Preserves the
+   pre-D-003 behavior of a generous 15-minute ceiling for Phase 2."
+  900000)
+
+(defn resolve-phase2-budget
+  "Resolve the budget that Phase 2 (tree execution) should be allowed to consume,
+   given the repl-researcher node config, the parent tick's timeout (if any),
+   and the wall-time already spent in Phase 1.
+
+   Lookup order:
+     1. (:timeout-ms node)        → :source :node
+     2. :parent-timeout-ms arg    → :source :tick
+     3. 900_000 ms hardcoded      → :source :hardcoded
+
+   Returns:
+     {:total-budget-ms N
+      :remaining-ms N             ;; clamped to >= 0
+      :source :node | :tick | :hardcoded
+      :exhausted? boolean}        ;; true iff remaining <= 0"
+  [{:keys [node parent-timeout-ms phase1-elapsed-ms]}]
+  (let [[total source] (cond
+                         (:timeout-ms node) [(:timeout-ms node) :node]
+                         parent-timeout-ms  [parent-timeout-ms :tick]
+                         :else              [phase2-default-budget-ms :hardcoded])
+        remaining-raw (- total phase1-elapsed-ms)
+        remaining (max 0 remaining-raw)]
+    {:total-budget-ms total
+     :remaining-ms remaining
+     :source source
+     :exhausted? (<= remaining-raw 0)}))
 
 ;; =============================================================================
 ;; Levenshtein Distance and Variable Suggestions
@@ -1453,28 +1492,71 @@
                             (clojure.pprint/pprint generated-tree-raw)
                             (println "\n[DEBUG RLM] Generated tree (canonical ORC DSL):")
                             (clojure.pprint/pprint generated-tree))
-                        ;; Execute Phase 2: spawn child tick with the generated tree
-                        ;; Pass all sandbox-vars (except the tree itself) as inputs
-                        phase2-vars (dissoc @sandbox-vars :generated-tree :generated-tree-raw)
+                        ;; D-003: resolve Phase 2 budget from node :timeout-ms,
+                        ;; parent tick :timeout-ms (passed via context), or hardcoded fallback.
+                        phase1-elapsed-ms (- (System/currentTimeMillis) start-time)
+                        budget (resolve-phase2-budget
+                                 {:node node
+                                  :parent-timeout-ms (:parent-timeout-ms context)
+                                  :phase1-elapsed-ms phase1-elapsed-ms})
                         _ (when debug?
-                            (println "\n[DEBUG RLM] Phase 2 sandbox vars:" (keys phase2-vars)))
-                        phase2-result (try
-                                        (tree-executor/execute-tree
-                                          generated-tree
-                                          context
-                                          {:sandbox-vars phase2-vars
-                                           :blackboard (reduce-kv
-                                                         (fn [acc k entry]
-                                                           (assoc acc k (:value entry)))
-                                                         {}
-                                                         blackboard)
-                                           :timeout-ms 900000})  ;; 15 min for Phase 2 (parallel chunk processing + multi-stage synthesis can be slow on large docs)
-                                        (catch Exception e
-                                          (println "[DEBUG RLM] Phase 2 execution ERROR:" (.getMessage e))
-                                          (.printStackTrace e)
-                                          {:status :failure
-                                           :error (str "Phase 2 execution failed: " (.getMessage e))}))
-                        phase1-duration (- (System/currentTimeMillis) start-time)
+                            (println "\n[DEBUG RLM] Phase 2 budget:" budget))]
+                    (if (:exhausted? budget)
+                      ;; D-003: skip Phase 2 entirely when budget is exhausted in Phase 1.
+                      {:status :failure
+                       :error (str "Budget exhausted in Phase 1 ("
+                                   phase1-elapsed-ms "ms elapsed of "
+                                   (:total-budget-ms budget) "ms "
+                                   "[source=" (name (:source budget)) "]; "
+                                   "no time left for Phase 2)")
+                       :iterations new-history
+                       :duration-ms phase1-elapsed-ms
+                       :phase1-elapsed-ms phase1-elapsed-ms
+                       :usage @total-usage
+                       :budget budget}
+                      (let [;; Execute Phase 2: spawn child tick with the generated tree
+                            ;; Pass all sandbox-vars (except the tree itself) as inputs
+                            phase2-vars (dissoc @sandbox-vars :generated-tree :generated-tree-raw)
+                            _ (when debug?
+                                (println "\n[DEBUG RLM] Phase 2 sandbox vars:" (keys phase2-vars)))
+                            phase2-result (try
+                                            (tree-executor/execute-tree
+                                              generated-tree
+                                              context
+                                              {:sandbox-vars phase2-vars
+                                               :blackboard (reduce-kv
+                                                             (fn [acc k entry]
+                                                               (assoc acc k (:value entry)))
+                                                             {}
+                                                             blackboard)
+                                               :timeout-ms (:remaining-ms budget)})
+                                            (catch Exception e
+                                              (println "[DEBUG RLM] Phase 2 execution ERROR:" (.getMessage e))
+                                              (.printStackTrace e)
+                                              {:status :failure
+                                               :error (str "Phase 2 execution failed: " (.getMessage e))}))
+                            ;; D-003: when Phase 2 times out, dispatch :sheet cancel-tick
+                            ;; on the child tick so it stops executing in the background.
+                            ;; The tree executor's timeout default carries :sheet-id +
+                            ;; :trace-id specifically so we can cancel here. Wait ~500ms
+                            ;; after dispatching so in-flight nodes settle their writes
+                            ;; (the bookend :sheet/rlm-tree-execution-completed event
+                            ;; needs that window).
+                            _ (when (= :timeout (:status phase2-result))
+                                (let [child-tick-id (:trace-id phase2-result)
+                                      child-sheet-id (:sheet-id phase2-result)]
+                                  (when (and child-tick-id child-sheet-id)
+                                    (cp/process-command
+                                      (assoc context :command
+                                             {:command/id (random-uuid)
+                                              :command/timestamp (time/now)
+                                              :command/name :sheet/cancel-tick
+                                              :sheet-id child-sheet-id
+                                              :tick-id child-tick-id}))
+                                    ;; ~500ms drain so in-flight nodes settle their
+                                    ;; writes into the event store before we return.
+                                    (Thread/sleep 500))))
+                            phase1-duration phase1-elapsed-ms
                         _ (when debug?
                             (println "\n[DEBUG RLM] Phase 2 result:")
                             (println "  status:" (:status phase2-result))
@@ -1502,7 +1584,21 @@
                        :usage combined-usage
                        :breakdown {:phase1 p1-usage :phase2 p2-usage}
                        :phase2-duration-ms (:duration-ms phase2-result)
-                       :phase2-error (:error phase2-result)}))
+                       :phase2-error (:error phase2-result)
+                       ;; D-003: surface elapsed timings on the happy path so callers
+                       ;; can debug whether budget is being spent on Phase 1 or Phase 2.
+                       :phase1-elapsed-ms phase1-duration
+                       :phase2-elapsed-ms (cond
+                                            (number? (:duration-ms phase2-result))
+                                            (:duration-ms phase2-result)
+                                            ;; On timeout, execute-tree returns no duration —
+                                            ;; we can derive it from the remaining budget that
+                                            ;; we passed (it's what actually got consumed).
+                                            (= :timeout (:status phase2-result))
+                                            (:remaining-ms budget)
+                                            :else nil)
+                       :phase2-tick-id (:trace-id phase2-result)
+                       :budget budget}))))
 
                   ;; Check for FINAL_ANSWER pattern (fallback)
                   (or (sci-sandbox/contains-final-answer? (:result exec-result))

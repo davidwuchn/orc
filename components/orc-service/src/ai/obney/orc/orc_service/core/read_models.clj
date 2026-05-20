@@ -384,7 +384,9 @@
       (assoc-in [(:node-id event) :browser-tools] (:browser-tools event))
       (assoc-in [(:node-id event) :model] (:model event))
       (assoc-in [(:node-id event) :max-iterations] (:max-iterations event))
-      (assoc-in [(:node-id event) :rlm] (:rlm event))))
+      (assoc-in [(:node-id event) :rlm] (:rlm event))
+      ;; D-003: project :timeout-ms (total Phase-1+Phase-2 budget) into node state
+      (assoc-in [(:node-id event) :timeout-ms] (:timeout-ms event))))
 
 (defmethod nodes* :sheet/delegate-config-set
   [state event]

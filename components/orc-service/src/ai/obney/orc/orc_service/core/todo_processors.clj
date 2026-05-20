@@ -1046,6 +1046,23 @@
                         (:error event) (assoc :error (:error event))
                         (seq exec-context) (assoc :inputs exec-context))})]}
 
+            (= child-status :timeout)
+            ;; D-003: Child timed out (e.g. RLM Phase 2 budget exceeded) -
+            ;; propagate :timeout up so callers can distinguish budget exhaustion
+            ;; from a generic failure. Like :failure, sequence does not continue.
+            {:result/events
+             [(->event
+               {:type :sheet/node-execution-completed
+                :tags #{[:sheet sheet-id]
+                        [:node parent-id]
+                        [:tick tick-id]}
+                :body (cond-> {:sheet-id sheet-id
+                               :tick-id tick-id
+                               :node-id parent-id
+                               :status :timeout}
+                        (:error event) (assoc :error (:error event))
+                        (seq exec-context) (assoc :inputs exec-context))})]}
+
             (= child-status :running)
             ;; Child returned running - propagate up
             {:result/events
@@ -1080,7 +1097,10 @@
                                :node-id parent-id
                                :status child-status}
                         (seq exec-context) (assoc :inputs exec-context))})]}
-            :failure
+            ;; D-003: :timeout from a child is like :failure for fallback purposes —
+            ;; we didn't get useful output, try the next sibling. If no next sibling,
+            ;; fallback completes with :timeout (truthful propagation).
+            (:failure :timeout)
             (if next-child-id
               ;; Continue to next child
               (let [next-child (get nodes-by-id next-child-id)
@@ -1713,6 +1733,10 @@
                              ;; can distinguish "we got some output" from
                              ;; "we got nothing".
                              :partial :partial
+                             ;; D-003: surface :timeout truthfully so callers
+                             ;; can distinguish "budget exceeded mid-execution"
+                             ;; from "we failed for some other reason".
+                             :timeout :timeout
                              :failure)
                    :outputs (or outputs {})
                    ;; Include raw tree for :tree-generated status (canonical form generated at execution time)
