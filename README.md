@@ -206,13 +206,6 @@ ORC is a library — consumers provide:
 | [Bench README](development/bench/README.md) | How to run the 5-task generalization benchmark suite |
 | [Bench RESULTS](development/bench/RESULTS.md) | Headline report — RLM designs 4 distinct tree patterns + 1 "no-tree" decision across structurally different tasks; zero hallucinations across 37+ spot-checks |
 
-## Recent Work
-
-- **R-1** — Recursive `emit-tree!` (opt-in via `:rlm {:recursive? true}`): the model can now inspect tree outputs and continue reasoning, rather than `emit-tree!` being a one-shot terminator. See [RLM Guide](docs/RLM-GUIDE.md).
-- **D-008** — Map-each partial results: first-class `:partial` status with `:partial-summary` block on the map-each completion event, successes-only output blackboard key, sticky `:partial` propagation through sequences.
-- **D-003** — Phase 2 budget-aware timeout: `:timeout-ms` on the repl-researcher node bounds total Phase-1+Phase-2 wall-time, with clean `:sheet cancel-tick` dispatch and ~500 ms drain on timeout.
-- **O01–O03** — Observability layer: per-node usage events with structured paths, input-profile capture, bookend `:sheet/rlm-tree-execution-completed` event with full trajectory.
-
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -1,6 +1,6 @@
 # RLM (Research Language Model) Mode
 
-RLM is a two-phase execution pattern for the `:repl-researcher` node type. The LLM iteratively generates Clojure code in a sandboxed REPL (Phase 1) and can optionally emit behavior trees that ORC executes as child ticks (Phase 2). Recent work makes the loop **truly recursive**: `emit-tree!` is no longer a terminator — the model can inspect tree outputs and continue reasoning.
+RLM is a two-phase execution pattern for the `:repl-researcher` node type. The LLM iteratively generates Clojure code in a sandboxed REPL (Phase 1) and can optionally emit behavior trees that ORC executes as child ticks (Phase 2). When recursive mode is enabled, the model can inspect Phase 2 outputs and continue reasoning rather than treating `emit-tree!` as a terminator.
 
 ## When to use RLM
 
@@ -11,6 +11,49 @@ RLM fits problems where the *right tree shape isn't known up front*. The model d
 - **Adaptive recovery** — when a tree returns `:partial` with some chunks failed, the model can decide to retry, fall back, or accept what it has
 
 If your tree shape is fixed and known, use the regular ORC DSL directly — don't pay the Phase 1 code-gen overhead.
+
+## Composition: `:repl-researcher` as a node inside a larger tree
+
+`:repl-researcher` is a leaf node type like `:llm` or `:code` — it can sit anywhere in your behavior tree, not just at the root. Upstream nodes can write to blackboard keys the researcher reads, and downstream nodes can consume what the researcher wrote.
+
+A common pattern is **pre-process → research → post-process**:
+
+```
+[:sequence
+  [:leaf :ai pre-process
+    :reads [:raw-input]
+    :writes [:cleaned-input]
+    :instruction "Clean the raw input. Remove extra whitespace, normalize punctuation."]
+
+  [:repl-researcher
+    :reads [:cleaned-input]
+    :writes [:researched-summary]
+    :instruction "Produce a one-paragraph summary highlighting key facts."
+    :max-iterations 3
+    :rlm {:debug? true}]              ;; or {:recursive? true} for the recursive flow
+
+  [:leaf :ai post-process
+    :reads [:researched-summary]
+    :writes [:final-report]
+    :instruction "Wrap the summary as a brief executive report."]]
+```
+
+Execution flow:
+
+1. The `:sequence` node runs its children in order.
+2. `pre-process` writes `:cleaned-input` to the blackboard.
+3. The researcher reads `:cleaned-input` (now available on the blackboard), runs its iterative Phase 1 (and Phase 2 if `emit-tree!` is called), and writes `:researched-summary`.
+4. `post-process` reads `:researched-summary` and writes `:final-report`.
+5. The sequence's outputs include everything written to the blackboard.
+
+There's nothing special about being a child — the researcher emits the same `:sheet/node-execution-completed` event as any other leaf, and sequence/fallback/parallel parents react to it the same way.
+
+### Things to be aware of when composing
+
+- **Blackboard keys must be declared up front** (via `make-declare-key-command` or your sheet-builder equivalent). The researcher's `:reads` only see declared keys that prior nodes have written.
+- **The researcher reports `:status :success` / `:failure` / `:partial` / `:timeout` like any other node.** Sequence parents continue on `:success` and `:partial`, halt on `:failure`. Fallback continues on `:failure` to the next sibling. So you can place the researcher anywhere in those compositions.
+- **Budget composition.** If you set `:timeout-ms` on the researcher, it bounds total Phase 1 + cumulative tree-execution wall-time *for that researcher only* — it doesn't account for sibling nodes. If your overall workflow has a deadline, the researcher's `:timeout-ms` should be set lower than the remaining time you want to allow.
+- **Multiple researchers in one tree** are supported — each gets its own Phase 1 loop and (if it calls `emit-tree!`) its own Phase 2 child tick. Their iteration counts and budgets are independent.
 
 ## Basic usage (terminal mode — default)
 
@@ -58,7 +101,7 @@ After Phase 2 completes:
 The loop ends ONLY when:
 - Model calls `(final! {...})` with the declared `:writes` keys
 - `:max-iterations` is exhausted (returns `:failure :error "Max iterations reached without final!"`)
-- D-003's `:timeout-ms` budget is exhausted
+- The total `:timeout-ms` budget is exhausted
 
 ### What the model sees after a tree
 
@@ -75,11 +118,12 @@ Each entry in `:tree-results` (visible via `(get-var :tree-results)`):
  :nodes-total 24
  :usage {:prompt-tokens N :completion-tokens N :total-tokens N}
 
- ;; ONLY when :partial or :failure (from D-008 :partial-summary):
+ ;; ONLY when :status is :partial or :failure
+ ;; (verbatim from the underlying map-each's :partial-summary):
  :failure-indices [7 17]
  :failure-reasons {7 "Rate limit exhausted" 17 "Schema validation failed"}
 
- ;; ONLY when :status :timeout (from D-003 response):
+ ;; ONLY when :status is :timeout (Phase 2 budget cancellation):
  :phase2-elapsed-ms 4500
  :budget-remaining-ms 0
  :nodes-completed-before-cancel 4}
@@ -159,12 +203,12 @@ Some models (notably gemini-2.5-flash) default to markdown fences which DSCloj's
 | Knob | Purpose |
 |---|---|
 | `:max-iterations` (default 10) | Caps the number of Phase 1 code-gen iterations |
-| `:timeout-ms` (default 900_000) | Total wall-time budget for Phase 1 + cumulative tree execution (D-003) |
+| `:timeout-ms` (default 900_000) | Total wall-time budget for Phase 1 + cumulative tree execution |
 | `:llm-call-budget` (opt-in, no default) | Hard cap on total LLM call count per tick |
 
 Trees are "free" from the iteration counter — `:max-iterations` only counts code-gen calls. Budget exhaustion in Phase 1 skips Phase 2 entirely with `:status :failure :error "Budget exhausted in Phase 1"`. Phase 2 timeouts trigger `:sheet cancel-tick` on the child tick with ~500 ms drain.
 
-## How partial outcomes propagate (D-008)
+## How partial outcomes propagate
 
 When a `map-each` inside a Phase 2 tree completes with some children succeeded and some failed:
 
@@ -194,7 +238,7 @@ Per the Grain methodology — every event is monitorable.
 | `:sheet/node-execution-completed` | Every node finishes | `:status`, `:writes`, `:duration-ms`, `:usage`, optional `:partial-summary` |
 | `:sheet/rlm-tree-node-completed` | Per-node inside RLM Phase 2 trees | Structured `:node-path`, `:usage`, `:input-profile` |
 | `:sheet/rlm-tree-execution-completed` | Bookend per Phase 2 tree | `:trajectory` (full per-event log), `:total-usage`, `:task-fingerprint` placeholder |
-| `:sheet/tick-cancelled` | When D-003 cancels Phase 2 mid-flight | `:sheet-id`, `:tick-id` |
+| `:sheet/tick-cancelled` | When Phase 2 budget cancellation fires mid-flight | `:sheet-id`, `:tick-id` |
 
 Judges in future work can subscribe to any of these for granular signal.
 
@@ -206,10 +250,10 @@ When you run a Phase 2 tree, the saved EDN result has:
 {:status :success | :partial | :failure | :timeout
  :outputs {<your :writes keys> ...}
  :usage {:prompt-tokens N :completion-tokens N :total-tokens N
-         :by-node {<structured-path> {tokens per node}}}      ; from O02
+         :by-node {<structured-path> {tokens per node}}}      ; per-node breakdown
  :duration-ms N
  :trace-id <uuid>                                              ; for drill-down
- ;; D-003 timing breakdown:
+ ;; Phase timing breakdown:
  :phase1-elapsed-ms N
  :phase2-elapsed-ms N
  :phase2-tick-id <uuid>}
