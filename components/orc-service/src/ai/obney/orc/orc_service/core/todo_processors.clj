@@ -959,9 +959,11 @@
         (case (:type parent)
           :sequence
           (cond
-            ;; :success and :tree-generated both mean the child completed successfully
-            ;; :tree-generated is from RLM two-phase execution (tree was generated)
-            (#{:success :tree-generated} child-status)
+            ;; :success and :tree-generated both mean the child completed successfully.
+            ;; :tree-generated is from RLM two-phase execution (tree was generated).
+            ;; D-008: :partial from map-each is treated as continuation — downstream
+            ;; synthesis nodes still run against the successes-only output.
+            (#{:success :tree-generated :partial} child-status)
             (if next-child-id
               ;; Continue to next child
               (let [next-child (get nodes-by-id next-child-id)
@@ -1000,10 +1002,22 @@
                            :tick-id tick-id
                            :node-id next-child-id
                            :inputs inputs}})]})
-              ;; All children succeeded - sequence completes with child's status
-              ;; Preserves :tree-generated status for RLM two-phase execution
-              ;; Use cp/process-command to ensure event is properly published
-              (do
+              ;; All children succeeded — sequence completes.
+              ;; D-008 sticky :partial: if ANY prior sibling completed with :partial,
+              ;; propagate :partial up so the at-a-glance status truthfully reflects
+              ;; that partial behavior occurred somewhere in the tree. Otherwise use
+              ;; the last child's status (preserves :tree-generated for RLM Phase 1).
+              (let [sibling-set (set siblings)
+                    child-completions (->> (es/read event-store
+                                             {:types #{:sheet/node-execution-completed}
+                                              :tags #{[:tick tick-id]}
+                                              :tenant-id tenant-id})
+                                           (into [])
+                                           (filter (fn [e]
+                                                     (and (sibling-set (:node-id e))
+                                                          (matches-execution-context? e exec-context)))))
+                    any-partial? (some #(= :partial (:status %)) child-completions)
+                    final-status (if any-partial? :partial child-status)]
                 (cp/process-command
                   (assoc context :command
                          (cond-> {:command/id (random-uuid)
@@ -1012,7 +1026,7 @@
                                   :sheet-id sheet-id
                                   :tick-id tick-id
                                   :node-id parent-id
-                                  :status child-status
+                                  :status final-status
                                   :writes (or (:writes event) {})}  ;; Propagate writes, default to empty map
                            (seq exec-context) (assoc :inputs exec-context))))
                 nil))
@@ -1051,8 +1065,10 @@
 
           :fallback
           (case child-status
-            :success
-            ;; Child succeeded - fallback succeeds
+            (:success :partial)
+            ;; Child succeeded (or partially succeeded — D-008) - fallback succeeds.
+            ;; :partial means "we got something usable" so fallback stops here.
+            ;; The :status surfaced matches the child's so downstream sees the truth.
             {:result/events
              [(->event
                {:type :sheet/node-execution-completed
@@ -1062,7 +1078,7 @@
                 :body (cond-> {:sheet-id sheet-id
                                :tick-id tick-id
                                :node-id parent-id
-                               :status :success}
+                               :status child-status}
                         (seq exec-context) (assoc :inputs exec-context))})]}
             :failure
             (if next-child-id
@@ -1170,6 +1186,49 @@
 
 (defn- map-each-key [tick-id node-id]
   (str tick-id "-" node-id))
+
+;; =============================================================================
+;; D-008: classify-map-each-outcome — pure deep module
+;; =============================================================================
+
+(defn classify-map-each-outcome
+  "Classify the outcome of a map-each based on its results vector.
+
+   Input:
+     {:results    [...]   ;; raw value for success, {:__status :failure ...} for failure
+      :item-count N}      ;; total items started
+
+   Returns a 3-tuple: [status partial-summary-or-nil output-vector]
+     status  = :success | :partial | :failure
+     summary = nil OR {:total :succeeded :failed :failure-indices :failure-reasons}
+     output  = successes-only vector
+
+   Rule table (Q6 from D-008 PRD):
+     - Empty input          -> [:success nil []]
+     - All items succeeded  -> [:success nil <full vector>]
+     - 0 < failed < N       -> [:partial <summary> <successes-only>]
+     - All items failed     -> [:failure <summary> []]"
+  [{:keys [results item-count]}]
+  (if (zero? item-count)
+    [:success nil []]
+    (let [failure? (fn [r] (and (map? r) (= :failure (:__status r))))
+          indexed (map-indexed vector results)
+          failed-pairs (filter (fn [[_ r]] (failure? r)) indexed)
+          successful-pairs (remove (fn [[_ r]] (failure? r)) indexed)
+          failed-count (count failed-pairs)]
+      (cond
+        (zero? failed-count)
+        [:success nil (vec results)]
+
+        :else
+        (let [summary {:total item-count
+                       :succeeded (- item-count failed-count)
+                       :failed failed-count
+                       :failure-indices (mapv first failed-pairs)
+                       :failure-reasons (into {} (map (fn [[i r]] [i (:__error r)]) failed-pairs))}
+              status (if (= failed-count item-count) :failure :partial)
+              output (mapv second successful-pairs)]
+          [status summary output])))))
 
 (defn execute-map-each-node
   "Handle execution of map-each nodes.
@@ -1402,18 +1461,28 @@
                 blackboard (resolve-blackboard context sheet-id tick-id)]
             (case (:type act)
               :complete
-              {:result/events
-               [(->event
-                 {:type :sheet/map-each-progress-updated
-                  :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
-                  :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
-                         :item-index (:completed-count act) :total-items total-items}})
-                (make-bb-write-event event-store sheet-id tick-id output-key (vec (:results act)) blackboard)
-                (->event
-                 {:type :sheet/node-execution-completed
-                  :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
-                  :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
-                         :status :success}})]}
+              ;; D-008: classify the map-each outcome using the pure deep module.
+              ;; Returns [status partial-summary-or-nil output-vector] where output
+              ;; is the successes-only vector (failure markers stripped).
+              (let [[status summary output]
+                    (classify-map-each-outcome
+                      {:results (:results act) :item-count total-items})
+                    completion-body (cond-> {:sheet-id sheet-id
+                                             :tick-id tick-id
+                                             :node-id map-each-parent-id
+                                             :status status}
+                                      summary (assoc :partial-summary summary))]
+                {:result/events
+                 [(->event
+                   {:type :sheet/map-each-progress-updated
+                    :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
+                    :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
+                           :item-index (:completed-count act) :total-items total-items}})
+                  (make-bb-write-event event-store sheet-id tick-id output-key output blackboard)
+                  (->event
+                   {:type :sheet/node-execution-completed
+                    :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
+                    :body completion-body})]})
 
               :start-next
               (let [next-item (nth items (:next-index act))
@@ -1640,6 +1709,10 @@
                              :success :success
                              :failure :failure
                              :tree-generated :tree-generated
+                             ;; D-008: surface :partial to callers so they
+                             ;; can distinguish "we got some output" from
+                             ;; "we got nothing".
+                             :partial :partial
                              :failure)
                    :outputs (or outputs {})
                    ;; Include raw tree for :tree-generated status (canonical form generated at execution time)

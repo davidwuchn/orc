@@ -21,8 +21,26 @@
   [:enum :ai :code :tool])
 
 (def node-status
-  "Node execution status"
-  [:enum :idle :running :success :failure])
+  "Node execution status.
+
+   :partial is emitted by map-each when 0 < failed < total items.
+   Sequence/fallback parents treat :partial as continuation (same as :success)."
+  [:enum :idle :running :success :failure :partial])
+
+(def partial-summary
+  "Denormalized at-a-glance synopsis of partial/failure outcome on a map-each.
+   The canonical record stays in per-child :sheet/node-execution-completed
+   events; this summary is a convenience for judges and dashboards.
+
+   D-008: :failure-input-profiles is reserved for future enrichment when
+   the map-each handler has access to per-child input profiles."
+  [:map
+   [:total :int]
+   [:succeeded :int]
+   [:failed :int]
+   [:failure-indices [:vector :int]]
+   [:failure-reasons [:map-of :int :string]]
+   [:failure-input-profiles {:optional true} [:map-of :int :map]]])
 
 ;; Legacy field-type enum - kept for migration from old format
 (def field-type
@@ -184,7 +202,7 @@
     [:parent-id {:optional true} :uuid]           ;; Parent node ID (for reference only)
     [:path [:vector :string]]                     ;; Path from root e.g. ["root" "fallback-1" "task-a"]
     [:child-index {:optional true} :int]          ;; Which child of parent (0-indexed)
-    [:status [:enum :success :failure :running :skipped]]
+    [:status [:enum :success :failure :running :skipped :partial]]
     [:started-at :any]
     [:completed-at {:optional true} :any]
     [:duration-ms {:optional true} :int]
@@ -200,7 +218,7 @@
     [:started-at :any]
     [:completed-at :any]
     [:duration-ms :int]
-    [:status [:enum :success :failure :timeout]]
+    [:status [:enum :success :failure :timeout :partial]]
     [:input-snapshot :map]                        ;; Blackboard at start
     [:output-snapshot :map]                       ;; Blackboard at end
     [:node-traces [:vector ::node-trace]]
@@ -470,7 +488,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure :tree-generated]]
+    [:status [:enum :success :failure :tree-generated :partial]]
     [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]
@@ -480,7 +498,9 @@
      [:map
       [:prompt-tokens {:optional true} :int]
       [:completion-tokens {:optional true} :int]
-      [:total-tokens {:optional true} :int]]]]
+      [:total-tokens {:optional true} :int]]]
+    ;; D-008: present when a map-each terminates in :partial or :failure.
+    [:partial-summary {:optional true} partial-summary]]
 
    :sheet/fail-node-execution
    [:map
@@ -876,7 +896,7 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:node-id :uuid]
-    [:status [:enum :success :failure :running :tree-generated]]
+    [:status [:enum :success :failure :running :tree-generated :partial]]
     [:writes {:optional true} [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]
@@ -885,7 +905,9 @@
      [:map
       [:prompt-tokens {:optional true} :int]
       [:completion-tokens {:optional true} :int]
-      [:total-tokens {:optional true} :int]]]]
+      [:total-tokens {:optional true} :int]]]
+    ;; D-008: present on map-each completion events when status is :partial or :failure.
+    [:partial-summary {:optional true} partial-summary]]
 
    ;; RLM-specific learning-signal event. Fires alongside the generic
    ;; node-execution-completed when an LLM call completes inside an RLM
@@ -935,7 +957,9 @@
     [:sheet-id :uuid]
     [:tick-id :uuid]
     [:iteration {:optional true} :int]
-    [:root-status [:enum :success :failure :running :tree-generated]]
+    ;; D-008: :partial added so map-each can surface partial outcomes
+    ;; at the tree-tick level. complete-tree-tick passes the root status through.
+    [:root-status [:enum :success :failure :running :tree-generated :partial]]
     [:outputs {:optional true} :map]
     [:error {:optional true} :string]]
 
