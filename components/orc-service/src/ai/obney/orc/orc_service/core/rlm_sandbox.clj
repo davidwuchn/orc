@@ -282,7 +282,19 @@
                          (swap! sandbox-vars assoc k v)
                          v))
 
-        ;; Build safe clojure.core namespace (same as base sandbox)
+        ;; Build safe clojure.core namespace (same as base sandbox).
+        ;;
+        ;; CRITICAL: DO NOT include special forms / core macros like
+        ;; let, if, cond, when, do, fn, def here. SCI handles those NATIVELY.
+        ;; Selecting them from (ns-publics 'clojure.core) overrides SCI's
+        ;; native handling with clojure.core's macro implementations whose
+        ;; macroexpansion emits references to JVM internals
+        ;; (e.g. clojure.lang.PersistentArrayMap/createAsIfByAssoc for
+        ;; {:keys [...]} destructuring) that SCI can't resolve. The result:
+        ;; any inline (fn [{:keys [...]}] ...) or (let [...] ...) form the
+        ;; model writes would fail with "Could not resolve symbol" or class
+        ;; cast errors. (The base sci-sandbox.clj never had this bug because
+        ;; its safe-clojure-core list stops at `class`.)
         safe-clojure-core '[+ - * / mod quot rem
                            = not= < > <= >= compare
                            str pr-str prn-str println print
@@ -308,7 +320,7 @@
                            name namespace
                            re-find re-matches re-seq
                            subs format
-                           type class let if cond when do fn def]
+                           type class]
         core-publics (ns-publics 'clojure.core)
         safe-core (select-keys core-publics safe-clojure-core)
 
