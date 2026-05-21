@@ -287,7 +287,13 @@
 
 (defcommand :sheet set-node-context
   {:authorized? authenticated?}
-  "Set the ontology context for a leaf node (for self-learning injection)."
+  "Set the ontology context for a node (for self-learning injection).
+
+   Originally restricted to :leaf nodes; relaxed in C-1 to also accept
+   :repl-researcher nodes, since the runtime apply-ontology-context
+   pipeline (todo_processors.clj) reads :context from any node with
+   :instruction and prepends formatted principles to it. The read-model
+   projection is generic so no other change was needed."
   [{{:keys [sheet-id node-id context]} :command
     :as ctx}]
   (let [node (rm/get-node ctx sheet-id node-id)]
@@ -296,9 +302,9 @@
       {::anom/category ::anom/not-found
        ::anom/message "Node not found"}
 
-      (not= :leaf (:type node))
+      (not (#{:leaf :repl-researcher} (:type node)))
       {::anom/category ::anom/incorrect
-       ::anom/message "Only leaf nodes can have context"}
+       ::anom/message "Only :leaf and :repl-researcher nodes can have context"}
 
       :else
       {:command-result/events
