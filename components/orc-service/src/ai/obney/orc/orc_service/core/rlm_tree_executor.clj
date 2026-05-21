@@ -17,7 +17,8 @@
             [ai.obney.orc.orc-service.core.commands] ;; Load command handlers
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.event-store-v3.interface :as es]
-            [ai.obney.grain.time.interface :as time]))
+            [ai.obney.grain.time.interface :as time]
+            [clojure.walk :as walk]))
 
 ;; =============================================================================
 ;; Ephemeral Function Registry
@@ -135,6 +136,28 @@
   [fn-id]
   (swap! ephemeral-fn-registry dissoc fn-id))
 
+(defn sanitize-tree-for-events
+  "U8: Walk a tree and replace any :fn map-entry whose value is a function
+   object with [:fn \"<inline-fn>\"]. SCI fn objects are not Fressian-
+   serializable; if we store them verbatim in the event store, the
+   read-model fails to project the event and the tick stays pending
+   forever.
+
+   The actual function continues to live in the ephemeral-fn-registry
+   for Phase-2 execution. Only the EVENT representation needs sanitization.
+
+   Qualified-symbol-string :fn values pass through untouched. Tree shape
+   is otherwise preserved."
+  [tree]
+  (walk/postwalk
+    (fn [node]
+      (if (and (map-entry? node)
+               (= :fn (key node))
+               (fn? (val node)))
+        [:fn "<inline-fn>"]
+        node))
+    tree))
+
 ;; =============================================================================
 ;; Command Helpers (inlined to avoid circular dependency with test-helpers)
 ;; =============================================================================
@@ -207,11 +230,15 @@
       (concat (:reads opts) (:writes opts)))
 
     ;; Code node: (sheet/code :reads [...] :writes [...] :fn ...)
+    ;;
+    ;; U4: :fn may appear in any position in the canonical args list:
+    ;;   - rlm-dsl's :chunk-document / :aggregate translations emit :fn LAST
+    ;;   - rlm-dsl's :code translation (post R-2) emits :fn FIRST
+    ;; Parse all keyword-value pairs uniformly via (apply hash-map ...).
+    ;; The :fn value (inline fn OR qualified-symbol string) fits a hash-map
+    ;; entry just as well as any other value.
     (and (seq? tree) (= 'sheet/code (first tree)))
-    (let [args (rest tree)
-          ;; Filter out :fn and its value since it's not a keyword arg pair like others
-          keyword-pairs (take-while #(not= :fn %) args)
-          opts (apply hash-map keyword-pairs)]
+    (let [opts (apply hash-map (rest tree))]
       (concat (:reads opts) (:writes opts)))
 
     ;; Map-each node: (sheet/map-each :from :x :as :y :into :z child)
@@ -235,6 +262,37 @@
 
     ;; Otherwise: no keys
     :else []))
+
+(defn- extract-key-schemas
+  "U11: Walk the canonical tree and collect {write-key → Malli-schema} from
+   :llm nodes that declared :output-schemas.
+
+   When a write key's schema is structured (vector/map/etc.), the child
+   sheet's declare-key uses it. build-module then passes it to dscloj,
+   which detects complex-spec? → asks the LLM for JSON → parses the
+   response back into Clojure data. Without this, the LLM's structured
+   output arrives at downstream :code nodes as raw JSON text.
+
+   Returns a map {key schema}. Last-write-wins on key conflicts.
+   Returns {} when no :output-schemas declarations exist anywhere in the tree."
+  [tree]
+  (cond
+    ;; LLM node with :output-schemas → collect each {key schema}
+    (and (seq? tree) (= 'sheet/llm (first tree)))
+    (let [opts (apply hash-map (rest tree))]
+      (or (:output-schemas opts) {}))
+
+    ;; Sequence-like (sheet/sequence, sheet/parallel) → recurse into children
+    (and (seq? tree)
+         (#{'sheet/sequence 'sheet/parallel} (first tree)))
+    (apply merge (map extract-key-schemas (rest tree)))
+
+    ;; Map-each → recurse into the (last) child arg
+    (and (seq? tree) (= 'sheet/map-each (first tree)))
+    (extract-key-schemas (last tree))
+
+    ;; Code/final/etc. → no schemas to collect here
+    :else {}))
 
 ;; =============================================================================
 ;; Tree Compilation
@@ -274,6 +332,26 @@
                                children))
           all-fn-keys (vec (mapcat :ephemeral-fn-keys child-results))]
       {:node-id seq-id
+       :ephemeral-fn-keys all-fn-keys})
+
+    ;; U13: Parallel node: (sheet/parallel child1 child2 ...)
+    ;; Same compile structure as :sequence — create a :parallel node and
+    ;; compile children under it. The runtime executes the children
+    ;; concurrently (independent work only). The framework prompt documents
+    ;; :parallel as a supported tree DSL node type; without this branch the
+    ;; model's emit-tree! produced trees that failed with "Unknown tree
+    ;; node type: sheet/parallel".
+    (and (seq? tree) (= 'sheet/parallel (first tree)))
+    (let [par-result (run-command! context
+                       (make-create-node-command sheet-id :parallel :parent-id parent-id :index index))
+          par-id (-> par-result :command-result/events first :node-id)
+          children (rest tree)
+          child-results (vec (map-indexed
+                               (fn [idx child-tree]
+                                 (compile-tree-node context sheet-id child-tree par-id :index idx))
+                               children))
+          all-fn-keys (vec (mapcat :ephemeral-fn-keys child-results))]
+      {:node-id par-id
        :ephemeral-fn-keys all-fn-keys})
 
     ;; LLM node: (sheet/llm :instruction "..." :reads [...] :writes [...] :retry {...})
@@ -414,9 +492,18 @@
    {:status :success/:failure/:timeout
     :outputs {...}
     :usage {...}
-    :duration-ms N}"
-  [tree context {:keys [sandbox-vars blackboard timeout-ms]
-                 :or {timeout-ms 60000}}]
+    :duration-ms N}
+
+   U6 options:
+     :blackboard-schemas - Optional {key schema} map preserving parent
+                           schemas (e.g. [:string {:field-type :image}])
+                           so vision/audio inputs route correctly through
+                           the child sheet's leaf nodes. When absent for a
+                           given key, falls back to inferring schema from
+                           value type."
+  [tree context {:keys [sandbox-vars blackboard blackboard-schemas timeout-ms]
+                 :or {timeout-ms 60000
+                      blackboard-schemas {}}}]
   (println "[DEBUG Tree] execute-tree starting")
   (println "[DEBUG Tree] sandbox-vars keys:" (keys sandbox-vars))
   (println "[DEBUG Tree] blackboard keys:" (keys blackboard))
@@ -451,26 +538,39 @@
                 (run-command! context
                   (make-declare-key-command sheet-id k schema))))
 
-          ;; Declare blackboard keys from inputs
+          ;; Declare blackboard keys from inputs.
+          ;; U6: If the caller supplied :blackboard-schemas, prefer that
+          ;; schema (preserves :field-type :image etc.); else infer from
+          ;; value type.
           _ (println "[DEBUG Tree] Declaring blackboard keys...")
           _ (doseq [[k v] blackboard]
-              (let [schema (cond
-                             (string? v) :string
-                             (number? v) :number
-                             (boolean? v) :boolean
-                             (map? v) [:map-of :any :any]
-                             (vector? v) [:vector :any]
-                             (sequential? v) [:vector :any]
-                             :else :any)]
+              (let [schema (or (get blackboard-schemas k)
+                               (cond
+                                 (string? v) :string
+                                 (number? v) :number
+                                 (boolean? v) :boolean
+                                 (map? v) [:map-of :any :any]
+                                 (vector? v) [:vector :any]
+                                 (sequential? v) [:vector :any]
+                                 :else :any))]
                 (run-command! context
                   (make-declare-key-command sheet-id k schema))))
 
-          ;; Declare any additional keys from tree that aren't already declared
+          ;; U11: collect any :output-schemas declared on :llm nodes in the
+          ;; tree. When the model declares the structure of an :llm write
+          ;; (e.g. :targets [:vector [:map ...]]), we use that schema when
+          ;; declaring the blackboard key so dscloj's complex-spec? path
+          ;; triggers JSON-parsing of the LLM response. Without this,
+          ;; structured LLM outputs arrive at downstream :code nodes as
+          ;; raw JSON text.
+          tree-schemas (extract-key-schemas tree)
+          ;; Declare any additional keys from tree that aren't already declared.
+          ;; Use the model-declared schema if available; else fall back to :any.
           declared-keys (set (concat (keys sandbox-vars) (keys blackboard)))
           _ (doseq [k tree-keys
                     :when (not (contains? declared-keys k))]
               (run-command! context
-                (make-declare-key-command sheet-id k :any)))
+                (make-declare-key-command sheet-id k (or (get tree-schemas k) :any))))
 
           ;; Compile the actual tree structure into ORC nodes
           ;; Returns {:node-id N :ephemeral-fn-keys [...]}
