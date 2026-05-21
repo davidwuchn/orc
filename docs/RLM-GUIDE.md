@@ -131,6 +131,7 @@ All options accepted by the `repl-researcher` node and the `:rlm` config map.
 | `:max-iterations` | int | 5 | Max Phase-1 iterations. If the model neither calls `(final! ...)` nor calls `(emit-tree! ...)` within this many iterations, the run returns `{:status :failure :error "Max iterations reached without final!"}`. |
 | `:timeout-ms` | int | 900000 (15 min) | Hard wall-clock budget for Phase 2. Precedence: node's `:timeout-ms` > parent tick's `:timeout-ms` > hardcoded 15-minute default. When Phase 2 budget is exhausted mid-flight the child tick is cancelled. |
 | `:rlm` | map or `true` | `false` | Enables RLM mode. `true` is equivalent to `{}`. See "`:rlm` config map" below. |
+| `:context` | map | `nil` | Ontology context injection. When set, the framework queries the ontology for patterns tied to the configured `:tree-id` and prepends a formatted summary to the model's instruction at run time. See [Ontology context injection](#ontology-context-injection-context) below. |
 
 ### `:rlm` config map options
 
@@ -205,6 +206,92 @@ The framework walks the canonical emit-tree! tree and injects `:model :sub-model
 Set on the `repl-researcher` node, or alternatively under the `:rlm` map as `:rlm {:sub-model "..."}`. When unset, all calls use `:model`.
 
 This matches the predict-rlm bench's "apples-to-apples" pattern (gpt-5.4 main + gpt-5.1-chat sub). See [`development/bench/predict-rlm-comparison/`](../development/bench/predict-rlm-comparison/) for runnable examples.
+
+## Ontology context injection (`:context`)
+
+`repl-researcher` accepts an optional `:context` map that opts into ontology-driven prompt augmentation. When set, the framework looks up patterns recorded under the configured `:tree-id` and prepends a formatted "Relevant Knowledge" section to the researcher's instruction at execute time — so the model sees previously-recorded successful patterns (and patterns to avoid) when it starts designing its tree.
+
+The same `:context` parameter exists on `orc/llm` leaf nodes; the wiring is symmetrical, the consuming pipeline is the same.
+
+### Config shape
+
+```clojure
+(orc/repl-researcher "researcher"
+  :model "google/gemini-2.5-flash"
+  :instruction "..."
+  :reads  [:document]
+  :writes [:summary :key-dates :entities]
+  :rlm    true
+  :context {:tree-id          <UUID — the key under which patterns are stored>
+            :self-learning?   true
+            :include-patterns true     ;; surface success patterns
+            :include-failures true     ;; surface failure patterns
+            :problem-type     "problem:Extraction"})   ;; optional problem-class URI
+```
+
+| Field | Type | Purpose |
+|---|---|---|
+| `:tree-id` | UUID | The retrieval key. Patterns recorded with this same `:tree-id` (via `ontology/record-tree-strength` / `ontology/record-tree-weakness`) are loaded for injection. Use a *stable* UUID per task class so unrelated runs share the same pattern store. |
+| `:self-learning?` | bool | Enables the retrieval path. Without it set to `true`, no ontology lookup happens. |
+| `:include-patterns` | bool | When `true`, recorded `:strengths` (success patterns) appear under "Learned Rules from Success Patterns". |
+| `:include-failures` | bool | When `true`, recorded `:weaknesses` (failure patterns) appear under "Patterns to Avoid". |
+| `:problem-type` | string | Optional URI naming the problem class (e.g. `"problem:Classification"`, `"problem:Extraction"`). Used by the ontology's hybrid retrieval to widen matches via the problem-domain graph. |
+
+### Recording patterns
+
+Patterns are written via the standard ontology commands. A strength (success pattern) command:
+
+```clojure
+(require '[ai.obney.grain.command-processor-v2.interface :as cp])
+
+(cp/process-command
+  (assoc ctx :command
+    {:command/name :ontology/record-tree-strength
+     :tree-id <same-uuid-the-node-uses>
+     :pattern-uri "success:BoundedMapEachOnChunkedExtraction"
+     :confidence 1.0
+     :evidence-trace-ids [<tick-id>]
+     :avg-score 0.95
+     :domain-type "rlm-tree-design"
+     :context-conditions {:task-class :chunked-extraction
+                          :input-shape :large-document
+                          :symptom :rate-limit-risk-on-unbounded-parallelism}
+     :action-taken {:type "BoundedMapEach"
+                    :target "[:map-each {:from :chunks :as :chunk :into :results :max-concurrency 3} [:llm {...}]]"
+                    :reason "Sub-LLM rate limits exhaust on unbounded concurrency"}
+     :expected-outcome "Successful per-chunk extraction without rate-limit failures"}))
+```
+
+A weakness uses `:ontology/record-tree-weakness` with `:failure-uri`, `:severity`, `:triggers`, `:failure-context`, `:attempted-action`. See the SELF-LEARNING-MANUAL for the full command schemas.
+
+The structured fields map directly to the rendered output: `:context-conditions` becomes the "when" guard, `:action-taken.target` becomes the recommended pattern snippet (rendered as a Clojure code block), `:action-taken.reason` becomes the "Why" line, and `:expected-outcome` becomes the "Expected outcome" line.
+
+### What the model sees
+
+For a `:tree-id` with one recorded strength, the model's instruction is prepended with a "Relevant Knowledge" block:
+
+```
+## Relevant Knowledge
+
+### Learned Rules from Success Patterns
+- **BoundedMapEach** — when task-class=:chunked-extraction, input-shape=:large-document, symptom=:rate-limit-risk-on-unbounded-parallelism (95% confidence, 1 episode)
+  - Action:
+    ```clojure
+    [:map-each {:from :chunks :as :chunk :into :results :max-concurrency 3} [:llm {...}]]
+    ```
+  - Why: Sub-LLM rate limits exhaust on unbounded concurrency
+  - Expected outcome: Successful per-chunk extraction without rate-limit failures
+```
+
+The model receives this *before* it begins designing its tree, so its first `emit-tree!` response can take the recorded patterns into account. When multiple patterns are recorded, all are rendered (deduplicated and ordered by confidence) up to the `:max-items` default of 5.
+
+When the configured `:tree-id` has no recorded patterns (or `:self-learning?` is not set, or `:context` is absent entirely), no "Relevant Knowledge" section is injected — the researcher behaves identically to a node without `:context`.
+
+### When to use it
+
+- **Stable task classes** — pick a UUID per task class (e.g. document extraction, contract comparison) and tag all relevant principles with that UUID.
+- **High-confidence patterns only** — the same channel surfaces every recorded principle. If you want curated patterns instead of everything ever recorded, write a custom retrieval layer; the default loads all `:strengths`/`:weaknesses` for the configured `:tree-id`.
+- **Failures matter as much as successes** — `:include-failures true` is on by default in the examples for a reason. A "Patterns to Avoid" entry can be a stronger steering signal than a strength.
 
 ## Recursive mode (`:rlm {:recursive? true}`)
 
@@ -495,6 +582,10 @@ When `:recursive? true` is set, the sandbox also exposes the drill-down primitiv
 ### Phase 2 tree DSL
 
 The DSL the model writes inside `(emit-tree! [...])` supports `:sequence`, `:parallel`, `:fallback`, `:map-each`, `:llm`, `:code`, `:chunk-document`, `:aggregate`, `:condition`, and `:final`. See [Phase 2 tree DSL node types](#phase-2-tree-dsl-node-types) above for the full shape of each.
+
+### Ontology context
+
+Opt in via `:context` on the node. The framework loads patterns recorded under the configured `:tree-id` and prepends a "Relevant Knowledge" block to the instruction. See [Ontology context injection](#ontology-context-injection-context) above for config, recording, and rendered output.
 
 ## Related guides
 
