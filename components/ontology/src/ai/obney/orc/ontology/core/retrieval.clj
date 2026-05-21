@@ -1227,13 +1227,21 @@
 (defn- format-rich-pattern
   "Format a pattern with its conditions and actions for LLM injection.
 
-   Produces actionable rules like:
-   - When battery=15, position far from home: return-home to [0 0 0] (90% success)
+   Produces multi-line entries when the pattern carries rich tree-design
+   context (a tree-DSL snippet in :action-taken.target plus a :reason
+   and an :expected-outcome at the top level). Lower-fidelity patterns
+   fall back to the single-line label format.
 
-   Falls back to label-based format if rich context not available.
-   Works for any domain (drone, legal, sales, construction, etc.)."
+   For RLM tree-design principles, the multi-line form surfaces:
+     - the named pattern (Action),
+     - the WHY behind the rule (Why, from :action-taken.reason),
+     - what success looks like (Expected outcome, from :expected-outcome),
+     - the tree-DSL snippet rendered as a Clojure code block.
+
+   Works for any domain (drone, legal, sales, construction, RLM tree-design)."
   [pattern]
-  (let [{:keys [label context-conditions action-taken confidence avg-score count evidence-episodes]} pattern
+  (let [{:keys [label context-conditions action-taken confidence avg-score
+                count evidence-episodes expected-outcome]} pattern
 
         ;; Format conditions as readable string
         conditions-str (when (and context-conditions (seq context-conditions))
@@ -1250,14 +1258,22 @@
                                        (str field-name "=" value-str))))
                               (str/join ", ")))
 
-        ;; Format action as readable string
-        action-str (when action-taken
-                     (let [{:keys [type target reason]} action-taken
-                           target-str (when target
-                                        (if (coll? target)
-                                          (str "[" (str/join " " (map #(if (float? %) (format "%.1f" %) %) target)) "]")
-                                          (str target)))]
-                       (str type (when target-str (str " to " target-str)))))
+        ;; Extract action subfields without lossy stringification — we want
+        ;; the :target rendered separately (often a long DSL snippet best
+        ;; shown as a code block) and the :reason preserved for the multi-line
+        ;; output.
+        {action-type :type
+         action-target :target
+         action-reason :reason} action-taken
+
+        target-str (when action-target
+                     (if (coll? action-target)
+                       (str "[" (str/join " " (map #(if (float? %) (format "%.1f" %) %) action-target)) "]")
+                       (str action-target)))
+
+        ;; Single-line summary for the rule header line
+        action-summary (when action-type
+                         (str action-type (when target-str " (see code block below)")))
 
         ;; Calculate display score (prefer avg-score, fallback to confidence)
         score (or avg-score confidence 0.8)
@@ -1265,14 +1281,38 @@
         ;; Use evidence-episodes from deduplication, fallback to count
         episode-count (or evidence-episodes count)]
 
-    (if (and conditions-str action-str)
-      ;; Rich format with conditions and actions
-      (str "- When " conditions-str ": " action-str
+    (cond
+      ;; Rich multi-line form: we have both conditions AND an action AND
+      ;; at least one of (reason, expected-outcome, target). This is the
+      ;; shape RLM tree-design principles take.
+      (and conditions-str
+           action-type
+           (or action-reason expected-outcome target-str))
+      (let [header (str "- **" (or action-type label) "** — when " conditions-str
+                        (format " (%.0f%% confidence" (* 100 score))
+                        (when (and episode-count (pos? episode-count))
+                          (str ", " episode-count " episode" (when (> episode-count 1) "s")))
+                        ")")
+            target-block (when target-str
+                           (str "\n  - Action:\n    ```clojure\n    " target-str "\n    ```"))
+            reason-line (when action-reason
+                          (str "\n  - Why: " action-reason))
+            outcome-line (when expected-outcome
+                           (str "\n  - Expected outcome: " expected-outcome))]
+        (str header target-block reason-line outcome-line))
+
+      ;; Original single-line format — preserved for legacy patterns whose
+      ;; :action-taken has only :type/:target without :reason/:expected-outcome.
+      (and conditions-str action-summary)
+      (str "- When " conditions-str ": " action-type
+           (when target-str (str " to " target-str))
            (format " (%.0f%% success" (* 100 score))
            (when (and episode-count (pos? episode-count))
              (str ", " episode-count " episodes"))
            ")")
+
       ;; Fallback to simple label format
+      :else
       (str "- **" label "**"
            (format " (%.0f%% confidence" (* 100 (or confidence 0.8)))
            (when (and episode-count (pos? episode-count))
