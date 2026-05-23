@@ -78,8 +78,11 @@ sparingly. Favor prose over bullets; use bullets very sparingly.
 (def instruction
   "Port-cleaned from predict-rlm's signature.py docstring (verbatim end-goal
    + output schema; Python tool nouns stripped; adversarial-completeness
-   added)."
-  (str "Analyze documents and produce a structured report.
+   added). The verbose REPORT CRITERIA block that predict-rlm appends was
+   removed — the model was treating it as a procedural recipe and burning
+   iterations on it; the schema below is sufficient guidance and matches
+   what the original ORC document_analysis benchmark uses."
+  "Analyze documents and produce a structured report.
 
    Goal:
      Read the provided document pages, then produce a comprehensive
@@ -89,9 +92,10 @@ sparingly. Favor prose over bullets; use bullets very sparingly.
      in the source documents.
 
    Output schema:
-     :report — markdown string, the full briefing report following the
-       criteria's section structure (Executive Summary, Key Dates and
-       Timeline, Key Entities and Stakeholders, Financial Information).
+     :report — markdown string, the full briefing report. Cover at minimum
+       Executive Summary, Key Dates and Timeline, Key Entities and
+       Stakeholders, and Financial Information. Use prose with tables/
+       bullets only where they aid clarity.
      :key-dates — vector of maps with keys :name (e.g. \"Submission Deadline\",
        \"Effective Date\"), :date (ISO YYYY-MM-DD), :time (24-hour HH:MM
        optional), :timezone (e.g. \"PST\", \"EST\", optional).
@@ -102,47 +106,21 @@ sparingly. Favor prose over bullets; use bullets very sparingly.
    QUALITY REQUIREMENTS:
      - Information must be accurate and traceable to the source documents.
      - Do NOT invent dates, people, organizations, or facts not present.
-     - Dates in :key-dates MUST be ISO YYYY-MM-DD format (transform from
-       whatever format appears in the source).
-     - The markdown :report should be professional, mix prose with tables
-       where useful, follow the report-criteria structure below.
+     - Dates in :key-dates MUST be ISO YYYY-MM-DD format.
 
-   STRUCTURAL VERIFICATION REQUIREMENT: After producing an initial
-   extraction, adversarially re-examine the document pages to verify
-   completeness:
-     - Did you capture every important date (deadlines, meetings,
-       milestones, term dates)?
-     - Did you correctly identify all named people, organizations, and
-       roles — including those mentioned only briefly?
-     - Did the markdown report cover all four required sections?
-   If anything was missed or wrong, correct it before producing the final
-   structured result.
+   COMPOSITION CONSIDERATIONS:
 
-   COMPOSITION CONSIDERATIONS — read carefully:
-
-   - The blackboard provides page texts as a vector keyed :document-page-texts.
-     Each element is the plain text extracted from one PDF page. The
-     document has roughly 136 pages so the vector is large.
+   - The blackboard provides page texts as a vector keyed :document-page-texts
+     (~136 pages of pre-extracted text).
 
    - If your design iterates pages, each per-iteration sub-call sees one
-     page in isolation. The sub-call cannot infer its own position in the
-     source collection from text content alone. If you need positional
-     context (e.g. \"this is page 12 of the RFP\"), thread that context
-     into each iteration explicitly.
-
-   - For multi-section extraction tasks: producing a structured report
-     usually involves (a) gathering raw content per page, (b) classifying
-     content into report sections, and (c) synthesizing the final markdown.
-     The framework supports doing each step as a separate tree node, with
-     intermediate writes flowing through the blackboard.
+     page in isolation. The sub-call cannot infer its position in the
+     source collection from content alone — thread positional context
+     explicitly if you need it.
 
    - Behavior-tree primitives (sequence, parallel, map-each, llm, code,
-     final) are the durable, observable record of the work. Prefer emitting
-     a tree over coordinating multiple sub-calls inline as imperative
-     Clojure code in Phase 1.\n\n"
-
-       "---\n\n## REPORT CRITERIA (from predict-rlm verbatim)\n\n"
-       criteria))
+     final) are the durable, observable record. Prefer emitting a tree
+     over coordinating sub-calls inline as imperative Phase-1 code.")
 
 (defn- load-inputs []
   ;; Use per-page TEXT extraction (not vision) to keep the run efficient.

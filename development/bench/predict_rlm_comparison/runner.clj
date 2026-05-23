@@ -181,7 +181,7 @@
                               (:writes task)
                               []
                               :model effective-model
-                              :max-iterations 5
+                              :max-iterations 20
                               :rlm rlm-config))
       {:sheet-id sheet-id :node-id node-id})))
 
