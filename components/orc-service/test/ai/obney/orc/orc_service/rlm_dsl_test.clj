@@ -680,6 +680,20 @@
 ;; are documented as inspection-only, not the main loop.
 ;; =============================================================================
 
+(deftest recursive-prompt-nudges-verify-before-final
+  (testing "R-7c: recursive-mode prompt tells the model to peek at output values before (final! ...)"
+    (let [build-fn (requiring-resolve 'ai.obney.orc.orc-service.core.executor/build-rlm-code-generation-module)
+          node {:rlm {:recursive? true}
+                :writes [:answer]
+                :instruction "Find facts."}
+          module (build-fn node {} [] {} {} {})
+          instructions (:instructions module)]
+      (is (string? instructions))
+      (is (re-find #"(?i)verify before final" instructions)
+          "Recursive-mode prompt contains the literal sentinel 'verify before final' so future audits can pin it")
+      (is (re-find #"\(get-var" instructions)
+          "Prompt mentions (get-var ...) as the inspection primitive"))))
+
 (deftest recursive-prompt-leads-with-emit-tree-as-primary-work
   (testing "When :recursive? true, the system prompt frames emit-tree! as the primary work primitive"
     (let [build-fn (requiring-resolve 'ai.obney.orc.orc-service.core.executor/build-rlm-code-generation-module)

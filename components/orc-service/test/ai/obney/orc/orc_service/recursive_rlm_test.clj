@@ -222,6 +222,101 @@
           "nodes-completed-before-cancel = count of leaf node-execution-completed events at cancel time"))))
 
 ;; =============================================================================
+;; R-7a: :outputs-previews — value preview surfaced in tree-results summary
+;;
+;; Observability gap from the image_analysis A-Z-zero audit: a tree completes
+;; structurally-successfully but its payload is semantically broken, and the
+;; model has no way to notice because the summary only carries :outputs-keys
+;; (the KEY names), not a preview of the VALUES. Adding :outputs-previews
+;; gives the model visible-by-default evidence of what landed in each key
+;; without requiring drill-down primitives.
+;; =============================================================================
+
+(deftest summary-includes-map-output-preview
+  (testing "map outputs appear in :outputs-previews as {:keys [sorted-keys] :sample-3 [[k v-preview] ...]}"
+    (let [report {:title "Q3 Findings" :body "Detailed body text..." :score 4}
+          phase2-result {:status :success
+                         :outputs {:report report}
+                         :duration-ms 100
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:report]})
+          preview (get-in summary [:outputs-previews :report])]
+      (is (map? preview))
+      (is (= [:body :score :title] (:keys preview))
+          ":keys lists all map keys in sorted order")
+      (is (= 3 (count (:sample-3 preview)))
+          ":sample-3 carries up to 3 [k v-preview] pairs")
+      (is (every? vector? (:sample-3 preview))
+          "each sample entry is a [k v-preview] pair"))))
+
+(deftest summary-includes-scalar-output-preview
+  (testing "scalar outputs (numbers, booleans, keywords) are pr-str'd into :outputs-previews"
+    (let [phase2-result {:status :success
+                         :outputs {:count 42
+                                   :ok? true
+                                   :tag :final}
+                         :duration-ms 100
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:count :ok? :tag]})]
+      (is (= "42" (get-in summary [:outputs-previews :count])))
+      (is (= "true" (get-in summary [:outputs-previews :ok?])))
+      (is (= ":final" (get-in summary [:outputs-previews :tag]))))))
+
+(deftest summary-includes-collection-output-preview
+  (testing "vector outputs appear in :outputs-previews as {:count N :sample-3 [first three pr-str'd]}"
+    (let [lines (mapv #(str "line-" %) (range 50))   ; 50 strings
+          phase2-result {:status :success
+                         :outputs {:lines lines}
+                         :duration-ms 100
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:lines]})
+          preview (get-in summary [:outputs-previews :lines])]
+      (is (map? preview)
+          "collection preview is a map (not the collection itself)")
+      (is (= 50 (:count preview))
+          ":count is the full element count, not the truncated sample size")
+      (is (= 3 (count (:sample-3 preview)))
+          ":sample-3 carries the first 3 entries")
+      (is (every? string? (:sample-3 preview))
+          "each sample entry is pr-str'd (a string)"))))
+
+(deftest summary-includes-string-output-preview
+  (testing "string outputs appear in :outputs-previews truncated to 500 chars with overflow marker"
+    (let [long-text (apply str (repeat 100 "ONTARIO POWER AUTHORITY "))   ; 2400 chars
+          phase2-result {:status :success
+                         :outputs {:answer long-text}
+                         :duration-ms 100
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:answer]})
+          preview (get-in summary [:outputs-previews :answer])]
+      (is (string? preview)
+          ":outputs-previews :answer is a string preview")
+      (is (= (subs long-text 0 500) (subs preview 0 500))
+          "first 500 chars of the preview match the first 500 chars of the value verbatim")
+      (is (re-find #"truncated.*full 2400 chars" preview)
+          "overflow marker shows the full original length so the model knows there's more"))))
+
+;; =============================================================================
 ;; merge-tree-result-into-sandbox — pure deep module
 ;; =============================================================================
 

@@ -75,6 +75,54 @@
 ;; R-1: compute-tree-result-summary — pure deep module
 ;; =============================================================================
 
+(def ^:private outputs-preview-string-limit
+  "Maximum characters of a string value to surface in `:outputs-previews`.
+
+   R-7a: this preview is a SAMPLE for the model's reasoning context — it is
+   not a substitute for `(get-var :key)` or `(node-output ...)`, which still
+   return the full untruncated value. Cap is intentionally generous so the
+   model can spot semantic anomalies (e.g. all-zero letter counts after a
+   non-empty transcription) directly from the summary."
+  500)
+
+(defn- compute-output-preview
+  "Build a single preview value for one entry in `:outputs-previews`.
+
+   Shape per type:
+     string → first N chars + overflow marker when len > N (verbatim
+              content otherwise)
+     vector/seq/list → {:count N :sample-3 [first three pr-str'd values]}
+     map → {:keys [sorted-keys] :sample-3 [[k v-preview] ...]}
+     scalar (number, boolean, keyword, nil, other) → pr-str
+   "
+  [v]
+  (cond
+    (string? v)
+    (let [n (count v)]
+      (if (<= n outputs-preview-string-limit)
+        v
+        (str (subs v 0 outputs-preview-string-limit)
+             "…(truncated, full " n " chars)")))
+
+    (or (vector? v) (seq? v) (list? v))
+    (let [items (vec (take 3 v))]
+      {:count (count v)
+       :sample-3 (mapv #(let [s (pr-str %)]
+                          (if (<= (count s) 200) s (str (subs s 0 200) "…")))
+                       items)})
+
+    (map? v)
+    (let [ks (sort (keys v))
+          ks-sample (take 3 ks)]
+      {:keys (vec ks)
+       :sample-3 (mapv (fn [k]
+                         (let [vp (compute-output-preview (get v k))]
+                           [k vp]))
+                       ks-sample)})
+
+    :else
+    (pr-str v)))
+
 (defn compute-tree-result-summary
   "Build the lightweight :tree-results summary entry for a Phase 2 tree execution.
 
@@ -112,6 +160,13 @@
         total (count leaf-completions)
         writes-set (set writes)
         outputs-keys (vec (filter writes-set (keys (:outputs phase2-result))))
+        ;; R-7a: per-output-key value previews so the model can spot
+        ;; semantically broken payloads from the summary alone, without
+        ;; needing to drill down via (get-var ...) / (node-output ...).
+        outputs-previews (into {}
+                               (map (fn [k] [k (compute-output-preview
+                                                 (get (:outputs phase2-result) k))]))
+                               outputs-keys)
         status (:status phase2-result)
         ;; Combine failure-indices + failure-reasons across all partial-summary
         ;; events (typically only one map-each per tree, but support multiple).
@@ -131,6 +186,7 @@
              :status status
              :elapsed-ms (:duration-ms phase2-result)
              :outputs-keys outputs-keys
+             :outputs-previews outputs-previews
              :nodes-succeeded succeeded
              :nodes-failed failed
              :nodes-total total
@@ -1573,7 +1629,30 @@
                              "  - `(node-output node-id)` — writes map of a specific completed node\n"
                              "  - `(node-input-profile node-id)` — input profile (chunk shape, etc.) of a specific node\n\n"
                              "These return potentially large data — prefer the `:tree-results` summary first and only "
-                             "drill down when you genuinely need the extra detail to make a decision.\n\n")
+                             "drill down when you genuinely need the extra detail to make a decision.\n\n"
+                             ;; R-7c: verify-before-final nudge.
+                             ;;
+                             ;; The model can emit a structurally-valid tree that produces a
+                             ;; semantically broken payload (e.g. iter 0 of image_analysis
+                             ;; wrote :answer with all-zero A-Z counts despite real OCR
+                             ;; text). validate-final! cannot catch this — :answer is a
+                             ;; non-empty string. The model needs a prompt-level nudge to
+                             ;; peek at the value via (get-var :key) and sanity-check it
+                             ;; before terminating. R-7a's :outputs-previews surface this
+                             ;; in the summary; this section turns that signal into a
+                             ;; specific instruction.
+                             ;;
+                             ;; Sentinel phrase: 'verify before final' (pinned by unit test).
+                             "### Verify before final\n"
+                             "Before calling `(final! {...})`, briefly inspect each output value via "
+                             "`(get-var :key)` (or check the per-key `:outputs-previews` on the most "
+                             "recent `:tree-results` entry — it carries the same preview) and confirm "
+                             "the value looks sane: right shape, plausible content, no obviously broken "
+                             "markers (e.g. an A-Z letter count block that reads `A: 0, B: 0, ...` "
+                             "for a non-empty transcription, an empty `:section-diffs []` when the "
+                             "task required actual diffs, or `nil` where structured data should be). "
+                             "If something looks off, emit a corrective tree to fix it rather than "
+                             "finalizing on a broken payload.\n\n")
                         "")
                       "## Output Contract\n"
                       "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
