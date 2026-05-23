@@ -1644,15 +1644,15 @@
                              ;;
                              ;; Sentinel phrase: 'verify before final' (pinned by unit test).
                              "### Verify before final\n"
-                             "Before calling `(final! {...})`, briefly inspect each output value via "
-                             "`(get-var :key)` (or check the per-key `:outputs-previews` on the most "
-                             "recent `:tree-results` entry — it carries the same preview) and confirm "
-                             "the value looks sane: right shape, plausible content, no obviously broken "
-                             "markers (e.g. an A-Z letter count block that reads `A: 0, B: 0, ...` "
-                             "for a non-empty transcription, an empty `:section-diffs []` when the "
-                             "task required actual diffs, or `nil` where structured data should be). "
-                             "If something looks off, emit a corrective tree to fix it rather than "
-                             "finalizing on a broken payload.\n\n")
+                             "Finalization is the DEFAULT next step once the required outputs are "
+                             "populated. Before `(final! {...})`, glance at `:outputs-previews` on "
+                             "the most recent `:tree-results` entry to spot CLEARLY broken payloads — "
+                             "e.g. an A-Z letter count block that reads `A: 0, B: 0, ...` for "
+                             "non-empty transcription text, a required structured array that came "
+                             "back `[]`, or `nil` where structured data should be. Only emit another "
+                             "tree if a value is OBVIOUSLY broken in that sense; minor imperfections, "
+                             "stylistic differences, or completeness questions are fine — finalize "
+                             "and let the evaluation layer judge quality.\n\n")
                         "")
                       "## Output Contract\n"
                       "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
