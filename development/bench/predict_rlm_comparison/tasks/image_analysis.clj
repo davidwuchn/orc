@@ -100,7 +100,7 @@
    ;; — our defaults satisfy that). Comment out these two lines to fall back
    ;; to the runner's default model (gemini-3-flash-preview).
    :model "openai/gpt-5.4"
-   :sub-model "openai/gpt-5.1-chat"
+   :sub-model "google/gemini-3-flash-preview"
    ;; NOTE: :available-code-nodes intentionally NOT set for this task —
    ;; we want to verify the model writes its OWN inline :code fns for
    ;; deterministic transforms (the inline-fn affordance was added with

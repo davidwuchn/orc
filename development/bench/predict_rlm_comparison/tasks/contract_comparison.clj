@@ -112,7 +112,7 @@
    :slug "contract-comparison-predict-rlm"
    :pattern "Two-document cross-version comparison (vision LLM per page) → structured diff"
    :model "openai/gpt-5.4"
-   :sub-model "openai/gpt-5.1-chat"
+   :sub-model "google/gemini-3-flash-preview"
    :instruction instruction
    :input-schemas {:contract-a-pages [:vector :string]
                    :contract-b-pages [:vector :string]}
