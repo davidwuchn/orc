@@ -1759,7 +1759,8 @@
     (try
       (loop [iteration 0
              history []]
-        (if (>= iteration max-iterations)
+        (cond
+          (>= iteration max-iterations)
           (let [total-elapsed (- (System/currentTimeMillis) start-time)]
             {:status :failure
              :error "Max iterations reached without final!"
@@ -1769,6 +1770,40 @@
              :cumulative-tree-ms @cumulative-tree-ms
              :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))})
 
+          ;; Pre-iteration budget check. The existing check inside the
+          ;; emit-tree! branch only fires when the model successfully emits
+          ;; a tree, so an iteration that does direct (llm ...) work without
+          ;; emitting a tree was previously uncapped. Without this check the
+          ;; model could burn many minutes of LLM calls per iteration before
+          ;; the next budget check ran. Check at the TOP of every iteration
+          ;; so any iteration that pushes elapsed past total-budget bails
+          ;; out fast instead of making another long-running LLM call.
+          (let [phase1-elapsed (- (System/currentTimeMillis) start-time)
+                budget (resolve-phase2-budget
+                        {:node node
+                         :parent-timeout-ms (:parent-timeout-ms context)
+                         :phase1-elapsed-ms phase1-elapsed})]
+            (:exhausted? budget))
+          (let [phase1-elapsed (- (System/currentTimeMillis) start-time)
+                budget (resolve-phase2-budget
+                        {:node node
+                         :parent-timeout-ms (:parent-timeout-ms context)
+                         :phase1-elapsed-ms phase1-elapsed})]
+            {:status :failure
+             :error (str "Budget exhausted in Phase 1 ("
+                         phase1-elapsed "ms elapsed of "
+                         (:total-budget-ms budget) "ms "
+                         "[source=" (name (:source budget)) "]; "
+                         "no time left for next iteration)")
+             :iterations history
+             :duration-ms phase1-elapsed
+             :phase1-elapsed-ms phase1-elapsed
+             :usage @total-usage
+             :budget budget
+             :cumulative-tree-ms @cumulative-tree-ms
+             :cumulative-thinking-ms (max 0 (- phase1-elapsed @cumulative-tree-ms))})
+
+          :else
           ;; Generate code using LLM
           (let [module (build-rlm-code-generation-module node inputs-preview history
                                                           blackboard @sandbox-vars @var-creation-times)
