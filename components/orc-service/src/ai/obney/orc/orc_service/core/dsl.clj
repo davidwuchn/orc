@@ -144,8 +144,9 @@
                  :include-patterns true
                  :include-failures true
                  :tree-id uuid  ;; for self-learning
-                 :self-learning? true}"
-  [name & {:keys [model instruction reads writes retry judges context]}]
+                 :self-learning? true}
+     :options - Executor options passed through to DSCloj for this node"
+  [name & {:keys [model instruction reads writes retry judges context options]}]
   (cond-> {:node-type :leaf
            :name name
            :executor :ai
@@ -155,7 +156,8 @@
            :writes (vec writes)}
     retry (assoc :retry retry)
     judges (assoc :judges (vec judges))
-    context (assoc :context context)))
+    context (assoc :context context)
+    options (assoc :options options)))
 
 (defn code
   "Define a code executor leaf node.
@@ -237,7 +239,7 @@
      - (final! {:key value}) - Capture validated output
      - (get-input :key) - Load full input value
      - inputs - Preview map (metadata only)"
-  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations rlm]}]
+  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations rlm options]}]
   (cond-> {:node-type :repl-researcher
            :name name
            :model model
@@ -247,7 +249,8 @@
            :mcp-tools (vec (or mcp-tools []))
            :browser-tools (vec (or browser-tools []))
            :max-iterations (or max-iterations 10)}
-    (some? rlm) (assoc :rlm rlm)))
+    (some? rlm) (assoc :rlm rlm)
+    options (assoc :options options)))
 
 (defn delegate
   "Define a delegate node for subworkflow execution.
@@ -441,7 +444,8 @@
         (h/run-and-apply! ctx
           (h/make-set-node-executor-command sheet-id node-id (:executor node)
             :model (:model node)
-            :fn (:fn node)))
+            :fn (:fn node)
+            :options (:options node)))
         ;; Set instruction if AI node
         (when (:instruction node)
           (h/run-and-apply! ctx
@@ -485,7 +489,8 @@
             :model (:model node)
             :max-iterations (:max-iterations node)
             :browser-tools (:browser-tools node)
-            :rlm (:rlm node))))
+            :rlm (:rlm node)
+            :options (:options node))))
 
       :delegate
       (do

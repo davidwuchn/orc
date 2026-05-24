@@ -139,6 +139,7 @@
     [:model {:optional true} :string]              ;; OpenRouter model ID (e.g., "google/gemini-2.5-flash")
     [:fn {:optional true} :string]                 ;; Fully-qualified fn symbol for :code executor
     [:tools {:optional true} [:vector :keyword]]   ;; Tools available to AI for :ai executor
+    [:options {:optional true} :map]               ;; Per-node executor/DSCloj options
     [:retry {:optional true} [:map
                               [:max-attempts :int]
                               [:backoff-ms [:vector :int]]]]
@@ -356,7 +357,8 @@
     [:executor executor-type]
     [:model {:optional true} :string]
     [:fn {:optional true} :string]
-    [:tools {:optional true} [:vector :keyword]]]
+    [:tools {:optional true} [:vector :keyword]]
+    [:options {:optional true} :map]]
 
    :sheet/set-node-retry
    [:map
@@ -401,6 +403,7 @@
     [:model {:optional true} :string]                   ;; OpenRouter model ID
     [:max-iterations {:optional true} :int]             ;; Default 10
     [:rlm {:optional true} [:or :boolean :map]]         ;; Enable RLM mode (true or {:debug? true})
+    [:options {:optional true} :map]                    ;; Per-node executor/DSCloj options
     [:timeout-ms {:optional true} :int]]                ;; D-003: total Phase-1+Phase-2 budget
 
    :sheet/set-delegate-config
@@ -743,10 +746,12 @@
     [:model {:optional true} :string]
     [:fn {:optional true} :string]
     [:tools {:optional true} [:vector :keyword]]
+    [:options {:optional true} :map]
     [:previous-executor {:optional true} executor-type]
     [:previous-model {:optional true} :string]
     [:previous-fn {:optional true} :string]
-    [:previous-tools {:optional true} [:vector :keyword]]]
+    [:previous-tools {:optional true} [:vector :keyword]]
+    [:previous-options {:optional true} :map]]
 
    :sheet/node-retry-set
    [:map
@@ -803,6 +808,7 @@
     [:model {:optional true} :string]
     [:max-iterations {:optional true} :int]
     [:rlm {:optional true} [:or :boolean :map]]
+    [:options {:optional true} :map]
     [:timeout-ms {:optional true} :int]                            ;; D-003
     [:previous-instruction {:optional true} :string]
     [:previous-reads {:optional true} [:vector :keyword]]
@@ -811,6 +817,7 @@
     [:previous-model {:optional true} :string]
     [:previous-max-iterations {:optional true} :int]
     [:previous-rlm {:optional true} [:or :boolean :map]]
+    [:previous-options {:optional true} :map]
     [:previous-timeout-ms {:optional true} :int]]                  ;; D-003
 
    :sheet/delegate-config-set

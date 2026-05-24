@@ -855,10 +855,15 @@
         dscloj-module (dissoc module :output-mapping)
         ;; Build effective provider config with model override if specified
         effective-provider (get-provider-with-model provider (:model node))
-        ;; Request metadata for usage tracking via :with-metadata? true
-        ;; Disable validation since we serialize complex inputs to JSON strings
-        ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
-        dscloj-options (assoc options :validate? false :with-metadata? true :use-function-calling? false)
+        ;; Request metadata for usage tracking via :with-metadata? true.
+        ;; Disable validation since we serialize complex inputs to JSON strings.
+        ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
+        ;; but preserve an explicit caller/node :use-function-calling? override
+        ;; for models where tool-backed structured output is more reliable.
+        dscloj-options (merge {:validate? false
+                               :with-metadata? true
+                               :use-function-calling? false}
+                              options)
         ;; Retry config - defaults to 1 retry with 500ms delay
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
@@ -1159,9 +1164,10 @@
       :duration-ms int
       :usage {:prompt-tokens N :completion-tokens N :total-tokens N}}"
   [node blackboard provider context & {:keys [options] :or {options {}}}]
-  ;; Route to RLM mode if enabled
-  (if (:rlm node)
-    (execute-repl-researcher-rlm node blackboard provider context :options options)
+  (let [execution-options (merge options (:options node))]
+    ;; Route to RLM mode if enabled
+    (if (:rlm node)
+      (execute-repl-researcher-rlm node blackboard provider context :options execution-options)
     (let [start-time (System/currentTimeMillis)
           max-iterations (or (:max-iterations node) 10)
         mcp-tools (or (:mcp-tools node) [])
@@ -1220,7 +1226,7 @@
                 ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
                 ;; Passing :model causes response parsing issues in dscloj
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
-                dscloj-options (assoc options :validate? false :with-metadata? true)
+                dscloj-options (assoc execution-options :validate? false :with-metadata? true)
 
                 ;; Generate code - use effective-provider for correct model override
                 llm-result (dscloj/predict effective-provider module inputs dscloj-options)
@@ -1321,7 +1327,7 @@
         {:status :failure
          :error (.getMessage e)
          :duration-ms (- (System/currentTimeMillis) start-time)
-         :usage @total-usage})))))
+         :usage @total-usage}))))))
 
 ;; =============================================================================
 ;; RLM Mode Execution (BT as Primitive)
@@ -1812,10 +1818,13 @@
                         :history (or (build-iteration-history history) "None")}
                 ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
                 ;; Passing :model causes response parsing issues in dscloj
-                ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
-                ;; DSCloj marker-based parsing works better for structured output extraction
+                ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
+                ;; but preserve an explicit caller/node :use-function-calling? override.
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
-                dscloj-options (assoc options :validate? false :use-function-calling? false :with-metadata? true)
+                dscloj-options (merge {:validate? false
+                                       :use-function-calling? false
+                                       :with-metadata? true}
+                                      options)
                 effective-provider (get-provider-with-model provider (:model node))
 
                 _ (dbg "\n========== ITERATION" (inc (count history)) "==========")
@@ -2246,15 +2255,16 @@
   [node blackboard provider & {:keys [context options] :or {context {} options {}}}]
   (let [executor-type (or (:executor node) :ai)
         retry-config (:retry node)
+        execution-options (merge options (:options node))
         execute-fn (fn []
                      (case executor-type
-                       :ai (execute-ai node blackboard provider :options options)
+                       :ai (execute-ai node blackboard provider :options execution-options)
                        :code (execute-code node blackboard context)
                        :tool {:status :failure
                               :error "Tool executor not yet implemented"
                               :duration-ms 0}
                        ;; Default to AI
-                       (execute-ai node blackboard provider :options options)))]
+                       (execute-ai node blackboard provider :options execution-options)))]
     (if retry-config
       (execute-with-retry execute-fn retry-config)
       (execute-fn))))
