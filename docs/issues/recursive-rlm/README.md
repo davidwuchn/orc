@@ -6,19 +6,42 @@
 
 ## Issue List
 
-| # | Title | Type | Blocked by |
-|---|-------|------|------------|
-| R-1 | [Core recursive loop](R-1-core-recursive-loop.md) | AFK | None |
-| R-2 | [Drill-down primitives](R-2-drill-down-primitives.md) | AFK | R-1 |
+| # | Title | Type | Blocked by | Status |
+|---|-------|------|------------|--------|
+| R-1 | [Core recursive loop](R-1-core-recursive-loop.md) | AFK | None | ✅ merged to main |
+| R-2 | [Drill-down primitives](R-2-drill-down-primitives.md) | AFK | R-1 | ✅ merged to main |
+| R-3 | [Inline-fn Fressian sanitization](R-3-inline-fn-fressian-sanitization.md) | AFK | R-1 | ✅ committed (905s → 131s, 6.9× faster, 0 Fressian errors) |
+| R-4 | [Sub-model injection in recursive mode](R-4-sub-model-injection-recursive.md) | AFK | R-3 | ✅ committed (Phase-2 :llm leaves now hit gpt-5.1-chat, not gemini-3-flash) |
+| R-5 | [History reuse hint](R-5-history-reuse-hint.md) | AFK | R-3 | ✅ committed (document_redaction 197s → 60s, 3.3× faster) |
+| R-Bench | [5-benchmark recursive verification sweep](R-Bench-recursive-5-benchmark-sweep.md) | HITL | R-3 + R-4 | ✅ **5/5 SUCCESS** — recursive matches/beats terminal mode |
+| R-6 | [Syntax-error retry optimization](R-6-syntax-error-retry-optimization.md) | AFK | R-Default | ✅ committed (line/caret context in iteration history) |
+| R-Default | [Make recursive the default RLM mode](R-Default-make-recursive-default.md) | AFK | R-Bench | ✅ committed (recursive is now the always-on default) |
+| R-7 | [Tree-result value previews + verify-before-final nudge](R-7-tree-result-value-previews.md) | AFK | R-Default | **open** — observability gap surfaced by image_analysis A-Z-zero audit (model emitted valid-looking tree with semantically broken output, didn't recover because no value preview signaled the problem) |
 
 ## Dependency Graph
 
 ```
-R-1 ─→ R-2
-(core      (drill-down
- recursive   primitives —
- loop)       enrichment over R-1)
+R-1 ─→ R-2  (drill-down primitives)
+ │
+ ├─→ R-3  (Fressian sanitization)
+ │    │
+ │    ├─→ R-4  (sub-model injection)
+ │    │    │
+ │    │    └─→ R-Bench  (5-benchmark sweep, HITL)
+ │    │
+ │    └─→ R-5  (history reuse, optional)
 ```
+
+## R-3..R-Bench context
+
+The recursive-mode benchmark experiment (`development/bench/predict_rlm_comparison/reports/recursive-mode-experiment.md` + `recursive-mode-plan.md`) ran all 5 predict-rlm benchmarks in recursive mode and found systematic regressions. Two framework fixes were made up-front and committed on `feature/rlm-recursive-mode-fixes`:
+
+- ✅ `validate-final!` rejects all-empty outputs (was: model could call `(final! {:k1 nil :k2 []})` and succeed silently)
+- ✅ Recursive-mode prompt leads with "`emit-tree!` is how you do work" (was: model treated emit-tree! as one option among many, never called it, called final! with empty data instead)
+
+After those, recursive-mode runs DO emit trees and produce real output, but surface three further framework bugs (R-3, R-4, R-5 above).
+
+End-goal: with R-3 + R-4 fixed (and ideally R-5), recursive mode passes the 5-benchmark sweep (R-Bench) and can become the always-on default.
 
 ## Priority — these land BEFORE Category C
 

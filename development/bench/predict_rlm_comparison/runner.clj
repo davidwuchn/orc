@@ -34,9 +34,12 @@
 
 (def config
   {:model "google/gemini-3-flash-preview"
-   :timeout-ms 600000
+   ;; 20 minutes default. predict-rlm's larger benchmarks (document_analysis,
+   ;; contract_comparison) take 4-6 minutes on their infrastructure; OpenRouter
+   ;; latency + our smaller per-page parallelism need more headroom.
+   :timeout-ms 1200000
    :documents-dir "development/bench/documents"
-   :results-dir "development/bench/predict-rlm-comparison/results"})
+   :results-dir "development/bench/predict_rlm_comparison/results"})
 
 ;; =============================================================================
 ;; Single-task-lock
@@ -164,7 +167,13 @@
                        (:available-code-nodes task)
                        (assoc :available-code-nodes (:available-code-nodes task))
                        effective-sub-model
-                       (assoc :sub-model effective-sub-model))]
+                       (assoc :sub-model effective-sub-model)
+                       ;; Task-level :recursive? override — when set, the
+                       ;; researcher emits a tree, gets the output back, and
+                       ;; can emit follow-up trees / call (final! ...) to
+                       ;; terminate. Default (nil/false) is terminal mode.
+                       (:recursive? task)
+                       (assoc :recursive? true))]
       (h/run-and-apply! ctx (h/make-set-repl-researcher-config-command
                               sheet-id node-id
                               (:instruction task)
@@ -172,7 +181,7 @@
                               (:writes task)
                               []
                               :model effective-model
-                              :max-iterations 5
+                              :max-iterations 20
                               :rlm rlm-config))
       {:sheet-id sheet-id :node-id node-id})))
 
@@ -442,12 +451,23 @@
         tasks))
 
 (defn generate-summary!
-  "Generate a markdown summary table from saved EDN results in the given directory."
+  "Generate a markdown summary table from saved EDN results in the given directory.
+
+   Reads `.edn` files only (not the larger `.trace.edn` mulog event dumps),
+   parses with a permissive tagged-literal reader so unknown tags
+   (mulog/flake, etc.) don't break the read."
   [results-dir]
-  (let [dir (io/file results-dir)
+  (let [;; Permissive reader: accept any unknown tag and stash it as a
+        ;; tagged-literal so reading doesn't blow up on mulog/flake etc.
+        reader-opts {:default (fn [tag value] (tagged-literal tag value))}
+        dir (io/file results-dir)
         files (when (.exists dir)
-                (filter #(.endsWith (.getName %) ".edn") (.listFiles dir)))
-        results (map #(edn/read-string (slurp %)) files)
+                (->> (.listFiles dir)
+                     (filter #(.endsWith (.getName %) ".edn"))
+                     ;; Skip the .trace.edn files — they're mulog dumps,
+                     ;; not result records, and would dominate the summary.
+                     (remove #(.endsWith (.getName %) ".trace.edn"))))
+        results (map #(edn/read-string reader-opts (slurp %)) files)
         by-task (group-by :task results)
         latest (into {} (map (fn [[k vs]] [k (last (sort-by :timestamp vs))]) by-task))]
     (println "\n# predict-rlm Comparison Results\n")

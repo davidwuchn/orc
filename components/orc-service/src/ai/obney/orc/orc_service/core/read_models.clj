@@ -347,7 +347,8 @@
       (assoc-in [(:node-id event) :executor] (:executor event))
       (assoc-in [(:node-id event) :model] (:model event))
       (assoc-in [(:node-id event) :fn] (:fn event))
-      (assoc-in [(:node-id event) :tools] (:tools event))))
+      (assoc-in [(:node-id event) :tools] (:tools event))
+      (assoc-in [(:node-id event) :options] (:options event))))
 
 (defmethod nodes* :sheet/node-retry-set
   [state event]
@@ -385,6 +386,7 @@
       (assoc-in [(:node-id event) :model] (:model event))
       (assoc-in [(:node-id event) :max-iterations] (:max-iterations event))
       (assoc-in [(:node-id event) :rlm] (:rlm event))
+      (assoc-in [(:node-id event) :options] (:options event))
       ;; D-003: project :timeout-ms (total Phase-1+Phase-2 budget) into node state
       (assoc-in [(:node-id event) :timeout-ms] (:timeout-ms event))))
 

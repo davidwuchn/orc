@@ -75,6 +75,54 @@
 ;; R-1: compute-tree-result-summary — pure deep module
 ;; =============================================================================
 
+(def ^:private outputs-preview-string-limit
+  "Maximum characters of a string value to surface in `:outputs-previews`.
+
+   R-7a: this preview is a SAMPLE for the model's reasoning context — it is
+   not a substitute for `(get-var :key)` or `(node-output ...)`, which still
+   return the full untruncated value. Cap is intentionally generous so the
+   model can spot semantic anomalies (e.g. all-zero letter counts after a
+   non-empty transcription) directly from the summary."
+  500)
+
+(defn- compute-output-preview
+  "Build a single preview value for one entry in `:outputs-previews`.
+
+   Shape per type:
+     string → first N chars + overflow marker when len > N (verbatim
+              content otherwise)
+     vector/seq/list → {:count N :sample-3 [first three pr-str'd values]}
+     map → {:keys [sorted-keys] :sample-3 [[k v-preview] ...]}
+     scalar (number, boolean, keyword, nil, other) → pr-str
+   "
+  [v]
+  (cond
+    (string? v)
+    (let [n (count v)]
+      (if (<= n outputs-preview-string-limit)
+        v
+        (str (subs v 0 outputs-preview-string-limit)
+             "…(truncated, full " n " chars)")))
+
+    (or (vector? v) (seq? v) (list? v))
+    (let [items (vec (take 3 v))]
+      {:count (count v)
+       :sample-3 (mapv #(let [s (pr-str %)]
+                          (if (<= (count s) 200) s (str (subs s 0 200) "…")))
+                       items)})
+
+    (map? v)
+    (let [ks (sort (keys v))
+          ks-sample (take 3 ks)]
+      {:keys (vec ks)
+       :sample-3 (mapv (fn [k]
+                         (let [vp (compute-output-preview (get v k))]
+                           [k vp]))
+                       ks-sample)})
+
+    :else
+    (pr-str v)))
+
 (defn compute-tree-result-summary
   "Build the lightweight :tree-results summary entry for a Phase 2 tree execution.
 
@@ -112,16 +160,33 @@
         total (count leaf-completions)
         writes-set (set writes)
         outputs-keys (vec (filter writes-set (keys (:outputs phase2-result))))
+        ;; R-7a: per-output-key value previews so the model can spot
+        ;; semantically broken payloads from the summary alone, without
+        ;; needing to drill down via (get-var ...) / (node-output ...).
+        outputs-previews (into {}
+                               (map (fn [k] [k (compute-output-preview
+                                                 (get (:outputs phase2-result) k))]))
+                               outputs-keys)
         status (:status phase2-result)
         ;; Combine failure-indices + failure-reasons across all partial-summary
         ;; events (typically only one map-each per tree, but support multiple).
         all-failure-indices (vec (mapcat :failure-indices partial-summaries))
         all-failure-reasons (apply merge {} (map :failure-reasons partial-summaries))]
     (cond-> {:tick-id (:trace-id phase2-result)
-             :tree-raw tree-raw
+             ;; R-3: sanitize inline-fn SCI objects out of :tree-raw before
+             ;; storing in :tree-results. The summary gets persisted across
+             ;; iterations (and propagates into subsequent :sheet/tree-tick-
+             ;; started events' :inputs), so any live SCI fn objects in
+             ;; :tree-raw will crash Fressian when the read-model-processor
+             ;; tries to write tick state to LMDB. We replace each inline
+             ;; :fn fn with the placeholder string "<inline-fn>" (matching
+             ;; U8's :rlm/tree-generated event sanitization convention).
+             ;; Qualified-symbol-string :fn values pass through untouched.
+             :tree-raw (tree-executor/sanitize-tree-for-events tree-raw)
              :status status
              :elapsed-ms (:duration-ms phase2-result)
              :outputs-keys outputs-keys
+             :outputs-previews outputs-previews
              :nodes-succeeded succeeded
              :nodes-failed failed
              :nodes-total total
@@ -790,10 +855,15 @@
         dscloj-module (dissoc module :output-mapping)
         ;; Build effective provider config with model override if specified
         effective-provider (get-provider-with-model provider (:model node))
-        ;; Request metadata for usage tracking via :with-metadata? true
-        ;; Disable validation since we serialize complex inputs to JSON strings
-        ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
-        dscloj-options (assoc options :validate? false :with-metadata? true :use-function-calling? false)
+        ;; Request metadata for usage tracking via :with-metadata? true.
+        ;; Disable validation since we serialize complex inputs to JSON strings.
+        ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
+        ;; but preserve an explicit caller/node :use-function-calling? override
+        ;; for models where tool-backed structured output is more reliable.
+        dscloj-options (merge {:validate? false
+                               :with-metadata? true
+                               :use-function-calling? false}
+                              options)
         ;; Retry config - defaults to 1 retry with 500ms delay
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
@@ -946,6 +1016,36 @@
                                desc (malli-schema->description schema)]]
                      (str "- " key-name ": " desc))))))
 
+(defn- parse-error-position
+  "If `error` is a SCI parse error of the form
+   '... at [L C]' (line L, column C — 1-indexed in SCI), return [L C].
+   Returns nil otherwise."
+  [error]
+  (when (string? error)
+    (when-let [m (re-find #"at\s+\[(\d+)\s+(\d+)\]" error)]
+      [(Long/parseLong (nth m 1)) (Long/parseLong (nth m 2))])))
+
+(defn- format-error-with-context
+  "R-6: For SCI parse errors with [line col] markers, append the offending
+   line of code + a caret pointer pinning the column. This surfaces the
+   structural-exact location so the model can fix the specific character
+   rather than re-emitting similar-broken code on the next iteration.
+
+   Non-parse errors (or codes that don't have the indicated line) pass
+   through with just the error message."
+  [code error]
+  (if-let [[line col] (parse-error-position error)]
+    (let [lines (str/split (or code "") #"\n")
+          target-line (when (<= 1 line (count lines))
+                        (nth lines (dec line)))]
+      (if target-line
+        (str "Error: " error "\n"
+             "At that line:\n"
+             "  " target-line "\n"
+             "  " (apply str (repeat (dec col) " ")) "^")
+        (str "Error: " error)))
+    (str "Error: " error)))
+
 (defn- build-iteration-history
   "Format iteration history for LLM context.
 
@@ -953,7 +1053,13 @@
    variables each iteration created — VERBATIM. Truncating any of this
    second-guesses the model and hides what it actually did, degrading
    its ability to reason across iterations (and, in recursive mode,
-   to see the full trees it has already emitted)."
+   to see the full trees it has already emitted).
+
+   R-6: When an iteration's :error is a SCI parse error with a [line col]
+   marker, the formatted history also includes the offending line + a
+   caret pointer pinning the column. This makes the structural-exact
+   location of the parse failure visible so the model can fix the
+   specific character rather than retrying similar broken code."
   [history]
   (when (seq history)
     (str "\n\n## Previous Iterations\n"
@@ -964,7 +1070,7 @@
                            "Code:\n```clojure\n" code "\n```\n"
                            (when (seq stdout) (str "Output:\n" stdout "\n"))
                            (if error
-                             (str "Error: " error)
+                             (format-error-with-context code error)
                              (str "Result: " result))
                            (when (seq vars-created)
                              (str "\nVariables created: " (str/join ", " (map str vars-created))))))
@@ -1031,7 +1137,7 @@
 (defn execute-repl-researcher
   "Execute a repl-researcher node using iterative LLM+SCI code execution.
 
-   This implements the RLM (Research Language Model) pattern where:
+   This implements the RLM (Recursive Language Model) pattern where:
    1. LLM generates Clojure code to call MCP tools
    2. Code executes in a safe SCI sandbox
    3. Results feed back to LLM for next iteration
@@ -1058,9 +1164,10 @@
       :duration-ms int
       :usage {:prompt-tokens N :completion-tokens N :total-tokens N}}"
   [node blackboard provider context & {:keys [options] :or {options {}}}]
-  ;; Route to RLM mode if enabled
-  (if (:rlm node)
-    (execute-repl-researcher-rlm node blackboard provider context :options options)
+  (let [execution-options (merge options (:options node))]
+    ;; Route to RLM mode if enabled
+    (if (:rlm node)
+      (execute-repl-researcher-rlm node blackboard provider context :options execution-options)
     (let [start-time (System/currentTimeMillis)
           max-iterations (or (:max-iterations node) 10)
         mcp-tools (or (:mcp-tools node) [])
@@ -1119,7 +1226,7 @@
                 ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
                 ;; Passing :model causes response parsing issues in dscloj
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
-                dscloj-options (assoc options :validate? false :with-metadata? true)
+                dscloj-options (assoc execution-options :validate? false :with-metadata? true)
 
                 ;; Generate code - use effective-provider for correct model override
                 llm-result (dscloj/predict effective-provider module inputs dscloj-options)
@@ -1220,7 +1327,7 @@
         {:status :failure
          :error (.getMessage e)
          :duration-ms (- (System/currentTimeMillis) start-time)
-         :usage @total-usage})))))
+         :usage @total-usage}))))))
 
 ;; =============================================================================
 ;; RLM Mode Execution (BT as Primitive)
@@ -1316,7 +1423,7 @@
    :outputs [{:name :code
               :spec :string
               :description "Clojure code to execute"}]
-   :instructions (str "You are an RLM (Research Language Model) that constructs behavior trees to solve tasks.\n\n"
+   :instructions (str "You are an RLM (Recursive Language Model) that constructs behavior trees to solve tasks.\n\n"
                       ;; Two-space architecture explanation
                       "## Two-Space Architecture\n\n"
                       "RLM separates **Variable Space** (full data in sandbox memory) from **Token Space** (what LLMs see).\n"
@@ -1443,16 +1550,59 @@
                       "Previews adapt to data type: text samples for documents, T-box/A-box summaries for graphs.\n\n"
                       ;; Include ontology examples if available
                       (or (build-ontology-examples-section node) "")
-                      ;; R-1: Descriptive recursive-mode section when :recursive? is true.
-                      ;; Factual framing only — no urgency language.
-                      (if (get-in node [:rlm :recursive?])
-                        (str "## Recursive emit-tree! (this mode)\n\n"
-                             "When you call `(emit-tree! ...)`, the tree executes and then "
-                             "control returns to you for another iteration. The tree's "
-                             "outputs are merged into your variables (use `(get-var :summary)` "
-                             "etc.), and a summary entry is appended to `:tree-results`. The loop "
+                      ;; Descriptive recursive-mode section.
+                      ;; R-Default: recursive is now the default mode. The section is
+                      ;; included UNLESS the user explicitly opts out via
+                      ;; :rlm {:recursive? false}. Map-mode without an explicit
+                      ;; :recursive? key (e.g. {:debug? true}) or boolean :rlm true
+                      ;; both default to recursive.
+                      ;;
+                      ;; The framing leads with "emit-tree! is how you do work" so the
+                      ;; model treats it as the primary loop body, not one option among
+                      ;; many. Direct (llm ...) / (code ...) calls in Phase 1 are
+                      ;; explicitly scoped to narrow inspection/decision flows, not the
+                      ;; main work loop.
+                      (if (not= false (get-in node [:rlm :recursive?]))
+                        (str "## Recursive mode (this mode)\n\n"
+                             "In this mode, `emit-tree!` is how you do work. Design a "
+                             "tree for one piece of the task, run it, see the result, "
+                             "decide what to do next. The loop is: `(emit-tree! ...)` → "
+                             "inspect outputs → decide → repeat, until you call "
+                             "`(final! {...})`.\n\n"
+                             "### Preferred per-iteration pattern\n"
+                             "Each iteration, prefer one of:\n"
+                             "1. `(emit-tree! ...)` to make progress on the task, OR\n"
+                             "2. `(final! {...})` to terminate when the work is done.\n\n"
+                             "Direct `(llm ...)` / `(code ...)` calls in Phase 1 are for "
+                             "narrow inspection or decision flows — they should not be "
+                             "your main work loop. If you find yourself iterating direct "
+                             "`(llm ...)` calls without emitting trees, switch to "
+                             "`emit-tree!`. Each `emit-tree!` is a full sub-tick that "
+                             "the framework executes, records, and surfaces results from.\n\n"
+                             "### After each `emit-tree!` completes\n"
+                             "The tree's outputs are merged into your variables (use "
+                             "`(get-var :summary)` etc.), a summary entry is appended "
+                             "to `:tree-results`, and control returns to you. The loop "
                              "ends only when you call `(final! {...})` or you exceed "
                              ":max-iterations.\n\n"
+                             "### Accessing prior tree outputs — use `get-var`, NOT `get-input`\n"
+                             "When you call `(emit-tree! ...)`, the tree's `:writes`-declared keys "
+                             "land in your sandbox variables. Subsequent iterations access them via "
+                             "`(get-var :key)`, NOT via `(get-input :key)`. `get-input` only returns "
+                             "the repl-researcher node's declared input keys (the data passed INTO "
+                             "the researcher) — it does NOT see prior-tree outputs. If you try to "
+                             "access a prior tree's write via `get-input`, you'll get nil, and the "
+                             "subsequent `(final! ...)` will be rejected as all-empty.\n\n"
+                             "Concretely, after `(emit-tree! ...)` writes `:total-redactions` and "
+                             "`:targets-applied`:\n"
+                             "```clojure\n"
+                             ";; CORRECT — read prior tree's writes:\n"
+                             "(final! {:total-redactions (get-var :total-redactions)\n"
+                             "         :targets-applied  (get-var :targets-applied)})\n"
+                             "```\n"
+                             "Re-emitting the same tree to recompute data you already have is "
+                             "wasteful — check `(list-vars)` or `:tree-results` to see what's "
+                             "already in your sandbox before designing the next tree.\n\n"
                              "### Reading `:tree-results`\n"
                              "Each entry has `:status` — one of:\n"
                              "  - `:success` — the tree completed and all sub-nodes succeeded\n"
@@ -1485,7 +1635,30 @@
                              "  - `(node-output node-id)` — writes map of a specific completed node\n"
                              "  - `(node-input-profile node-id)` — input profile (chunk shape, etc.) of a specific node\n\n"
                              "These return potentially large data — prefer the `:tree-results` summary first and only "
-                             "drill down when you genuinely need the extra detail to make a decision.\n\n")
+                             "drill down when you genuinely need the extra detail to make a decision.\n\n"
+                             ;; R-7c: verify-before-final nudge.
+                             ;;
+                             ;; The model can emit a structurally-valid tree that produces a
+                             ;; semantically broken payload (e.g. iter 0 of image_analysis
+                             ;; wrote :answer with all-zero A-Z counts despite real OCR
+                             ;; text). validate-final! cannot catch this — :answer is a
+                             ;; non-empty string. The model needs a prompt-level nudge to
+                             ;; peek at the value via (get-var :key) and sanity-check it
+                             ;; before terminating. R-7a's :outputs-previews surface this
+                             ;; in the summary; this section turns that signal into a
+                             ;; specific instruction.
+                             ;;
+                             ;; Sentinel phrase: 'verify before final' (pinned by unit test).
+                             "### Verify before final\n"
+                             "Finalization is the DEFAULT next step once the required outputs are "
+                             "populated. Before `(final! {...})`, glance at `:outputs-previews` on "
+                             "the most recent `:tree-results` entry to spot CLEARLY broken payloads — "
+                             "e.g. an A-Z letter count block that reads `A: 0, B: 0, ...` for "
+                             "non-empty transcription text, a required structured array that came "
+                             "back `[]`, or `nil` where structured data should be. Only emit another "
+                             "tree if a value is OBVIOUSLY broken in that sense; minor imperfections, "
+                             "stylistic differences, or completeness questions are fine — finalize "
+                             "and let the evaluation layer judge quality.\n\n")
                         "")
                       "## Output Contract\n"
                       "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
@@ -1583,12 +1756,17 @@
         ;; R-1: Cumulative timing metrics for the recursive mode response
         ;; observability fields. Updated only when :recursive? is true.
         cumulative-tree-ms (atom 0)
-        recursive-mode? (boolean (get-in node [:rlm :recursive?]))]
+        ;; R-Default: recursive is now the default mode. Terminal mode is the
+        ;; explicit opt-out via :rlm {:recursive? false}. :rlm true, :rlm {},
+        ;; and :rlm {:debug? true} (no explicit :recursive? key) all default
+        ;; to recursive.
+        recursive-mode? (not= false (get-in node [:rlm :recursive?]))]
 
     (try
       (loop [iteration 0
              history []]
-        (if (>= iteration max-iterations)
+        (cond
+          (>= iteration max-iterations)
           (let [total-elapsed (- (System/currentTimeMillis) start-time)]
             {:status :failure
              :error "Max iterations reached without final!"
@@ -1598,6 +1776,40 @@
              :cumulative-tree-ms @cumulative-tree-ms
              :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))})
 
+          ;; Pre-iteration budget check. The existing check inside the
+          ;; emit-tree! branch only fires when the model successfully emits
+          ;; a tree, so an iteration that does direct (llm ...) work without
+          ;; emitting a tree was previously uncapped. Without this check the
+          ;; model could burn many minutes of LLM calls per iteration before
+          ;; the next budget check ran. Check at the TOP of every iteration
+          ;; so any iteration that pushes elapsed past total-budget bails
+          ;; out fast instead of making another long-running LLM call.
+          (let [phase1-elapsed (- (System/currentTimeMillis) start-time)
+                budget (resolve-phase2-budget
+                        {:node node
+                         :parent-timeout-ms (:parent-timeout-ms context)
+                         :phase1-elapsed-ms phase1-elapsed})]
+            (:exhausted? budget))
+          (let [phase1-elapsed (- (System/currentTimeMillis) start-time)
+                budget (resolve-phase2-budget
+                        {:node node
+                         :parent-timeout-ms (:parent-timeout-ms context)
+                         :phase1-elapsed-ms phase1-elapsed})]
+            {:status :failure
+             :error (str "Budget exhausted in Phase 1 ("
+                         phase1-elapsed "ms elapsed of "
+                         (:total-budget-ms budget) "ms "
+                         "[source=" (name (:source budget)) "]; "
+                         "no time left for next iteration)")
+             :iterations history
+             :duration-ms phase1-elapsed
+             :phase1-elapsed-ms phase1-elapsed
+             :usage @total-usage
+             :budget budget
+             :cumulative-tree-ms @cumulative-tree-ms
+             :cumulative-thinking-ms (max 0 (- phase1-elapsed @cumulative-tree-ms))})
+
+          :else
           ;; Generate code using LLM
           (let [module (build-rlm-code-generation-module node inputs-preview history
                                                           blackboard @sandbox-vars @var-creation-times)
@@ -1606,10 +1818,13 @@
                         :history (or (build-iteration-history history) "None")}
                 ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
                 ;; Passing :model causes response parsing issues in dscloj
-                ;; Disable function calling - OpenRouter/Gemini don't reliably return tool_calls
-                ;; DSCloj marker-based parsing works better for structured output extraction
+                ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
+                ;; but preserve an explicit caller/node :use-function-calling? override.
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
-                dscloj-options (assoc options :validate? false :use-function-calling? false :with-metadata? true)
+                dscloj-options (merge {:validate? false
+                                       :use-function-calling? false
+                                       :with-metadata? true}
+                                      options)
                 effective-provider (get-provider-with-model provider (:model node))
 
                 _ (dbg "\n========== ITERATION" (inc (count history)) "==========")
@@ -1897,7 +2112,30 @@
                             _ (swap! cumulative-tree-ms + (or (:duration-ms phase2-result) 0))
                             _ (dbg "\n[DEBUG RLM] Recursive recur — :tree-results entries:"
                                    (count (:tree-results @sandbox-vars))
-                                   "summary status:" (:status summary))]
+                                   "summary status:" (:status summary))
+                            ;; R-5: After the recursive-mode merge, update the
+                            ;; LAST iteration history entry so its :vars-created
+                            ;; reflects the tree's :writes-declared output keys
+                            ;; (which the merge just added to sandbox-vars), not
+                            ;; just the transient :generated-tree / :generated-
+                            ;; tree-raw markers. This is what surfaces to the
+                            ;; next iteration's prompt so the model sees what
+                            ;; data is now available via (get-var ...) and
+                            ;; doesn't redundantly re-emit a tree that recomputes
+                            ;; data it already has.
+                            tree-output-keys (vec (:outputs-keys summary))
+                            new-history (if (seq tree-output-keys)
+                                          (update new-history
+                                                  (dec (count new-history))
+                                                  (fn [entry]
+                                                    (let [prior-vars (or (:vars-created entry) [])
+                                                          ;; Drop the markers; surface the actual
+                                                          ;; tree writes instead.
+                                                          marker-syms #{:generated-tree :generated-tree-raw}
+                                                          kept (remove marker-syms prior-vars)]
+                                                      (assoc entry :vars-created
+                                                             (vec (distinct (concat kept tree-output-keys)))))))
+                                          new-history)]
                         (recur (inc iteration) new-history))
                       ;; Non-recursive (current behavior, preserved) — merge results and return.
                       (let [p1-usage @total-usage
@@ -2017,15 +2255,16 @@
   [node blackboard provider & {:keys [context options] :or {context {} options {}}}]
   (let [executor-type (or (:executor node) :ai)
         retry-config (:retry node)
+        execution-options (merge options (:options node))
         execute-fn (fn []
                      (case executor-type
-                       :ai (execute-ai node blackboard provider :options options)
+                       :ai (execute-ai node blackboard provider :options execution-options)
                        :code (execute-code node blackboard context)
                        :tool {:status :failure
                               :error "Tool executor not yet implemented"
                               :duration-ms 0}
                        ;; Default to AI
-                       (execute-ai node blackboard provider :options options)))]
+                       (execute-ai node blackboard provider :options execution-options)))]
     (if retry-config
       (execute-with-retry execute-fn retry-config)
       (execute-fn))))

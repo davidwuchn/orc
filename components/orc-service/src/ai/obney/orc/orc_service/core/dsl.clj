@@ -144,8 +144,9 @@
                  :include-patterns true
                  :include-failures true
                  :tree-id uuid  ;; for self-learning
-                 :self-learning? true}"
-  [name & {:keys [model instruction reads writes retry judges context]}]
+                 :self-learning? true}
+     :options - Executor options passed through to DSCloj for this node"
+  [name & {:keys [model instruction reads writes retry judges context options]}]
   (cond-> {:node-type :leaf
            :name name
            :executor :ai
@@ -155,7 +156,8 @@
            :writes (vec writes)}
     retry (assoc :retry retry)
     judges (assoc :judges (vec judges))
-    context (assoc :context context)))
+    context (assoc :context context)
+    options (assoc :options options)))
 
 (defn code
   "Define a code executor leaf node.
@@ -237,7 +239,7 @@
      - (final! {:key value}) - Capture validated output
      - (get-input :key) - Load full input value
      - inputs - Preview map (metadata only)"
-  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations rlm context]}]
+  [name & {:keys [model instruction reads writes mcp-tools browser-tools max-iterations rlm context options]}]
   (cond-> {:node-type :repl-researcher
            :name name
            :model model
@@ -248,11 +250,14 @@
            :browser-tools (vec (or browser-tools []))
            :max-iterations (or max-iterations 10)}
     (some? rlm) (assoc :rlm rlm)
-    ;; :context is the same ontology-injection config that leaf :llm nodes
-    ;; accept — opt-in self-learning + tree-id keyed retrieval. C-1 wires it
-    ;; through for repl-researcher so the existing apply-ontology-context
-    ;; pipeline can prepend principle context to the instruction.
-    context (assoc :context context)))
+    ;; :context is the ontology-injection config (same shape :leaf llm nodes
+    ;; accept). The runtime apply-ontology-context pipeline reads :context and
+    ;; prepends formatted principles to :instruction at execute time. The
+    ;; :sheet/set-node-context command + read-model projection are generic;
+    ;; this DSL wedge plus the relaxed command-side guard wire it through
+    ;; for :repl-researcher.
+    context (assoc :context context)
+    options (assoc :options options)))
 
 (defn delegate
   "Define a delegate node for subworkflow execution.
@@ -446,7 +451,8 @@
         (h/run-and-apply! ctx
           (h/make-set-node-executor-command sheet-id node-id (:executor node)
             :model (:model node)
-            :fn (:fn node)))
+            :fn (:fn node)
+            :options (:options node)))
         ;; Set instruction if AI node
         (when (:instruction node)
           (h/run-and-apply! ctx
@@ -490,13 +496,14 @@
             :model (:model node)
             :max-iterations (:max-iterations node)
             :browser-tools (:browser-tools node)
-            :rlm (:rlm node)))
+            :rlm (:rlm node)
+            :options (:options node)))
         ;; Set ontology context if configured. The runtime processor's
-        ;; apply-ontology-context (todo_processors.clj) reads :context from
-        ;; the node and prepends formatted principles to :instruction. The
+        ;; apply-ontology-context reads :context from the node and prepends
+        ;; formatted principles to :instruction at execute time. The
         ;; :sheet/set-node-context command + read-model projection are
-        ;; generic — they work for any node type — only the DSL wedge was
-        ;; missing for repl-researcher until C-1.
+        ;; generic across node types; this build-workflow emit wires the
+        ;; pipeline through for :repl-researcher.
         (when-let [context (:context node)]
           (h/run-and-apply! ctx
             (h/make-set-node-context-command sheet-id node-id context))))
