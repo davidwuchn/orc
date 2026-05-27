@@ -803,6 +803,20 @@
              :budget budget
              :set-at (now-str)}})]})
 
+(defcommand :ontology set-reindex-config
+  "C-2b-1: set the global ColBERT re-index config (event-count threshold
+   + timer-minutes). Emits :ontology/reindex-config-set; the reindex-config
+   read-model projects this for runtime lookup. Defaults (10 events, 5
+   minutes) apply when no override has been set."
+  [{{:keys [reindex-threshold-events reindex-timer-minutes]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/reindex-config-set
+      :tags #{[:description-target (stable-uuid-from "reindex-config")]}
+      :body {:reindex-threshold-events reindex-threshold-events
+             :reindex-timer-minutes reindex-timer-minutes
+             :set-at (now-str)}})]})
+
 ;; =============================================================================
 ;; Site Registry Commands (Generic Site Pattern Learning)
 ;; =============================================================================

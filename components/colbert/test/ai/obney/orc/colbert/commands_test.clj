@@ -9,6 +9,7 @@
             [ai.obney.orc.grain-test-utils.interface :as tu]
             [ai.obney.orc.colbert.interface.schemas]
             [ai.obney.orc.colbert.core.commands]
+            [ai.obney.orc.colbert.core.operations :as ops]
             [ai.obney.orc.colbert.core.read-models :as rm]
             [ai.obney.grain.event-store-v3.interface :as es]
             [ai.obney.grain.event-store-v3.interface :refer [->event]]
@@ -137,16 +138,24 @@
 ;; Rerank Command Tests (without bridge — verify anomaly paths)
 ;; =============================================================================
 
-(deftest rerank-without-bridge-returns-fault-test
-  (testing "rerank returns fault when bridge is unavailable"
-    (let [result (tu/process-command! *ctx*
-                   {:command/name :colbert/rerank
-                    :query "test query"
-                    :documents ["doc 1" "doc 2"]
-                    :k 2})]
-      ;; Without the Python bridge running, this should return a fault anomaly
-      (is (= ::anom/fault (::anom/category result))
-          "Should return fault anomaly when bridge unavailable"))))
+(deftest rerank-bridge-failure-returns-fault-test
+  (testing "rerank returns fault anomaly when the bridge throws"
+    ;; Stub the operations-layer rerank so we exercise the defcommand's
+    ;; fault path regardless of whether the colbert Python venv is
+    ;; actually installed. The previous test relied on the absence of
+    ;; .venv-colbert, which broke once the venv was set up for
+    ;; integration runs. The point of THIS test is to verify the
+    ;; command handler converts a bridge exception into an
+    ;; ::anom/fault map — the test should not depend on host state.
+    (with-redefs [ops/rerank (fn [_ctx _opts]
+                               (throw (ex-info "Simulated bridge failure" {})))]
+      (let [result (tu/process-command! *ctx*
+                     {:command/name :colbert/rerank
+                      :query "test query"
+                      :documents ["doc 1" "doc 2"]
+                      :k 2})]
+        (is (= ::anom/fault (::anom/category result))
+            "Should return fault anomaly when the bridge call throws")))))
 
 ;; =============================================================================
 ;; Regenerate Index Command Tests

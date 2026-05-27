@@ -28,9 +28,11 @@
             [ai.obney.orc.ontology.core.rule-extraction :as rule-extraction]
             [ai.obney.orc.ontology.core.commands] ;; Register defcommand handlers for tree profiles
             [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
-            [ai.obney.orc.ontology.core.todo-processors] ;; Register todo processors for auto-learning
+            [ai.obney.orc.ontology.core.todo-processors :as todo-processors] ;; Register todo processors for auto-learning
+            [ai.obney.orc.colbert.interface :as colbert]
             [ai.obney.grain.event-store-v3.interface :as event-store]
-            [ai.obney.grain.read-model-processor-v2.interface :as rmp]))
+            [ai.obney.grain.read-model-processor-v2.interface :as rmp]
+            [com.brunobonacci.mulog :as u]))
 
 ;; =============================================================================
 ;; Static Ontology Access
@@ -152,6 +154,121 @@
    consolidator's budget gate."
   [ctx target-type]
   (rm/get-recent-consolidation-count ctx target-type))
+
+(defn get-reindex-config
+  "C-2b-1: return the current ColBERT re-index configuration —
+   {:reindex-threshold-events N :reindex-timer-minutes T}. Falls back
+   to defaults (10 events, 5 minutes) when no :ontology/set-reindex-config
+   command has been emitted."
+  [ctx]
+  (rm/get-reindex-config ctx))
+
+(defn get-reindex-state
+  "C-2b-1: return the current re-index state for the ColBERT description
+   corpus — {:events-since-last-rebuild N :last-rebuild-timestamp
+   ISO-string :index-built? bool}. The re-index processor reads this to
+   decide threshold-or-timer trigger firing."
+  [ctx]
+  (rm/get-reindex-state ctx))
+
+(defn bootstrap-reindex!
+  "C-2b-1: bootstrap the ColBERT ontology-descriptions index. Call this
+   once during application startup, AFTER tp/start has wired up the
+   re-index processor. If descriptions already exist in the event store
+   AND no index has been built yet, this triggers an initial rebuild so
+   the search API has something to retrieve from immediately.
+
+   Idempotent — if the index already exists, this is a no-op (the
+   threshold-or-timer trigger handles future rebuilds)."
+  [ctx]
+  (todo-processors/maybe-rebuild! ctx))
+
+;; =============================================================================
+;; C-2b-1 — search-descriptions: parameterized retrieval API
+;; =============================================================================
+
+(defn- latest-ontology-descriptions-index
+  "Return the most-recently-created active ColBERT index with name
+   'ontology-descriptions', or nil if none exists."
+  [ctx]
+  (let [candidates (filter #(= "ontology-descriptions" (:index-name %))
+                           (colbert/list-indexes ctx))]
+    (when (seq candidates)
+      (last (sort-by :created-at candidates)))))
+
+(defn- granularity-name
+  "Granularity field round-trips through ColBERT's Python bridge as a
+   JSON string, so a stored value of `:node-type` comes back as
+   \"node-type\". Compare by name to bridge that gap."
+  [v]
+  (cond
+    (keyword? v) (name v)
+    (string? v)  v
+    :else        (str v)))
+
+(defn- normalize-search-result
+  "The ColBERT Python bridge returns snake_case keys (`:document_id`,
+   `:document_metadata`). The docstring on `colbert/search` promises
+   kebab-case — that's a doc-vs-code mismatch in the colbert component
+   that we work around here. Also re-keywordize known metadata fields
+   so downstream consumers don't have to deal with stringified keywords
+   from the JSON roundtrip."
+  [r]
+  (let [meta (or (:document-metadata r) (:document_metadata r))
+        norm-meta (when meta
+                    (cond-> meta
+                      (:granularity meta) (update :granularity
+                                                   #(if (keyword? %) % (keyword %)))))]
+    (-> r
+        (assoc :document-id (or (:document-id r) (:document_id r)))
+        (assoc :document-metadata norm-meta)
+        (dissoc :document_id :document_metadata))))
+
+(defn search-descriptions
+  "C-2b-1: parameterized retrieval over the ColBERT-indexed Living
+   Description corpus. Returns top-K ColBERT results, optionally filtered
+   by granularity.
+
+   Args:
+     ctx  - context map with :event-store, :tenant-id, etc.
+     opts - options map:
+       :query              - natural-language query string (REQUIRED)
+       :granularity        - filter to one of :node-type, :node-instance,
+                             :tree-fingerprint; or :all (default :all)
+       :k                  - top-K to return (default 10)
+       :rerank-with-intent - IGNORED in C-2b-1; activated by C-2b-2
+
+   Returns a vector of result maps:
+     [{:content \"...\" :score 0.87 :rank 1 :document-id \"...\"
+       :document-metadata {:granularity :target-id :confidence :last-update}}]
+
+   Cold-search semantics: if no ontology-descriptions index has been
+   built yet, returns [] and logs ::search-cold-no-index. NEVER
+   triggers a synchronous rebuild (would block the caller ~30-60s)."
+  [ctx {:keys [query granularity k] :or {granularity :all k 10}}]
+  (if-let [index (latest-ontology-descriptions-index ctx)]
+    (let [raw-results (mapv normalize-search-result
+                            (colbert/search ctx
+                              {:query query
+                               :index-id (:index-id index)
+                               :k (if (= granularity :all)
+                                    k
+                                    ;; over-fetch when filtering so we
+                                    ;; still have ~k after filter
+                                    (* 3 k))}))
+          filtered (if (= granularity :all)
+                     raw-results
+                     (let [g-name (granularity-name granularity)]
+                       (filterv #(= g-name
+                                    (granularity-name
+                                      (-> % :document-metadata :granularity)))
+                                raw-results)))]
+      (vec (take k filtered)))
+    (do
+      (u/log ::search-cold-no-index
+             :query query
+             :note "No ontology-descriptions index has been built yet. Returning empty results.")
+      [])))
 
 (defn get-all-tree-profiles
   "Get all tree profiles."

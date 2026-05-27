@@ -281,6 +281,22 @@
     [:set-at :string]]
 
    ;; -------------------------------------------------------------------------
+   ;; C-2b-1 — Re-index config event
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; Global re-index configuration for the ColBERT description corpus
+   ;; (NOT per-target-type — re-indexing operates over the whole corpus).
+   ;; The hybrid threshold-OR-timer trigger from the C-2b sub-grill's
+   ;; Decision 2: fire on EITHER N events accumulated OR T minutes
+   ;; elapsed since last rebuild, whichever first.
+
+   :ontology/reindex-config-set
+   [:map
+    [:reindex-threshold-events :int]
+    [:reindex-timer-minutes :int]
+    [:set-at :string]]
+
+   ;; -------------------------------------------------------------------------
    ;; Node-Level Learning Events
    ;; -------------------------------------------------------------------------
 
@@ -529,6 +545,11 @@
    [:map
     [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
     [:budget :int]]
+
+   :ontology/set-reindex-config
+   [:map
+    [:reindex-threshold-events :int]
+    [:reindex-timer-minutes :int]]
 
    :ontology/extract-learned-rules
    [:map

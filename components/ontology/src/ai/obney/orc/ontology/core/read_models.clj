@@ -397,6 +397,107 @@
       default-consolidation-budget))
 
 ;; =============================================================================
+;; C-2b-1 — Re-index config read-model
+;; =============================================================================
+;;
+;; Global re-index configuration (not per-target-type). Drives the
+;; hybrid threshold-OR-timer trigger in the re-index processor.
+;; Defaults: 10 events, 5 minutes.
+
+(def ^:private default-reindex-config
+  {:reindex-threshold-events 10
+   :reindex-timer-minutes 5})
+
+(defmulti reindex-config*
+  (fn [_state event] (:event/type event)))
+
+(defmethod reindex-config* :default [state _] state)
+
+(defmethod reindex-config* :ontology/reindex-config-set
+  [_state event]
+  {:reindex-threshold-events (:reindex-threshold-events event)
+   :reindex-timer-minutes (:reindex-timer-minutes event)})
+
+(defn reindex-config
+  "Build the re-index config state from a seq of events."
+  [initial-state events]
+  (reduce reindex-config* initial-state events))
+
+(defreadmodel :ontology reindex-config
+  {:events #{:ontology/reindex-config-set} :version 1}
+  [state event] (reindex-config* state event))
+
+(defn get-reindex-config
+  "Return the current re-index config (merge of defaults + any
+   :ontology/reindex-config-set event)."
+  [ctx]
+  (merge default-reindex-config
+         (rmp/project ctx :ontology/reindex-config)))
+
+;; =============================================================================
+;; C-2b-1 — Re-index state read-model
+;; =============================================================================
+;;
+;; Tracks per-rebuild-cycle state:
+;;   :events-since-last-rebuild — incremented on each :ontology/*-description-updated
+;;   :last-rebuild-timestamp — ISO string, set when :colbert/index-created lands
+;;   :index-built? — false until first :colbert/index-created
+;;
+;; The re-index processor reads this to decide threshold-or-timer trigger
+;; firing. The :colbert/index-created event resets the counter and updates
+;; the timestamp.
+
+(def ^:private initial-reindex-state
+  {:events-since-last-rebuild 0
+   :last-rebuild-timestamp nil
+   :index-built? false})
+
+(defmulti reindex-state*
+  (fn [_state event] (:event/type event)))
+
+(defmethod reindex-state* :default [state _] state)
+
+(defmethod reindex-state* :ontology/node-type-description-updated [state _event]
+  (update state :events-since-last-rebuild (fnil inc 0)))
+
+(defmethod reindex-state* :ontology/node-instance-description-updated [state _event]
+  (update state :events-since-last-rebuild (fnil inc 0)))
+
+(defmethod reindex-state* :ontology/tree-description-updated [state _event]
+  (update state :events-since-last-rebuild (fnil inc 0)))
+
+(defmethod reindex-state* :colbert/index-created [state event]
+  ;; Only rebuilds of the ontology-descriptions index reset our state.
+  ;; Other indexes (tree-profiles, concepts) don't affect us.
+  (if (= "ontology-descriptions" (:index-name event))
+    (assoc state
+           :events-since-last-rebuild 0
+           :last-rebuild-timestamp (str (or (:event/timestamp event)
+                                            (java.time.Instant/now)))
+           :index-built? true)
+    state))
+
+(defn reindex-state
+  "Build the re-index state from a seq of events."
+  [initial-state events]
+  (reduce reindex-state* (or initial-state initial-reindex-state) events))
+
+(defreadmodel :ontology reindex-state
+  {:events #{:ontology/node-type-description-updated
+             :ontology/node-instance-description-updated
+             :ontology/tree-description-updated
+             :colbert/index-created}
+   :version 1}
+  [state event] (reindex-state* state event))
+
+(defn get-reindex-state
+  "Return the current re-index state — {:events-since-last-rebuild N
+   :last-rebuild-timestamp ISO-string :index-built? bool}."
+  [ctx]
+  (merge initial-reindex-state
+         (rmp/project ctx :ontology/reindex-state)))
+
+;; =============================================================================
 ;; C-2a-3c — Recent consolidations counter read-model
 ;; =============================================================================
 ;;

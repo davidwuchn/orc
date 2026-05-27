@@ -14,7 +14,10 @@
    results don't flow to the ontology for learning."
   (:require [ai.obney.orc.ontology.core.classifier :as classifier]
             [ai.obney.orc.ontology.core.read-models :as rm]
+            [ai.obney.orc.colbert.interface :as colbert]
+            [ai.obney.orc.colbert.interface.schemas]
             [ai.obney.grain.command-processor-v2.interface :as command-processor]
+            [ai.obney.grain.read-model-processor-v2.interface :as rmp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]
             [com.brunobonacci.mulog :as u]))
@@ -228,3 +231,169 @@
     :sheet/node-execution-completed     (on-node-execution-completed context)
     :sheet/rlm-tree-execution-completed (on-rlm-tree-execution-completed context)
     nil))
+
+;; =============================================================================
+;; C-2b-1 — Re-index processor
+;;
+;; Subscribes to ALL THREE :ontology/*-description-updated events. After each
+;; event, checks the reindex-state read-model against the reindex-config:
+;;   - if events-since-last-rebuild >= configured threshold, OR
+;;   - if (now - last-rebuild-timestamp) >= configured timer-minutes, OR
+;;   - if no index has been built yet (cold-start),
+;; → call colbert/create-index! with the current ontology-descriptions corpus.
+;;
+;; The :colbert/index-created event emitted by create-index! is what resets
+;; reindex-state — handled by the read-model projection in read_models.clj.
+;; =============================================================================
+
+(def ^:private ontology-descriptions-index-name
+  "Stable :index-name used for every rebuild of the ontology descriptions
+   corpus. Per the C-2b sub-grill (Decision 1): one giant index across all
+   3 granularities, distinguished only by metadata."
+  "ontology-descriptions")
+
+(defn- average-confidence
+  "Average :confidence across a description body's :strengths vector.
+   Returns 0.0 for empty/missing strengths."
+  [body]
+  (let [strengths (:strengths body)
+        confidences (keep :confidence strengths)]
+    (if (seq confidences)
+      (double (/ (reduce + confidences) (count confidences)))
+      0.0)))
+
+(defn- collect-current-descriptions
+  "Project the descriptions read-model and flatten into a vector of
+   document records. Each record: {:granularity :target-id :body
+   :recorded-at}. Used by the rebuild path to construct the ColBERT
+   document collection + per-document metadata."
+  [ctx]
+  (let [state (rmp/project ctx :ontology/descriptions)]
+    (vec
+      (for [[granularity by-target] state
+            [target-id {:keys [current history]}] by-target
+            :when current]
+        {:granularity granularity
+         :target-id target-id
+         :body current
+         :recorded-at (some-> history last :recorded-at)}))))
+
+(defn- build-document-collection
+  "Convert the flattened description records into the
+   (:collection, :document-ids, :document-metadatas) tuple required by
+   colbert/create-index!.
+
+   Document content = the description's :summary (the field designed for
+   retrieval embedding). Metadata carries granularity + target-id +
+   average confidence + last-update so post-retrieval filtering and the
+   downstream LLM reranker (C-2b-2) can reason about each match."
+  [descriptions]
+  (reduce
+    (fn [{:keys [collection document-ids document-metadatas] :as acc} d]
+      (let [content (or (-> d :body :summary) "")
+            doc-id (str (:granularity d) ":" (pr-str (:target-id d)))
+            metadata {:granularity (:granularity d)
+                      :target-id (:target-id d)
+                      :confidence (average-confidence (:body d))
+                      :last-update (str (:recorded-at d))}]
+        (-> acc
+            (assoc :collection (conj collection content))
+            (assoc :document-ids (conj document-ids doc-id))
+            (assoc :document-metadatas (conj document-metadatas metadata)))))
+    {:collection [] :document-ids [] :document-metadatas []}
+    descriptions))
+
+(defn minutes-since
+  "Whole minutes elapsed between an ISO-string timestamp and now. Returns
+   Long/MAX_VALUE if ts is nil (so the timer-condition always fires when
+   no rebuild has happened).
+
+   Non-private so tests can with-redefs it to simulate elapsed time
+   without sleeping."
+  [iso-str]
+  (if (nil? iso-str)
+    Long/MAX_VALUE
+    (try
+      (let [past (java.time.OffsetDateTime/parse iso-str)
+            now (java.time.OffsetDateTime/now)]
+        (.toMinutes (java.time.Duration/between past now)))
+      (catch Exception _ Long/MAX_VALUE))))
+
+(defn- should-rebuild?
+  "Decide whether the current reindex-state crosses either the threshold
+   or timer trigger from the reindex-config. Cold-start (no index built
+   yet) always rebuilds when there are any descriptions to index."
+  [reindex-state reindex-config descriptions-count]
+  (let [{:keys [events-since-last-rebuild last-rebuild-timestamp index-built?]} reindex-state
+        {:keys [reindex-threshold-events reindex-timer-minutes]} reindex-config]
+    (cond
+      ;; Cold-start: any descriptions exist but no index built yet
+      (and (pos? descriptions-count) (not index-built?))
+      true
+
+      ;; Event-count threshold crossed
+      (>= events-since-last-rebuild reindex-threshold-events)
+      true
+
+      ;; Timer threshold crossed AND at least one event since last rebuild
+      (and (pos? events-since-last-rebuild)
+           (>= (minutes-since last-rebuild-timestamp) reindex-timer-minutes))
+      true
+
+      :else false)))
+
+(defn maybe-rebuild!
+  "Read reindex-state + config; if the trigger conditions are met, build
+   the document collection from the current descriptions read-model and
+   dispatch the :colbert/create-index command. The
+   :colbert/index-created event emitted by the command handler is what
+   resets the counter via the reindex-state projection.
+
+   We dispatch via the command processor (NOT colbert/create-index!
+   directly) because the interface fn bypasses event emission — it
+   returns the bridge result but never emits :colbert/index-created.
+   The defcommand is the only path that emits the event."
+  [context]
+  (let [reindex-state (rm/get-reindex-state context)
+        reindex-config (rm/get-reindex-config context)
+        descriptions (collect-current-descriptions context)]
+    (when (should-rebuild? reindex-state reindex-config (count descriptions))
+      (let [{:keys [collection document-ids document-metadatas]}
+            (build-document-collection descriptions)]
+        (u/log ::reindex-triggered
+               :event-count (:events-since-last-rebuild reindex-state)
+               :threshold (:reindex-threshold-events reindex-config)
+               :document-count (count collection)
+               :cold-start? (not (:index-built? reindex-state)))
+        (try
+          ;; NOTE: pass :split-documents? + :max-document-length explicitly.
+          ;; The :colbert/create-index defcommand forwards these to
+          ;; operations/create-index! unconditionally; operations' :or
+          ;; defaults only apply when the key is absent — passing nil
+          ;; overrides the default and produces a malformed
+          ;; :colbert/index-created event (config keys would be nil).
+          (command-processor/process-command
+            (assoc context :command
+                   {:command/name :colbert/create-index
+                    :command/id (random-uuid)
+                    :command/timestamp (time/now)
+                    :collection collection
+                    :index-name ontology-descriptions-index-name
+                    :document-ids document-ids
+                    :document-metadatas document-metadatas
+                    :model-name "colbert-ir/colbertv2.0"
+                    :split-documents? true
+                    :max-document-length 256}))
+          (catch Exception e
+            (u/log ::reindex-failed
+                   :error (.getMessage e))))))))
+
+(defprocessor :ontology on-description-updated-maybe-reindex
+  {:topics #{:ontology/node-type-description-updated
+             :ontology/node-instance-description-updated
+             :ontology/tree-description-updated}}
+  "C-2b-1: after each description-updated event, check whether the
+   reindex-state has crossed the threshold OR timer trigger; if so,
+   rebuild the ColBERT ontology-descriptions index via create-index!."
+  [context]
+  (maybe-rebuild! context))
