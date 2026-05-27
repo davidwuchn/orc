@@ -1,89 +1,65 @@
-# C-2: Automatic task-class classification
+# C-2: Living Descriptions for trees and nodes (parent issue)
+
+> **This file was originally a one-sentence-stub for "automatic task-class classification."** A subsequent grill expanded the scope to a full *self-description library* spanning trees + nodes at three granularities — see the dedicated PRD. This file is now a pointer/index to the sub-issues that actually do the work.
 
 ## Parent
 
-PRD: [`docs/prd/category-c-self-improving-loop.md`](../../prd/category-c-self-improving-loop.md) — see "Out of Scope" → "C-2 sub-grill must decide" + the C-2 row in "Proposed Slicing."
+PRD: [`docs/prd/category-c-2-living-descriptions.md`](../../prd/category-c-2-living-descriptions.md)
 
-## Status: STUB — sub-grill required
+## What this issue is now
 
-This issue is a placeholder. Architectural decisions are open and must be resolved by a `/grill-me` sub-grill before implementation can begin. C-2 cannot be picked up as AFK work in its current form.
+C-2 is the **Living Descriptions** initiative — every node-type, node-instance, and tree-fingerprint gets a self-description that:
 
-## What to build (sketch)
+1. **Seeds** from hand-authored entries for a controlled set (18 seeds covering 6 node types + 5 benchmark task classes + 7 generic patterns) + LLM-structural-baseline at confidence 0.1 for everything else.
+2. **Evolves** over time as the system observes execution + judge events (rolling aggregator → consolidator processor → LLM reflection → new description event).
+3. **Surfaces** to the model via semantic retrieval (ColBERT + RRF) — answers queries like "find me an `:llm` node that validates research data" OR "find me a tree shaped like research-then-synthesize" OR "is there a description for this specific node in workflow X?".
 
-Replace C-1's **manual `:task-class-id` assignment** with an **automatic classifier** that computes the same UUID from task features. Storage layer remains UNCHANGED — same `record-tree-strength`/`record-tree-weakness` commands, same `:tree-id` field, same `get-tree-profile` API. The only change is *who* picks the UUID: in C-1 the user picks; in C-2 a classifier computes it.
+Every description entry is principle-shaped at every confidence level (the same shape C-1 already renders via `format-rich-pattern`).
 
-The user-facing API stays:
+Per the PRD's Q2 decision, C-2 splits into three sub-categories — only the first (C-2a) is detailed and ready for implementation; C-2b and C-2c are stubs awaiting their own sub-grills.
 
-```clojure
-;; C-1 (current):
-(orc/repl-researcher "researcher"
-  :rlm {:recursive? true
-        :task-class-id #uuid "doc-extraction-class-uuid"   ; user picks
-        :principles-fn (fn [_] ...)})
+## Sub-issues
 
-;; C-2 (target):
-(orc/repl-researcher "researcher"
-  :rlm {:recursive? true})
-;; executor computes :task-class-id automatically from node features
-;; (reads, writes, instruction text, possibly input-profile from O03)
+### C-2a — Self-description generation (DETAILED, ready)
+
+| # | Title | Type | Blocked by |
+|---|-------|------|------------|
+| [C-2a-1](C-2a-1-static-descriptions-and-seeds.md) | Static description event types + read model + 18 hand-authored seeds | AFK | None |
+| [C-2a-2](C-2a-2-rolling-aggregator-extension.md) | Rolling aggregator extension — cross-sheet node-type + tree-fingerprint | AFK | None |
+| [C-2a-3](C-2a-3-consolidator-and-reflection.md) | Consolidator processor + LLM reflection + triggers + anti-recency safeguards | AFK (with HITL audit) | C-2a-1 + C-2a-2 |
+| [C-2a-4](C-2a-4-live-verify.md) | Live-verify — 3-run regression + seed-executability + retrieval-quality | AFK | C-2a-1 + C-2a-2 + C-2a-3 |
+
+### C-2b — Multi-granularity indexing + retrieval (STUB)
+
+| # | Title | Type | Blocked by |
+|---|-------|------|------------|
+| [C-2b](C-2b-multi-granularity-indexing.md) | ColBERT integration + RRF rank-fusion across granularities | HITL (sub-grill required) | C-2a complete |
+
+### C-2c — Automatic classifier API (STUB)
+
+| # | Title | Type | Blocked by |
+|---|-------|------|------------|
+| [C-2c](C-2c-classifier-api.md) | Thin wrapper assigning `:tree-id` automatically when `:context` unset | HITL (sub-grill required) | C-2a + C-2b complete |
+
+## Dependency graph
+
+```
+C-2a-1 (seeds + storage) ─┐
+                          ├──→ C-2a-3 (consolidator) ──→ C-2a-4 (live-verify) ──→ C-2b ──→ C-2c
+C-2a-2 (aggregator)    ─┘
 ```
 
-Hand-authored seed principles from C-1 keep working because the classifier produces UUIDs deterministic from features — when the user originally hand-assigned a UUID for "doc-extraction", the classifier produces the same UUID for any task whose features match doc-extraction.
+C-2a-1 + C-2a-2 are parallelizable (independent surfaces). C-2a-3 needs both. C-2a-4 gates all of C-2a. C-2b needs the full C-2a corpus. C-2c needs C-2b's retrieval.
 
-## Open decisions (require sub-grill)
+## Priority
 
-The PRD's "Open decisions deferred to sub-grills" section enumerates:
+C-2a-1 is the next-action slice. Pick that up first.
 
-1. **Fingerprint computation strategy:**
-   - Hash of features (simple, deterministic, but renames break matching)?
-   - Structured-tag mapping (manual classification rules; LLM-discovered tags)?
-   - LLM classifier (one extra LLM call per RLM tick; semantic but costs tokens)?
-   - Hybrid (cheap hash for exact match + LLM fallback for fuzzy)?
-
-2. **Which features go into the fingerprint:**
-   - Just `:reads` + `:writes` key names?
-   - Plus instruction text (lexical similarity)?
-   - Plus instruction class (via LLM classification)?
-   - Plus the O03 `:input-profile` data once a tick has actually run (post-hoc tagging)?
-
-3. **Deterministic vs stable-but-relaxed:**
-   - Same input → same UUID always (pure hash)?
-   - Allow tolerance (e.g., `:writes [:summary :entity-list]` and `:writes [:summary :entities]` match because they're semantically similar)?
-   - How is tolerance specified — embedding distance, structural similarity, or explicit alias tables?
-
-4. **Backward compatibility with C-1 hand-authored UUIDs:**
-   - Does the classifier need to "learn" the hand-assigned UUIDs so it produces them for matching tasks?
-   - Or does C-2 introduce a different UUID space, with a migration step that re-keys C-1's hand-authored principles?
-
-5. **When does classification happen:**
-   - At node-build time (once, deterministic)?
-   - At each tick (so the classifier sees runtime context)?
-   - Cached after first run, invalidated on what?
-
-## Acceptance criteria (high-level — refined in sub-grill)
-
-The sub-grill must produce concrete acceptance criteria. Sketch:
-
-- [ ] Repl-researcher nodes work without manual `:task-class-id` assignment (it's computed).
-- [ ] Manual `:task-class-id` assignment STILL WORKS if the user wants to override.
-- [ ] Hand-authored seed principles from C-1 are retrievable via the computed UUID for matching tasks.
-- [ ] Classification is deterministic for identical inputs (or the relaxation rules are documented).
-- [ ] Live-verify: classifier produces matching UUIDs for tasks that should match (positive case) and different UUIDs for tasks that should NOT match (negative case).
-
-## Critical project rules
-
-1. C-2 does NOT change C-1's storage shape. The UUID semantics and `:tree-id` field stay identical.
-2. Live-verify is mandatory before declaring done.
-3. The classifier itself must be adversarially audited — does it actually produce the right matches? Per "infrastructure existence is not quality."
-
-## Blocked by
-
-- [C-1 — Principle storage + retrieval + injection](C-1-principle-storage-retrieval-injection.md)
-
-C-1 must validate that the principle shape and storage layer work (HITL audit + 3-way live-verify pass) before C-2 starts. Otherwise C-2 automates a key for a shape that might still change.
+C-2b and C-2c remain stubs because they each have open architectural decisions that need their own grill before implementation can begin. See each file's "Open decisions" section.
 
 ## Cross-references
 
-- Parent PRD: [`docs/prd/category-c-self-improving-loop.md`](../../prd/category-c-self-improving-loop.md)
-- Prior data layer: O03 `:input-profile` (chunk shape, byte/word counts) is a candidate feature for the classifier — see [`docs/prd/phase2-observability-layer.md`](../../prd/phase2-observability-layer.md)
-- Existing ontology classifier scaffolding (may or may not be reusable): `components/ontology/src/.../core/classifier.clj`
+- Parent PRD: [`docs/prd/category-c-2-living-descriptions.md`](../../prd/category-c-2-living-descriptions.md)
+- Category C top-level PRD: [`docs/prd/category-c-self-improving-loop.md`](../../prd/category-c-self-improving-loop.md)
+- Prior work this builds on: [C-1 — Principle storage + retrieval + injection](C-1-principle-storage-retrieval-injection.md) (SHIPPED — provides the principle-shape contract C-2 reuses).
+- Downstream: [C-3 — Automated extraction + judge audit](C-3-automated-extraction-judges-audit.md) (judges that feed the consolidator). [C-4 — Cross-tree pattern reuse](C-4-cross-tree-pattern-reuse.md).

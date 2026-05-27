@@ -29,6 +29,57 @@
   [:enum :llm :repl-researcher :code :map-each :condition :llm-condition])
 
 ;; =============================================================================
+;; Living Descriptions — shared shapes for C-2 description events
+;; =============================================================================
+
+(def principle-entry
+  "An entry inside :strengths or :weaknesses on a description body.
+
+   Principle-shaped at every confidence level: the entry carries an
+   actionable :trait + a context guard (:good-when for strengths,
+   :avoid-when for weaknesses) + actionable advice (:recommended-pattern
+   for strengths, :recommended-alternative for weaknesses).
+
+   Low-confidence entries remain principle-shaped — never status-shaped
+   (no 'investigate' / 'observed' / 'unclear' as the entry's substance).
+   Confidence carries the weight signal; content carries actionability."
+  [:map
+   [:trait :string]
+   ;; Strengths carry :good-when + :recommended-pattern.
+   ;; Weaknesses carry :avoid-when + :recommended-alternative.
+   ;; Either pair may be present; downstream consumers branch on which.
+   [:good-when               {:optional true} :string]
+   [:avoid-when              {:optional true} :string]
+   [:recommended-pattern     {:optional true} :string]
+   [:recommended-alternative {:optional true} :string]
+   [:confidence              :double]
+   [:evidence-count          :int]
+   [:first-observed-at       {:optional true} :string]
+   [:last-reinforced-at      {:optional true} :string]])
+
+(def description-body
+  "The shared body shape across all three description-updated event types.
+
+   The :summary field is the canonical free-text representation that
+   downstream ColBERT indexing embeds for semantic retrieval. The
+   structured fields (:capabilities, :strengths, :weaknesses, etc.)
+   power principle-shaped rendering for direct prompt injection."
+  [:map
+   [:capabilities              [:vector :string]]
+   [:strengths                 [:vector principle-entry]]
+   [:weaknesses                [:vector principle-entry]]
+   [:representative-uses       [:vector :string]]
+   [:avoid-when                [:vector :string]]
+   [:summary                   :string]
+   [:version                   :int]
+   [:consolidated-from-event-count :int]])
+
+(def node-instance-target
+  "Identity tuple for a node-instance description target —
+   [sheet-id node-id]."
+  [:tuple :uuid :uuid])
+
+;; =============================================================================
 ;; Event Schemas
 ;; =============================================================================
 
@@ -161,6 +212,73 @@
     [:based-on-failure-traces [:vector :uuid]]
     [:impact-score {:optional true} :double]
     [:added-at :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2 Living Description Events
+   ;; -------------------------------------------------------------------------
+   ;; Three event types — one per granularity. Each carries the same
+   ;; description-body (capabilities, strengths, weaknesses, etc.) but uses
+   ;; a granularity-specific target-id type (keyword for node-type,
+   ;; [sheet-id node-id] tuple for node-instance, string-hash for tree-fingerprint).
+   ;; Append-only; the read-model maintains "current" + "history" per target.
+
+   :ontology/node-type-description-updated
+   [:map
+    [:target-type [:= :node-type]]
+    [:target-id :keyword]                  ;; e.g. :llm, :map-each
+    [:body description-body]
+    [:recorded-at :string]]
+
+   :ontology/node-instance-description-updated
+   [:map
+    [:target-type [:= :node-instance]]
+    [:target-id node-instance-target]      ;; [sheet-id node-id]
+    [:body description-body]
+    [:recorded-at :string]]
+
+   :ontology/tree-description-updated
+   [:map
+    [:target-type [:= :tree-fingerprint]]
+    ;; Either a SHA hash of canonical tree-raw (production fingerprinting)
+    ;; OR a task-class UUID (matches the seed_principles.clj task-class
+    ;; identity that C-1 already uses). Both are stable abstract keys the
+    ;; model retrieves descriptions against.
+    [:target-id [:or :string :uuid]]
+    [:body description-body]
+    [:recorded-at :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2a-3a — Consolidation trigger events
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; The Living Description loop fires an :ontology/consolidation-requested
+   ;; event when a target has accumulated enough new evidence (default 10
+   ;; events) since its last consolidation, OR on-demand via the manual
+   ;; REPL command path. The consolidator processor (C-2a-3b) subscribes to
+   ;; this event and runs the LLM reflection step.
+
+   :ontology/consolidation-requested
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    ;; Granularity-specific target-id shape (mirrors the description events):
+    ;; - :node-type → keyword (e.g. :llm)
+    ;; - :node-instance → [sheet-id node-id] tuple of UUIDs
+    ;; - :tree-fingerprint → string OR UUID (production hash or task-class UUID)
+    [:target-id [:or :keyword [:tuple :uuid :uuid] :string :uuid]]
+    [:on-demand? :boolean]
+    [:requested-at :string]]
+
+   :ontology/consolidation-threshold-set
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:threshold :int]
+    [:set-at :string]]
+
+   :ontology/consolidation-budget-set
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:budget :int]
+    [:set-at :string]]
 
    ;; -------------------------------------------------------------------------
    ;; Node-Level Learning Events
@@ -365,6 +483,52 @@
     [:description :string]
     [:based-on-failure-traces [:vector :uuid]]
     [:impact-score {:optional true} :double]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2 Living Description Commands
+   ;; -------------------------------------------------------------------------
+   ;; One command per granularity, matching the
+   ;; record-tree-strength/record-tree-weakness idiom. Each emits the
+   ;; corresponding *-description-updated event.
+
+   :ontology/record-node-type-description
+   [:map
+    [:target-id :keyword]
+    [:body description-body]]
+
+   :ontology/record-node-instance-description
+   [:map
+    [:target-id node-instance-target]   ;; [sheet-id node-id]
+    [:body description-body]]
+
+   :ontology/record-tree-description
+   [:map
+    ;; Either a SHA hash or a task-class UUID — see the event schema
+    ;; for the rationale.
+    [:target-id [:or :string :uuid]]
+    [:body description-body]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2a-3a — Consolidation trigger commands
+   ;; -------------------------------------------------------------------------
+
+   :ontology/request-consolidation
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-id [:or :keyword [:tuple :uuid :uuid] :string :uuid]]
+    ;; Defaults to true when invoked through the REPL helper; the
+    ;; threshold-tracking processor emits with :on-demand? false.
+    [:on-demand? {:optional true} :boolean]]
+
+   :ontology/set-consolidation-threshold
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:threshold :int]]
+
+   :ontology/set-consolidation-budget
+   [:map
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:budget :int]]
 
    :ontology/extract-learned-rules
    [:map

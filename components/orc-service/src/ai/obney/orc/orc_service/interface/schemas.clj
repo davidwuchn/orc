@@ -512,7 +512,14 @@
       [:completion-tokens {:optional true} :int]
       [:total-tokens {:optional true} :int]]]
     ;; D-008: present when a map-each terminates in :partial or :failure.
-    [:partial-summary {:optional true} partial-summary]]
+    [:partial-summary {:optional true} partial-summary]
+    ;; C-2a-2: node-type keyword (:llm, :code, :map-each, :parallel, ...).
+    ;; Drives the per-node-type rolling-metrics aggregator without forcing
+    ;; the read-model to look up node-type via the sheets read-model.
+    ;; Optional for backwards compatibility — older callers / replayed
+    ;; events without this field are skipped by the per-node-type
+    ;; aggregator.
+    [:node-type {:optional true} :keyword]]
 
    :sheet/fail-node-execution
    [:map
@@ -553,7 +560,20 @@
     [:tick-id :uuid]
     [:trajectory [:vector :map]]
     [:total-usage [:map]]
-    [:task-fingerprint {:optional true} [:maybe :string]]]
+    [:task-fingerprint {:optional true} [:maybe :string]]
+    ;; C-2a-2: deterministic hash of canonical tree-raw S-expression.
+    ;; Stable across the inline-fn sanitization step. Drives the per-
+    ;; tree-fingerprint rolling-metrics aggregator. Optional for
+    ;; backwards compatibility with replays of older events.
+    [:tree-fingerprint {:optional true} [:maybe :string]]
+    ;; C-2a-2: tree-execution outcome. Required for the per-tree-
+    ;; fingerprint aggregator to count successes vs failures. Optional
+    ;; for backwards compatibility — older events without this field
+    ;; are skipped by the aggregator.
+    [:status {:optional true} [:enum :success :failure :partial :timeout]]
+    ;; C-2a-2: wall-clock duration of Phase 2 execution. Optional for
+    ;; the same reason :status is.
+    [:duration-ms {:optional true} :int]]
 
    ;; -------------------------------------------------------------------------
    ;; Versioning Commands
@@ -925,7 +945,11 @@
       [:completion-tokens {:optional true} :int]
       [:total-tokens {:optional true} :int]]]
     ;; D-008: present on map-each completion events when status is :partial or :failure.
-    [:partial-summary {:optional true} partial-summary]]
+    [:partial-summary {:optional true} partial-summary]
+    ;; C-2a-2: node-type keyword carried through from the command for the
+    ;; per-node-type rolling-metrics aggregator. Optional for backwards
+    ;; compatibility with old replayed events.
+    [:node-type {:optional true} :keyword]]
 
    ;; RLM-specific learning-signal event. Fires alongside the generic
    ;; node-execution-completed when an LLM call completes inside an RLM
@@ -968,6 +992,15 @@
     [:total-usage [:map]]
     ;; Placeholder for task-fingerprint (filled by issue 012).
     [:task-fingerprint {:optional true} [:maybe :string]]
+    ;; C-2a-2: deterministic hash of canonical tree-raw S-expression.
+    ;; Drives per-tree-fingerprint rolling metrics. Optional for
+    ;; backwards compatibility with replayed older events.
+    [:tree-fingerprint {:optional true} [:maybe :string]]
+    ;; C-2a-2: tree-execution outcome. Required for the per-tree-
+    ;; fingerprint aggregator to count successes vs failures.
+    [:status {:optional true} [:enum :success :failure :partial :timeout]]
+    ;; C-2a-2: wall-clock duration of Phase 2 execution.
+    [:duration-ms {:optional true} :int]
     [:timestamp [:fn inst?]]]
 
    :sheet/tree-tick-completed

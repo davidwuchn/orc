@@ -1,5 +1,7 @@
 # C-1: Principle storage + retrieval + injection (hand-authored seed)
 
+> **Status: SHIPPED** — live-verified end-to-end on `feature/core-orc-upgrades`. The 3-way comparison (control / principle-injected / wrong-task-class-id) passed: the model demonstrably emits a different tree when the matching principle is injected, and behaves at baseline when the principle's task-class UUID is mismatched.
+
 ## Parent
 
 PRD: [`docs/prd/category-c-self-improving-loop.md`](../../prd/category-c-self-improving-loop.md)

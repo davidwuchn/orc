@@ -104,6 +104,55 @@
   [ctx tree-id]
   (rm/get-tree-profile ctx tree-id))
 
+(defn get-description
+  "Return the CURRENT Living Description body for the given target.
+
+   Granularity is one of :node-type, :node-instance, :tree-fingerprint.
+   Target-id shape depends on the granularity:
+   - :node-type        → keyword (e.g. :llm, :map-each)
+   - :node-instance    → [sheet-id node-id] tuple of UUIDs
+   - :tree-fingerprint → string (the canonical-tree-raw hash)
+
+   Returns nil if no description has been recorded for the target."
+  [ctx granularity target-id]
+  (rm/get-description ctx granularity target-id))
+
+(defn get-description-history
+  "Return the full chronological history of every description version
+   recorded for the (granularity, target-id) target. Each entry is
+   {:body :recorded-at :event-id}. Empty vector if none recorded."
+  [ctx granularity target-id]
+  (rm/get-description-history ctx granularity target-id))
+
+(defn get-consolidation-threshold
+  "C-2a-3a: return the configured consolidation threshold for a
+   target-type keyword. Falls back to the default 10 events when no
+   per-target-type override has been set via
+   :ontology/set-consolidation-threshold."
+  [ctx target-type]
+  (rm/get-consolidation-threshold ctx target-type))
+
+(defn get-consolidation-delta
+  "C-2a-3a: return the current delta-counter (events-since-last-
+   consolidation) for the given (target-type, target-id) target.
+   Returns 0 when no events have ticked the counter."
+  [ctx target-type target-id]
+  (rm/get-consolidation-delta ctx target-type target-id))
+
+(defn get-consolidation-budget
+  "C-2a-3c: return the configured hourly consolidation budget for a
+   target-type keyword. Falls back to default 100 when no per-target-type
+   override has been set via :ontology/set-consolidation-budget."
+  [ctx target-type]
+  (rm/get-consolidation-budget ctx target-type))
+
+(defn get-recent-consolidation-count
+  "C-2a-3c: return how many :*-description-updated events have fired for
+   the given target-type in the rolling last-hour window. Used by the
+   consolidator's budget gate."
+  [ctx target-type]
+  (rm/get-recent-consolidation-count ctx target-type))
+
 (defn get-all-tree-profiles
   "Get all tree profiles."
   [ctx]

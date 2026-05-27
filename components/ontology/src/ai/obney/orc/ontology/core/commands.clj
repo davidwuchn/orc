@@ -638,6 +638,172 @@
          :command-result/events events}))))
 
 ;; =============================================================================
+;; C-2 Living Description Commands
+;; =============================================================================
+;; One command per granularity. Each emits the corresponding
+;; *-description-updated event. Append-only — the read-model maintains
+;; "current" + "history" per (granularity, target-id).
+;;
+;; Tag values must be UUIDs per Grain's event-store-v3 contract. For
+;; non-UUID target-ids (keywords for node-types, strings for tree-
+;; fingerprints) we derive a deterministic UUID via nameUUIDFromBytes
+;; (same idiom used in orc-service/core/runtime.clj for deterministic
+;; node IDs). The natural-form target-id is still carried inside the
+;; event body so consumers retrieve it directly.
+
+(defn- stable-uuid-from
+  "Derive a deterministic UUID from a stringifiable value. Used for
+   tag values where the target-id is not natively a UUID (node-type
+   keyword, tree-fingerprint hash)."
+  [v]
+  (java.util.UUID/nameUUIDFromBytes (.getBytes (str v) "UTF-8")))
+
+(defcommand :ontology record-node-type-description
+  "Record (or update) the description for a node-type — a cross-sheet
+   aggregation across every node of this :type. Emits the
+   :ontology/node-type-description-updated event."
+  [{{:keys [target-id body]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/node-type-description-updated
+      :tags #{[:description-target (stable-uuid-from (str "node-type:" target-id))]}
+      :body {:target-type :node-type
+             :target-id target-id
+             :body body
+             :recorded-at (now-str)}})]})
+
+(defcommand :ontology record-node-instance-description
+  "Record (or update) the description for a specific node instance —
+   keyed by [sheet-id node-id]. Emits the
+   :ontology/node-instance-description-updated event."
+  [{{:keys [target-id body]} :command}]
+  (let [[sheet-id node-id] target-id]
+    {:command-result/events
+     [(->event
+       {:type :ontology/node-instance-description-updated
+        :tags #{[:sheet sheet-id]
+                [:node node-id]
+                [:description-target (stable-uuid-from
+                                       (str "node-instance:" sheet-id ":" node-id))]}
+        :body {:target-type :node-instance
+               :target-id target-id
+               :body body
+               :recorded-at (now-str)}})]}))
+
+(defcommand :ontology record-tree-description
+  "Record (or update) the description for a tree-fingerprint —
+   identifying all trees with the same canonical structure. Emits the
+   :ontology/tree-description-updated event."
+  [{{:keys [target-id body]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/tree-description-updated
+      :tags #{[:description-target (stable-uuid-from
+                                     (str "tree-fingerprint:" target-id))]}
+      :body {:target-type :tree-fingerprint
+             :target-id target-id
+             :body body
+             :recorded-at (now-str)}})]})
+
+;; =============================================================================
+;; C-2a-3a — Consolidation trigger commands
+;; =============================================================================
+;;
+;; Two commands:
+;; 1. :ontology/request-consolidation — emits :ontology/consolidation-requested.
+;;    Manual REPL helper sets :on-demand? true; the threshold-tracking
+;;    processor (todo_processors.clj) emits with :on-demand? false.
+;; 2. :ontology/set-consolidation-threshold — event-sourced threshold config.
+;;    Emits :ontology/consolidation-threshold-set. The threshold-config
+;;    read-model projects this for per-target-type lookup with a default
+;;    of 10 events.
+
+(defcommand :ontology request-consolidation
+  "Emit an :ontology/consolidation-requested event for the given target.
+
+   Two paths:
+
+   1. On-demand (:on-demand? true) — always emits. Used by REPL helpers
+      and tests that want a consolidation regardless of counter state.
+
+   2. Threshold-driven (:on-demand? false / unset) — uses Grain CAS to
+      enforce exactly-once-per-threshold-crossing semantics:
+
+         * Reads the target's lifetime :total source-event count and
+           configured threshold from read-models.
+         * Derives crossing-number = (quot total threshold) — stable
+           across all concurrent handlers within the same threshold
+           window of source events.
+         * Tags the event with [:crossing <stable-uuid-from-crossing>]
+           and CAS-guards on that tag being absent. The first concurrent
+           handler's append succeeds; subsequent handlers' appends get
+           ::anom/conflict and emit no event.
+
+      This survives burst-event races where N processor handlers all
+      observe delta >= threshold before any prior reset has propagated
+      to projections — only the first handler's CAS predicate evaluates
+      true at append time inside the event store."
+  [{{:keys [target-id target-type on-demand?]} :command :as ctx}]
+  (let [target-uuid (stable-uuid-from
+                      (str (name target-type) ":" target-id))
+        threshold-driven? (not on-demand?)
+        ;; Crossing-number stays constant across a window of `threshold`
+        ;; source events. All concurrent handlers within the window
+        ;; compute the same crossing-uuid; CAS lets only one win.
+        crossing-uuid (when threshold-driven?
+                        (let [total (rm/get-consolidation-total
+                                      ctx target-type target-id)
+                              threshold (rm/get-consolidation-threshold
+                                          ctx target-type)
+                              crossing-num (quot total threshold)]
+                          (stable-uuid-from
+                            (str (name target-type) ":" target-id
+                                 ":crossing-" crossing-num))))
+        event (->event
+                (cond-> {:type :ontology/consolidation-requested
+                         :tags (cond-> #{[:description-target target-uuid]}
+                                 crossing-uuid (conj [:crossing crossing-uuid]))
+                         :body {:target-type target-type
+                                :target-id target-id
+                                :on-demand? (boolean on-demand?)
+                                :requested-at (now-str)}}))]
+    (cond-> {:command-result/events [event]}
+      threshold-driven?
+      (assoc :command-result/cas
+             {:types #{:ontology/consolidation-requested}
+              :tags #{[:crossing crossing-uuid]}
+              :predicate-fn (fn [existing] (empty? (into [] existing)))}))))
+
+(defcommand :ontology set-consolidation-threshold
+  "Set the consolidation threshold for a target-type. Emits
+   :ontology/consolidation-threshold-set; the threshold-config read-model
+   projects this for runtime threshold lookup."
+  [{{:keys [target-type threshold]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/consolidation-threshold-set
+      :tags #{[:description-target (stable-uuid-from
+                                     (str "threshold:" (name target-type)))]}
+      :body {:target-type target-type
+             :threshold threshold
+             :set-at (now-str)}})]})
+
+(defcommand :ontology set-consolidation-budget
+  "C-2a-3c: set the hourly consolidation budget for a target-type.
+   Emits :ontology/consolidation-budget-set; the budget-config read-model
+   projects this for runtime budget lookup. Default 100/hour applies
+   when no override has been set."
+  [{{:keys [target-type budget]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/consolidation-budget-set
+      :tags #{[:description-target (stable-uuid-from
+                                     (str "budget:" (name target-type)))]}
+      :body {:target-type target-type
+             :budget budget
+             :set-at (now-str)}})]})
+
+;; =============================================================================
 ;; Site Registry Commands (Generic Site Pattern Learning)
 ;; =============================================================================
 

@@ -1024,7 +1024,7 @@
    atomically with the completion event to avoid race conditions.
 
    Optional :usage carries per-node token counts from LLM calls."
-  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs usage]} :command
+  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs usage node-type]} :command
     :as ctx}]
   (let [completion-event (->event
                            {:type :sheet/node-execution-completed
@@ -1039,7 +1039,11 @@
                                     duration-ms (assoc :duration-ms duration-ms)
                                     error (assoc :error error)
                                     (seq inputs) (assoc :inputs inputs)
-                                    (seq usage) (assoc :usage usage))})
+                                    (seq usage) (assoc :usage usage)
+                                    ;; C-2a-2: propagate :node-type so the
+                                    ;; per-node-type aggregator can partition
+                                    ;; without looking up via the sheets RM.
+                                    (some? node-type) (assoc :node-type node-type))})
         ;; For tick-scoped executions with successful writes, emit bb writes atomically
         ;; Also handle :tree-generated status (RLM two-phase execution)
         tick-scoped? (some? (rm/get-tick-execution-context ctx tick-id))
@@ -1086,22 +1090,29 @@
   {:authorized? authenticated?}
   "Emit a :sheet/rlm-tree-execution-completed bookend event when a Phase 2
    RLM tree-execution finishes. Carries the full trajectory of events for
-   the tick, total usage, and a placeholder for task-fingerprint."
-  [{{:keys [sheet-id tick-id trajectory total-usage task-fingerprint]} :command
+   the tick, total usage, task-fingerprint placeholder (issue 012), and
+   the C-2a-2 fields :tree-fingerprint + :status + :duration-ms that drive
+   the per-tree-fingerprint rolling-metrics aggregator. The new fields are
+   carried in the event body — the partition-by-fingerprint read-model
+   reads :tree-fingerprint from the event body directly (tag values must
+   be UUIDs in event-store-v3, so we don't tag with the string fingerprint)."
+  [{{:keys [sheet-id tick-id trajectory total-usage task-fingerprint
+            tree-fingerprint status duration-ms]} :command
     :as _ctx}]
   {:command-result/events
    [(->event
-      {:type :sheet/rlm-tree-execution-completed
-       :tags #{[:sheet sheet-id]
-               [:tick tick-id]}
-       :body {:sheet-id sheet-id
-              :tick-id tick-id
-              :trajectory trajectory
-              :total-usage total-usage
-              :timestamp (java.time.Instant/now)
-              ;; Always include :task-fingerprint as a stable contract.
-              ;; nil placeholder for now — issue 012 will populate it.
-              :task-fingerprint task-fingerprint}})]})
+      (cond-> {:type :sheet/rlm-tree-execution-completed
+               :tags #{[:sheet sheet-id]
+                       [:tick tick-id]}
+               :body {:sheet-id sheet-id
+                      :tick-id tick-id
+                      :trajectory trajectory
+                      :total-usage total-usage
+                      :timestamp (java.time.Instant/now)
+                      :task-fingerprint task-fingerprint}}
+        (some? tree-fingerprint) (assoc-in [:body :tree-fingerprint] tree-fingerprint)
+        (some? status)           (assoc-in [:body :status] status)
+        (some? duration-ms)      (assoc-in [:body :duration-ms] duration-ms)))]})
 
 (defcommand :sheet fail-node-execution
   {:authorized? authenticated?}

@@ -35,6 +35,17 @@
     :ontology/tree-problem-mapping-updated
     :ontology/domain-knowledge-added})
 
+(def description-events
+  "C-2: events that affect the Living Description read model.
+
+   One event type per granularity (node-type, node-instance, tree-fingerprint).
+   Append-only — each event is a new version of the target's description;
+   the projection maintains both 'current' (latest body) and 'history'
+   (chronological vector of all versions)."
+  #{:ontology/node-type-description-updated
+    :ontology/node-instance-description-updated
+    :ontology/tree-description-updated})
+
 (def node-learning-events
   "Events that affect node-level learning read model"
   #{:ontology/node-pattern-learned})
@@ -233,6 +244,305 @@
 (defreadmodel :ontology tree-profiles
   {:events tree-profile-events, :version 1}
   [state event] (tree-profiles* state event))
+
+;; =============================================================================
+;; C-2 Living Descriptions Projection
+;; =============================================================================
+;; State shape:
+;;   {<granularity> {<target-id> {:current <latest-body>
+;;                                :history [<event-as-map>, ...chronological]}}}
+;;
+;; Each *-description-updated event REPLACES :current and APPENDS to :history.
+;; This is the foundation for `get-description` (latest body) and
+;; `get-description-history` (full audit trail) queries.
+
+(defmulti descriptions*
+  "Apply an event to the Living Description read-model state."
+  (fn [_state event] (:event/type event)))
+
+(defmethod descriptions* :default [state _] state)
+
+(defn- apply-description-event
+  "Generic projection: the event has :target-type (granularity), :target-id
+   (granularity-specific key), :body (the description body), :recorded-at.
+   Replaces :current with the new body; appends a versioned entry to :history."
+  [state event]
+  (let [granularity (:target-type event)
+        target-id (:target-id event)
+        body (:body event)
+        recorded-at (:recorded-at event)
+        history-entry {:body body
+                       :recorded-at recorded-at
+                       :event-id (:event/id event)}]
+    (-> state
+        (assoc-in [granularity target-id :current] body)
+        (update-in [granularity target-id :history]
+                   (fnil conj []) history-entry))))
+
+(defmethod descriptions* :ontology/node-type-description-updated [state event]
+  (apply-description-event state event))
+
+(defmethod descriptions* :ontology/node-instance-description-updated [state event]
+  (apply-description-event state event))
+
+(defmethod descriptions* :ontology/tree-description-updated [state event]
+  (apply-description-event state event))
+
+(defn descriptions
+  "Build the Living Description state from a seq of events."
+  [initial-state events]
+  (reduce descriptions* initial-state events))
+
+(defreadmodel :ontology descriptions
+  {:events description-events, :version 1}
+  [state event] (descriptions* state event))
+
+(defn get-description
+  "Return the CURRENT description body for the (granularity, target-id)
+   target, or nil if no description exists.
+
+   Granularity is one of :node-type, :node-instance, :tree-fingerprint.
+   The target-id is whatever shape the granularity uses (keyword for
+   :node-type, [sheet-id node-id] tuple for :node-instance, string for
+   :tree-fingerprint)."
+  [ctx granularity target-id]
+  (get-in (rmp/project ctx :ontology/descriptions)
+          [granularity target-id :current]))
+
+(defn get-description-history
+  "Return the chronological vector of all description versions ever
+   recorded for the (granularity, target-id) target. Empty vector if
+   none recorded."
+  [ctx granularity target-id]
+  (or (get-in (rmp/project ctx :ontology/descriptions)
+              [granularity target-id :history])
+      []))
+
+;; =============================================================================
+;; C-2a-3a — Consolidation threshold config read-model
+;; =============================================================================
+;;
+;; Event-sourced per-target-type threshold configuration. The
+;; threshold-tracking processor reads this to decide when to emit
+;; :ontology/consolidation-requested. Unset target-types use the default
+;; threshold of 10.
+
+(def ^:private default-consolidation-threshold
+  "Default delta-since-last-consolidation count that triggers a
+   consolidation request when no per-target-type override has been set."
+  10)
+
+(defmulti consolidation-thresholds*
+  "Apply an event to the threshold-config state map.
+   State: {target-type → int}."
+  (fn [_state event] (:event/type event)))
+
+(defmethod consolidation-thresholds* :default [state _] state)
+
+(defmethod consolidation-thresholds* :ontology/consolidation-threshold-set
+  [state event]
+  (assoc state (:target-type event) (:threshold event)))
+
+(defn consolidation-thresholds
+  "Build the threshold-config state from a seq of events."
+  [initial-state events]
+  (reduce consolidation-thresholds* initial-state events))
+
+(defreadmodel :ontology consolidation-thresholds
+  {:events #{:ontology/consolidation-threshold-set} :version 1}
+  [state event] (consolidation-thresholds* state event))
+
+(defn get-consolidation-threshold
+  "Return the configured threshold for a target-type, or the default 10."
+  [ctx target-type]
+  (or (get (rmp/project ctx :ontology/consolidation-thresholds) target-type)
+      default-consolidation-threshold))
+
+;; =============================================================================
+;; C-2a-3c — Consolidation budget config read-model
+;; =============================================================================
+;;
+;; Hourly consolidation budget per target-type. The consolidator gate
+;; reads this to decide whether to run the LLM reflection or skip the
+;; consolidation due to budget exhaustion. Unset target-types use the
+;; default budget of 100/hour.
+
+(def ^:private default-consolidation-budget
+  "Default consolidations-per-hour-per-target-type allowed when no
+   per-target-type override has been set."
+  100)
+
+(defmulti consolidation-budgets*
+  (fn [_state event] (:event/type event)))
+
+(defmethod consolidation-budgets* :default [state _] state)
+
+(defmethod consolidation-budgets* :ontology/consolidation-budget-set
+  [state event]
+  (assoc state (:target-type event) (:budget event)))
+
+(defn consolidation-budgets
+  "Build the budget-config state from a seq of events."
+  [initial-state events]
+  (reduce consolidation-budgets* initial-state events))
+
+(defreadmodel :ontology consolidation-budgets
+  {:events #{:ontology/consolidation-budget-set} :version 1}
+  [state event] (consolidation-budgets* state event))
+
+(defn get-consolidation-budget
+  "Return the configured hourly budget for a target-type, or the default 100."
+  [ctx target-type]
+  (or (get (rmp/project ctx :ontology/consolidation-budgets) target-type)
+      default-consolidation-budget))
+
+;; =============================================================================
+;; C-2a-3c — Recent consolidations counter read-model
+;; =============================================================================
+;;
+;; Tracks the timestamps of recent :*-description-updated events per
+;; target-type. The budget gate counts entries within the last hour
+;; window. Per-target-type granularity (not per-target-id) so a single
+;; runaway target can't exhaust the budget for unrelated targets within
+;; the same target-type — though in practice a single runaway target
+;; WOULD trigger budget cap and stop until the hour rolls.
+
+(defmulti recent-consolidations*
+  (fn [_state event] (:event/type event)))
+
+(defmethod recent-consolidations* :default [state _] state)
+
+(defn- record-consolidation-timestamp [state event]
+  (let [target-type (:target-type event)
+        ts (or (some-> event :event/timestamp str) (str (java.time.Instant/now)))]
+    (update state target-type (fnil conj []) ts)))
+
+(defmethod recent-consolidations* :ontology/node-type-description-updated [state event]
+  (record-consolidation-timestamp state event))
+(defmethod recent-consolidations* :ontology/node-instance-description-updated [state event]
+  (record-consolidation-timestamp state event))
+(defmethod recent-consolidations* :ontology/tree-description-updated [state event]
+  (record-consolidation-timestamp state event))
+
+(defn recent-consolidations
+  "Build the recent-consolidations state from a seq of events."
+  [initial-state events]
+  (reduce recent-consolidations* initial-state events))
+
+(defreadmodel :ontology recent-consolidations
+  {:events #{:ontology/node-type-description-updated
+             :ontology/node-instance-description-updated
+             :ontology/tree-description-updated}
+   :version 1}
+  [state event] (recent-consolidations* state event))
+
+(defn- ts->instant [^String s]
+  (try (java.time.Instant/parse s)
+       (catch Exception _
+         (try (.toInstant (java.time.OffsetDateTime/parse s))
+              (catch Exception _ nil)))))
+
+(defn get-recent-consolidation-count
+  "Return how many :*-description-updated events have fired for the
+   given target-type in the rolling last-hour window. Used by the
+   consolidator's budget gate."
+  [ctx target-type]
+  (let [now (java.time.Instant/now)
+        cutoff (.minusSeconds now 3600)
+        all (get (rmp/project ctx :ontology/recent-consolidations) target-type [])]
+    (->> all
+         (keep ts->instant)
+         (filter #(.isAfter ^java.time.Instant % cutoff))
+         count)))
+
+;; =============================================================================
+;; C-2a-3a — Consolidation delta-counter read-model
+;; =============================================================================
+;;
+;; Tracks per-(target-type, target-id):
+;;   :delta — events since last :ontology/consolidation-requested (drives
+;;            the threshold-tracking processor's fire decision)
+;;   :total — lifetime count of source events for this target (used to
+;;            derive the deterministic "crossing-number" that CAS-guards
+;;            the consolidation-requested append for exactly-once
+;;            semantics across concurrent processor handlers)
+;;
+;; Three event types project:
+;;   :sheet/node-execution-completed     → increments :delta + :total for
+;;                                          [:node-type kw] AND
+;;                                          [:node-instance [sheet node]]
+;;   :sheet/rlm-tree-execution-completed → increments :delta + :total for
+;;                                          [:tree-fingerprint fp]
+;;   :ontology/consolidation-requested   → resets :delta to 0 (:total
+;;                                          continues climbing)
+
+(defn- bump-counter
+  "Increment both :delta and :total at the given target path."
+  [state path]
+  (-> state
+      (update-in (conj path :delta) (fnil inc 0))
+      (update-in (conj path :total) (fnil inc 0))))
+
+(defmulti consolidation-delta-counters*
+  (fn [_state event] (:event/type event)))
+
+(defmethod consolidation-delta-counters* :default [state _] state)
+
+(defmethod consolidation-delta-counters* :sheet/node-execution-completed
+  [state event]
+  (let [node-type (:node-type event)
+        sheet-id  (:sheet-id event)
+        node-id   (:node-id event)]
+    (cond-> state
+      (some? node-type)
+      (bump-counter [:node-type node-type])
+
+      (and (some? sheet-id) (some? node-id))
+      (bump-counter [:node-instance [sheet-id node-id]]))))
+
+(defmethod consolidation-delta-counters* :sheet/rlm-tree-execution-completed
+  [state event]
+  (if-let [fp (:tree-fingerprint event)]
+    (bump-counter state [:tree-fingerprint fp])
+    state))
+
+(defmethod consolidation-delta-counters* :ontology/consolidation-requested
+  [state event]
+  (let [target-type (:target-type event)
+        target-id   (:target-id event)]
+    (assoc-in state [target-type target-id :delta] 0)))
+
+(defn consolidation-delta-counters
+  "Build the delta-counter state from a seq of events."
+  [initial-state events]
+  (reduce consolidation-delta-counters* initial-state events))
+
+(defreadmodel :ontology consolidation-delta-counters
+  {:events #{:sheet/node-execution-completed
+             :sheet/rlm-tree-execution-completed
+             :ontology/consolidation-requested}
+   :version 1}
+  [state event] (consolidation-delta-counters* state event))
+
+(defn get-consolidation-delta
+  "Return the current delta-counter (events-since-last-consolidation)
+   for the (target-type, target-id) target. Returns 0 when no events
+   have ticked the counter."
+  [ctx target-type target-id]
+  (or (get-in (rmp/project ctx :ontology/consolidation-delta-counters)
+              [target-type target-id :delta])
+      0))
+
+(defn get-consolidation-total
+  "Return the lifetime total count of source events for the
+   (target-type, target-id) target. Used by the CAS guard on
+   consolidation-requested emissions to derive the crossing-number
+   that enforces exactly-once-per-threshold-crossing across
+   concurrent processor handlers."
+  [ctx target-type target-id]
+  (or (get-in (rmp/project ctx :ontology/consolidation-delta-counters)
+              [target-type target-id :total])
+      0))
 
 ;; =============================================================================
 ;; Node Experiences Projection

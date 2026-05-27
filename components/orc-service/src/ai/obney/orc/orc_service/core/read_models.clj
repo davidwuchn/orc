@@ -1292,3 +1292,105 @@
      :total-executions (->> sheet-metrics
                             (map (comp count :executions second))
                             (reduce + 0))}))
+
+;; =============================================================================
+;; C-2a-2: Per-node-type rolling metrics (cross-sheet aggregation)
+;; =============================================================================
+;;
+;; Aggregates :sheet/node-execution-completed events that carry a :node-type
+;; field, summing counts and durations across all sheets so the Living
+;; Description consolidator can learn patterns at the node-type granularity.
+
+(defmulti node-type-rolling-metrics* (fn [_state event] (:event/type event)))
+(defmethod node-type-rolling-metrics* :default [state _] state)
+
+(defmethod node-type-rolling-metrics* :sheet/node-execution-completed [state event]
+  (if-let [nt (:node-type event)]
+    (let [{:keys [status duration-ms]} event
+          success? (= status :success)]
+      (update state nt
+        (fn [metrics]
+          (let [metrics (or metrics {:node-type nt
+                                     :executions []
+                                     :success-count 0
+                                     :failure-count 0
+                                     :total-duration 0})]
+            (-> metrics
+                (update :executions #(->> (conj % {:status status
+                                                    :duration-ms duration-ms
+                                                    :timestamp (str (:event/timestamp event))})
+                                          (take-last rolling-window-size)
+                                          vec))
+                (update :success-count #(if success? (inc %) %))
+                (update :failure-count #(if (not success?) (inc %) %))
+                (update :total-duration #(+ % (or duration-ms 0))))))))
+    ;; No :node-type on this event (e.g. replay of pre-C-2a-2 events) — skip.
+    state))
+
+(defreadmodel :sheet node-type-rolling-metrics
+  {:events #{:sheet/node-execution-completed} :version 1
+   ;; Partition by node-type so all events of a given type land in the same
+   ;; bucket (cross-sheet aggregation). Events lacking :node-type are
+   ;; skipped at projection time.
+   :partition-fn (fn [event] (or (:node-type event) ::no-node-type))
+   :entity-id-fn :node-type}
+  [state event] (node-type-rolling-metrics* state event))
+
+(defn get-node-type-metrics
+  "Cross-sheet rolling metrics for a given node-type keyword.
+   Returns {:node-type :success-count :failure-count :total-duration
+            :executions ...} or nil when no events have been recorded."
+  [ctx node-type]
+  (let [all-metrics (rmp/project ctx :sheet/node-type-rolling-metrics
+                                 {:partition-key node-type})]
+    (get all-metrics node-type)))
+
+;; =============================================================================
+;; C-2a-2: Per-tree-fingerprint rolling metrics (cross-sheet aggregation)
+;; =============================================================================
+;;
+;; Aggregates :sheet/rlm-tree-execution-completed events that carry a
+;; :tree-fingerprint, summing counts and durations across all sheets so
+;; the consolidator can learn patterns at the tree-shape granularity.
+
+(defmulti tree-fingerprint-rolling-metrics* (fn [_state event] (:event/type event)))
+(defmethod tree-fingerprint-rolling-metrics* :default [state _] state)
+
+(defmethod tree-fingerprint-rolling-metrics* :sheet/rlm-tree-execution-completed [state event]
+  (if-let [fp (:tree-fingerprint event)]
+    (let [{:keys [status duration-ms]} event
+          success? (= status :success)]
+      (update state fp
+        (fn [metrics]
+          (let [metrics (or metrics {:tree-fingerprint fp
+                                     :executions []
+                                     :success-count 0
+                                     :failure-count 0
+                                     :total-duration 0})]
+            (-> metrics
+                (update :executions #(->> (conj % {:status status
+                                                    :duration-ms duration-ms
+                                                    :timestamp (str (:event/timestamp event))})
+                                          (take-last rolling-window-size)
+                                          vec))
+                (update :success-count #(if success? (inc %) %))
+                (update :failure-count #(if (not success?) (inc %) %))
+                (update :total-duration #(+ % (or duration-ms 0))))))))
+    ;; No :tree-fingerprint on this event (replay of pre-C-2a-2 events) — skip.
+    state))
+
+(defreadmodel :sheet tree-fingerprint-rolling-metrics
+  {:events #{:sheet/rlm-tree-execution-completed} :version 1
+   :partition-fn (fn [event] (or (:tree-fingerprint event) ::no-tree-fingerprint))
+   :entity-id-fn :tree-fingerprint}
+  [state event] (tree-fingerprint-rolling-metrics* state event))
+
+(defn get-tree-fingerprint-metrics
+  "Cross-sheet rolling metrics for a given tree-fingerprint hash.
+   Returns {:tree-fingerprint :success-count :failure-count
+            :total-duration :executions ...} or nil when no events
+   have been recorded."
+  [ctx tree-fingerprint]
+  (let [all-metrics (rmp/project ctx :sheet/tree-fingerprint-rolling-metrics
+                                 {:partition-key tree-fingerprint})]
+    (get all-metrics tree-fingerprint)))

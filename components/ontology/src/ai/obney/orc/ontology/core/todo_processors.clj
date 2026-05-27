@@ -6,10 +6,14 @@
 
    1. On evaluation/trace-evaluated: Classify failures and auto-record to tree profile
    2. On tree-profile-updated (future): Trigger re-embedding for hybrid search
+   3. C-2a-3a — threshold-tracking trigger: when a target's delta-counter
+      crosses its configured threshold, emit :ontology/request-consolidation
+      so the consolidator processor (C-2a-3b) can run reflection.
 
    This closes the integration gap where judges evaluate outputs but
    results don't flow to the ontology for learning."
   (:require [ai.obney.orc.ontology.core.classifier :as classifier]
+            [ai.obney.orc.ontology.core.read-models :as rm]
             [ai.obney.grain.command-processor-v2.interface :as command-processor]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]
@@ -137,3 +141,90 @@
   (on-trace-evaluated context)
   ;; Also check for high-scoring traces to record strengths
   (on-high-scoring-trace context))
+
+;; =============================================================================
+;; C-2a-3a — Threshold-tracking trigger
+;; =============================================================================
+;;
+;; Listens to the execution-completion events that feed the delta-counter
+;; read-model. For each event, derives the affected (target-type, target-id)
+;; tuples, reads the current counter, compares to the configured threshold,
+;; and emits :ontology/request-consolidation when the counter has crossed.
+;;
+;; Counter reset semantics are handled by the read-model's reduction on
+;; :ontology/consolidation-requested — so re-firing requires the counter
+;; to climb back to threshold from 0.
+
+(defn- request-consolidation!
+  "Issue a non-on-demand :ontology/request-consolidation command.
+   The command uses CAS on the crossing-uuid tag to enforce exactly-once
+   semantics across concurrent processor handlers. A
+   :cognitect.anomalies/conflict result is EXPECTED and benign — it
+   means another handler in the same threshold window won the race and
+   already emitted the consolidation-requested event. We treat it as
+   silent success, not an error."
+  [context target-type target-id]
+  (try
+    (let [result (run-command! context
+                   {:command/id (random-uuid)
+                    :command/timestamp (time/now)
+                    :command/name :ontology/request-consolidation
+                    :target-type target-type
+                    :target-id target-id
+                    :on-demand? false})]
+      (when (and (map? result)
+                 (= :cognitect.anomalies/conflict
+                    (:cognitect.anomalies/category result)))
+        (u/log ::cas-conflict-benign
+               :target-type target-type
+               :target-id target-id
+               :note "Another handler won the race; this is expected"))
+      result)
+    (catch Exception e
+      (u/log ::request-consolidation-error
+             :error (.getMessage e)
+             :target-type target-type
+             :target-id target-id))))
+
+(defn- maybe-fire-consolidation!
+  "If the current delta-counter for the target meets or exceeds its
+   configured threshold, emit :ontology/request-consolidation."
+  [context target-type target-id]
+  (let [delta (rm/get-consolidation-delta context target-type target-id)
+        threshold (rm/get-consolidation-threshold context target-type)]
+    (when (>= delta threshold)
+      (u/log ::threshold-crossed
+             :target-type target-type
+             :target-id target-id
+             :delta delta
+             :threshold threshold)
+      (request-consolidation! context target-type target-id))))
+
+(defn on-node-execution-completed
+  "Threshold-trigger logic for :sheet/node-execution-completed.
+   Ticks the per-node-type AND per-node-instance counters via the
+   read-model projection, then checks both for threshold crossing."
+  [{:keys [event] :as context}]
+  (let [{:keys [node-type sheet-id node-id]} event]
+    (when (some? node-type)
+      (maybe-fire-consolidation! context :node-type node-type))
+    (when (and (some? sheet-id) (some? node-id))
+      (maybe-fire-consolidation! context :node-instance [sheet-id node-id]))))
+
+(defn on-rlm-tree-execution-completed
+  "Threshold-trigger logic for :sheet/rlm-tree-execution-completed."
+  [{:keys [event] :as context}]
+  (when-let [fp (:tree-fingerprint event)]
+    (maybe-fire-consolidation! context :tree-fingerprint fp)))
+
+(defprocessor :ontology on-execution-completed-check-threshold
+  {:topics #{:sheet/node-execution-completed
+             :sheet/rlm-tree-execution-completed}}
+  "C-2a-3a: after each execution-completion event, check whether the
+   affected target's delta-counter has crossed its configured threshold;
+   emit :ontology/request-consolidation if so."
+  [{:keys [event] :as context}]
+  (case (:event/type event)
+    :sheet/node-execution-completed     (on-node-execution-completed context)
+    :sheet/rlm-tree-execution-completed (on-rlm-tree-execution-completed context)
+    nil))

@@ -54,6 +54,9 @@
 ;; Rolling metrics functions
 (def get-node-rolling-metrics rm/get-node-rolling-metrics)
 (def get-tree-rolling-metrics rm/get-tree-rolling-metrics)
+;; C-2a-2: cross-sheet rolling metrics for the Living Description system.
+(def get-node-type-metrics rm/get-node-type-metrics)
+(def get-tree-fingerprint-metrics rm/get-tree-fingerprint-metrics)
 
 ;; =============================================================================
 ;; Synchronous Execution
