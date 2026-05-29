@@ -3,6 +3,7 @@
   (:require [clojure.test :refer [deftest testing is]]
             [ai.obney.orc.orc-service.test-helpers :as h]
             [ai.obney.orc.orc-service.interface :as sheet]
+            [ai.obney.orc.orc-service.core.todo-processors :as tp]
             [ai.obney.grain.event-store-v3.interface :as es]))
 
 ;; =============================================================================
@@ -39,6 +40,35 @@
 ;; =============================================================================
 ;; Map-Each Tests
 ;; =============================================================================
+
+(deftest map-each-trace-execution-key-distinguishes-repeated-child-node
+  (testing "same child node id gets distinct trace correlation keys per map-each index"
+    (let [node-id (random-uuid)
+          parent-id (random-uuid)
+          started-0 {:node-id node-id
+                     :inputs {:current-item {:id 1}
+                              ::tp/map-each-index 0
+                              ::tp/map-each-parent parent-id}}
+          completed-0 {:node-id node-id
+                       :inputs {::tp/map-each-index 0
+                                ::tp/map-each-parent parent-id}
+                       :writes {:current-item {:id 1 :processed true}}}
+          started-1 {:node-id node-id
+                     :inputs {:current-item {:id 2}
+                              ::tp/map-each-index 1
+                              ::tp/map-each-parent parent-id}}
+          completed-1 {:node-id node-id
+                       :inputs {::tp/map-each-index 1
+                                ::tp/map-each-parent parent-id}
+                       :writes {:current-item {:id 2 :processed true}}}
+          completions (into {} (map (juxt tp/trace-execution-key identity))
+                            [completed-0 completed-1])]
+      (is (not= (tp/trace-execution-key started-0)
+                (tp/trace-execution-key started-1)))
+      (is (= {:current-item {:id 1 :processed true}}
+             (:writes (get completions (tp/trace-execution-key started-0)))))
+      (is (= {:current-item {:id 2 :processed true}}
+             (:writes (get completions (tp/trace-execution-key started-1))))))))
 
 (deftest map-each-basic-test
   (testing "processes each item in the list"
