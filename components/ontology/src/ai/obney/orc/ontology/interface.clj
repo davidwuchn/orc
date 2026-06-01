@@ -1550,3 +1550,183 @@
              vec)]
     {:domain domain
      :recommendations recommendations}))
+
+;; =============================================================================
+;; Evolutionary Ontology Building
+;; =============================================================================
+;;
+;; These functions provide ontology construction from various source types:
+;; - CSV files → entities and relationships
+;; - Text documents → concept extraction and taxonomy
+;; - SQL databases → schema-to-ontology mapping
+;; - Unified interface → auto-detection and routing
+;;
+
+(defn build-ontology-from-sources
+  "Build ontology from multiple sources using the evolutionary pipeline.
+
+   This is the main entry point for batch ontology construction.
+
+   Args:
+     ctx: Context with :event-store
+     params:
+       :sources - Vector of source maps:
+         [{:path \"data.csv\" :type \"csv\"}
+          {:path \"database.db\" :type \"sql\"}
+          {:content \"text...\" :type \"text\"}]
+       :config - Configuration:
+         :base-uri - Ontology namespace (default: http://ontology.local/)
+         :similarity-threshold - Entity resolution threshold (default: 0.85)
+         :enable-colbert? - Enable ColBERT indexing (default: true)
+         :enable-embeddings? - Enable embedding generation (default: true)
+
+   Supported source types:
+     - \"csv\" - CSV files (provide :entity-column, :entity-type in config)
+     - \"text\" - Text documents (provide :domain in config)
+     - \"sql\"/\"sqlite\"/\"db\" - SQLite databases
+     - \"json\" - JSON files (planned)
+     - \"rdf\" - RDF/OWL imports (planned)
+
+   Returns:
+     {:ontology-id uuid
+      :build-id uuid
+      :total-sources int
+      :total-concepts int
+      :total-triples int
+      :ttl-output string
+      :events [...]}
+
+   Example:
+     (build-ontology-from-sources ctx
+       {:sources [{:path \"/data/programs.csv\" :type \"csv\"}
+                  {:path \"/data/ipeds.db\" :type \"sql\"}]
+        :config {:base-uri \"http://education.ai/\"
+                 :entity-column \"name\"
+                 :entity-type \"Program\"}})"
+  [ctx params]
+  (require '[ai.obney.orc.ontology.core.evolutionary-builder :as evo-builder])
+  ((resolve 'ai.obney.orc.ontology.core.evolutionary-builder/build-from-sources) ctx params))
+
+(defn evolve-ontology
+  "Evolve existing ontology with new sources (incremental mode).
+
+   Extends an existing ontology without rebuilding from scratch.
+
+   Args:
+     ctx: Context with :event-store
+     params:
+       :ontology-id - UUID of existing ontology
+       :sources - Vector of new sources to add
+       :config - Configuration options
+
+   Returns:
+     Same as build-ontology-from-sources"
+  [ctx params]
+  (require '[ai.obney.orc.ontology.core.evolutionary-builder :as evo-builder])
+  ((resolve 'ai.obney.orc.ontology.core.evolutionary-builder/evolve) ctx params))
+
+(defn extract-from-csv
+  "Extract ontology from CSV data using the CSV ORC sheet.
+
+   Args:
+     ctx: ORC context
+     opts:
+       :csv-data - Parsed CSV as vector of maps, or CSV string
+       :entity-column - Column to use as entity label
+       :entity-type - OWL class name
+       :base-uri - Ontology namespace
+
+   Returns:
+     {:status :success/:failed
+      :entities [...] :relationships [...] :tbox {...}
+      :owl-output string}"
+  [ctx opts]
+  (require '[ai.obney.orc.ontology.sheets.csv-ontology :as csv-ont])
+  (let [build! (resolve 'ai.obney.orc.ontology.sheets.csv-ontology/build-csv-ontology-pipeline!)
+        run! (resolve 'ai.obney.orc.ontology.sheets.csv-ontology/run-csv-to-ontology)
+        sheet-id (build! ctx)]
+    (run! ctx sheet-id opts)))
+
+(defn extract-from-text
+  "Extract ontology from text using the taxonomy ORC sheet.
+
+   Args:
+     ctx: ORC context
+     opts:
+       :source-text - Text to extract concepts from
+       :domain - Domain context (e.g., \"artificial intelligence\")
+       :existing-concepts - Concepts to avoid re-extracting
+
+   Returns:
+     {:status :success/:failed
+      :concepts [...] :relationships [...] :top-concepts [...]
+      :skos-output string}"
+  [ctx opts]
+  (require '[ai.obney.orc.ontology.sheets.ontology-exploration :as text-ont])
+  (let [build! (resolve 'ai.obney.orc.ontology.sheets.ontology-exploration/build-taxonomy-pipeline!)
+        run! (resolve 'ai.obney.orc.ontology.sheets.ontology-exploration/run-taxonomy-pipeline)
+        sheet-id (build! ctx)]
+    (run! ctx sheet-id opts)))
+
+(defn extract-from-sql
+  "Extract ontology from SQLite database using the SQL ORC sheet.
+
+   Args:
+     ctx: ORC context
+     opts:
+       :db-path - Path to SQLite database file
+       :base-uri - Ontology namespace (default: http://example.org/db#)
+       :max-tables - Max tables to process (default: 50)
+       :max-instances - Max instances per table for A-box (default: 10)
+
+   Returns:
+     {:status :success/:failed
+      :domain - Detected domain
+      :domain-description - Domain description
+      :tbox {:classes [...] :object-properties [...] :datatype-properties [...]}
+      :abox [...]
+      :owl-output string
+      :statistics {...}}"
+  [ctx opts]
+  (require '[ai.obney.orc.ontology.sheets.sql-ontology :as sql-ont])
+  (let [build! (resolve 'ai.obney.orc.ontology.sheets.sql-ontology/build-sql-ontology-pipeline!)
+        run! (resolve 'ai.obney.orc.ontology.sheets.sql-ontology/run-sql-to-ontology)
+        sheet-id (build! ctx)]
+    (run! ctx sheet-id opts)))
+
+(defn extract-unified
+  "Unified ontology extraction - auto-detects source type.
+
+   This is the simplest API - provide a source and let the system
+   determine the appropriate extraction method.
+
+   Args:
+     ctx: ORC context
+     source: Map with:
+       :path - File path (optional if :content provided)
+       :content - Inline content (optional if :path provided)
+       :type - Source type override (optional, will auto-detect)
+       Plus type-specific options
+
+   Auto-detection:
+     - .csv → CSV extraction
+     - .db/.sqlite → SQL extraction
+     - .txt/.md → Text extraction
+     - .json → JSON extraction (planned)
+     - .ttl/.rdf/.owl → RDF import (planned)
+
+   Returns:
+     {:status :success/:failed/:not-implemented
+      :source-type :csv/:text/:sql/:json/:rdf
+      ...type-specific outputs...}"
+  [ctx source]
+  (require '[ai.obney.orc.ontology.sheets.unified-ontology :as unified])
+  ((resolve 'ai.obney.orc.ontology.sheets.unified-ontology/extract) ctx source))
+
+(defn extract-unified-multiple
+  "Extract ontologies from multiple sources with unified API.
+
+   Returns map of source identifiers to extraction results."
+  [ctx sources]
+  (require '[ai.obney.orc.ontology.sheets.unified-ontology :as unified])
+  ((resolve 'ai.obney.orc.ontology.sheets.unified-ontology/extract-multiple) ctx sources))
