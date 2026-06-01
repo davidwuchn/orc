@@ -48,10 +48,10 @@ Few-shot learning enables learning from very few examples.")
         source-text (get inputs :source-text)]
     ;; For now, just pass through the source-text
     ;; In production, would read files from source-paths and combine
-    {"source-text" (or source-text
-                       (when (seq source-paths)
-                         (str/join "\n\n" (map slurp source-paths)))
-                       "")}))
+    {:source-text (or source-text
+                      (when (seq source-paths)
+                        (str/join "\n\n" (map slurp source-paths)))
+                      "")}))
 
 (defn- get-concept-field
   "Get a field from concept, handling both keyword and string keys."
@@ -100,8 +100,8 @@ Few-shot learning enables learning from very few examples.")
         blocking-stats {:type-count (count by-type)
                         :types (vec (keys by-type))
                         :concepts-per-type (into {} (map (fn [[t cs]] [t (count cs)]) by-type))}]
-    {"concepts" unique-concepts
-     "blocking-stats" blocking-stats}))
+    {:concepts unique-concepts
+     :blocking-stats blocking-stats}))
 
 (defn extract-labels-fn
   "Extract just the labels from concepts for hierarchy building.
@@ -110,7 +110,7 @@ Few-shot learning enables learning from very few examples.")
   (let [concepts (get inputs :concepts [])
         ;; Handle both keyword and string keys
         labels (mapv (fn [c] (or (get c "label") (get c :label) "")) concepts)]
-    {"concept-labels" labels}))
+    {:concept-labels labels}))
 
 (defn quality-is-good?
   "Check if validation quality is 'good'.
@@ -127,7 +127,7 @@ Few-shot learning enables learning from very few examples.")
         ;; Add orphans as top concepts
         orphan-issues (filter #(= "orphans" (get % "type")) issues)
         orphan-labels (mapcat #(get % "affected_concepts" []) orphan-issues)]
-    {"top-concepts" (vec (distinct (concat top-concepts orphan-labels)))}))
+    {:top-concepts (vec (distinct (concat top-concepts orphan-labels)))}))
 
 ;; =============================================================================
 ;; Causal Link Extraction Functions
@@ -184,10 +184,10 @@ Few-shot learning enables learning from very few examples.")
                        ;; (filter #(and (concept-labels (get % "cause"))
                        ;;               (concept-labels (get % "effect"))))
                        vec)]
-    {"validated-causal-relations" validated
-     "causal-stats" {:total-extracted (count relations)
-                     :total-validated (count validated)
-                     :by-type (frequencies (map #(get % "relation_type") validated))}}))
+    {:validated-causal-relations validated
+     :causal-stats {:total-extracted (count relations)
+                    :total-validated (count validated)
+                    :by-type (frequencies (map #(get % "relation_type") validated))}}))
 
 (defn build-taxonomy-fn
   "Phase 8: Build SKOS taxonomy structure from extracted data.
@@ -199,13 +199,13 @@ Few-shot learning enables learning from very few examples.")
         related-pairs (get inputs :related-pairs [])
         causal-relations (get inputs :validated-causal-relations [])
         domain (get inputs :domain "")]
-    {"taxonomy" {:concepts concepts
-                 :relationships relationships
-                 :top-concepts top-concepts
-                 :related related-pairs
-                 :causal-relations causal-relations
-                 :domain domain
-                 :base-uri "http://example.org/taxonomy#"}}))
+    {:taxonomy {:concepts concepts
+                :relationships relationships
+                :top-concepts top-concepts
+                :related related-pairs
+                :causal-relations causal-relations
+                :domain domain
+                :base-uri "http://example.org/taxonomy#"}}))
 
 (defn serialize-to-skos-fn
   "Phase 9: Serialize taxonomy to SKOS/OWL Turtle format.
@@ -269,11 +269,11 @@ Few-shot learning enables learning from very few examples.")
                                             rel-type (get cr "relation_type" "causes")]]
                                   (str "ex:" cause " ex:" rel-type " ex:" effect " .")))))]
 
-    {"skos-output" (str prefixes
-                        (or causal-props "")
-                        "# Concepts\n" concept-triples
-                        "\n\n# Hierarchy\n" hierarchy-triples
-                        (or causal-triples ""))}))
+    {:skos-output (str prefixes
+                       (or causal-props "")
+                       "# Concepts\n" concept-triples
+                       "\n\n# Hierarchy\n" hierarchy-triples
+                       (or causal-triples ""))}))
 
 ;; =============================================================================
 ;; Taxonomy Pipeline Workflow
