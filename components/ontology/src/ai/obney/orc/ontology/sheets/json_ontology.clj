@@ -318,7 +318,7 @@ Sample Data (first 2 records):
 
       ;; PHASE 2: Domain Analysis (LLM)
       (sheet/llm "analyze-json-domain"
-        :model "google/gemini-2.5-flash"
+        :model "google/gemini-3-flash-preview"
         :instruction "Analyze this JSON structure to understand its domain and purpose.
 
 Based on the field names, values, and structure:
@@ -333,7 +333,7 @@ Even if field names are cryptic (like 'n' for name, 'a' for age), infer their me
 
       ;; PHASE 3: Entity Type Discovery (LLM)
       (sheet/llm "discover-entity-types"
-        :model "google/gemini-2.5-flash"
+        :model "google/gemini-3-flash-preview"
         :instruction "Identify entity types represented in this JSON.
 
 For each entity type, provide:
@@ -364,7 +364,7 @@ For cryptic fields, explain your reasoning (e.g., 'n' appears to be name based o
 
       ;; PHASE 6: Enrich Definitions (LLM)
       (sheet/llm "enrich-definitions"
-        :model "google/gemini-2.5-flash"
+        :model "google/gemini-3-flash-preview"
         :instruction "For each entity type, generate a formal 2-3 sentence definition.
 
 Include:
@@ -380,7 +380,7 @@ Return as JSON object with entity names as keys:
 
       ;; PHASE 7: Discover Relationships (LLM)
       (sheet/llm "discover-relationships"
-        :model "google/gemini-2.5-flash"
+        :model "google/gemini-3-flash-preview"
         :instruction "Discover relationships between entities in this JSON.
 
 Look for:
@@ -397,7 +397,7 @@ Return as JSON array:
 
       ;; PHASE 8: Validate Quality (LLM)
       (sheet/llm "validate-quality"
-        :model "google/gemini-2.5-flash"
+        :model "google/gemini-3-flash-preview"
         :instruction "Validate the extracted ontology for quality issues.
 
 Check for:

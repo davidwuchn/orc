@@ -9,8 +9,6 @@
    - FindRelatedConcepts
    - ValidateTaxonomy"
   (:require [ai.obney.orc.orc-service.interface :as sheet]
-            [ai.obney.orc.orc-service.test-helpers :as h]
-            [ai.obney.orc.orc-service.core.executor :as executor]
             [clojure.string :as str]))
 
 ;; =============================================================================

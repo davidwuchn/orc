@@ -17,8 +17,106 @@
 (require '[ai.obney.orc.ontology.sheets.json-ontology :as json-ont])
 (require '[ai.obney.orc.ontology.sheets.unified-ontology :as unified])
 (require '[ai.obney.orc.ontology.core.read-models :as rm])
-(require '[ai.obney.orc.ontology.test-helpers :as h])
+(require '[ai.obney.grain.event-store-v3.interface :as es])
+(require '[ai.obney.grain.kv-store.interface :as kv])
+(require '[ai.obney.grain.kv-store-lmdb.interface :as lmdb])
+(require '[ai.obney.grain.read-model-processor-v2.interface :as rmp])
+(require '[ai.obney.grain.command-processor-v2.interface :as cp])
+(require '[ai.obney.grain.query-processor.interface :as qp])
+(require '[ai.obney.grain.pubsub.interface :as pubsub])
+(require '[ai.obney.grain.todo-processor-v2.interface :as tp])
+(require '[litellm.router :as litellm-router])
 (require '[clojure.pprint :refer [pprint]])
+(require '[clojure.data.json :as json])
+
+;; =============================================================================
+;; LLM Provider Configuration
+;; =============================================================================
+
+(def ^:private llm-model "google/gemini-3-flash-preview")
+
+(defn setup-openrouter!
+  "Register OpenRouter provider with LiteLLM router.
+   Reads API key from OPENROUTER_API_KEY env var or accepts it as argument."
+  ([] (setup-openrouter! (System/getenv "OPENROUTER_API_KEY")))
+  ([api-key]
+   (when-not api-key
+     (throw (ex-info "OpenRouter API key required. Set OPENROUTER_API_KEY env var or pass key." {})))
+   ;; Use the built-in setup function
+   (litellm-router/setup-openrouter! :api-key api-key :model llm-model)
+   ;; Also register the model-specific config
+   (litellm-router/register! (keyword (str "openrouter/" llm-model))
+                             {:provider :openrouter
+                              :model llm-model
+                              :config {:api-base "https://openrouter.ai/api/v1"
+                                       :api-key api-key}})
+   (println "✓ OpenRouter registered with model:" llm-model)))
+
+;; =============================================================================
+;; LLM-enabled Test Context
+;; =============================================================================
+
+(defn- delete-dir-recursively
+  "Delete a directory and all its contents."
+  [^String path]
+  (let [f (java.io.File. path)]
+    (when (.exists f)
+      (when (.isDirectory f)
+        (doseq [child (.listFiles f)]
+          (delete-dir-recursively (.getPath child))))
+      (.delete f))))
+
+(defn create-llm-test-context
+  "Create a test context with OpenRouter provider configured for LLM calls."
+  []
+  (rmp/l1-clear!)
+  (let [dir (str "/tmp/ontology-llm-test-" (random-uuid))
+        ps (pubsub/start {:type :core-async :topic-fn :event/type})
+        event-store (es/start {:conn {:type :in-memory}
+                               :event-pubsub ps
+                               :logger nil})
+        cache (kv/start (lmdb/->KV-Store-LMDB {:storage-dir dir :db-name "test"}))
+        base-ctx {:event-store event-store
+                  :cache cache
+                  :tenant-id #uuid "00000000-0000-0000-0000-000000000000"
+                  :command-registry (cp/global-command-registry)
+                  :query-registry (qp/global-query-registry)
+                  :dscloj-provider :openrouter
+                  ::cache-dir dir}
+        processors (reduce-kv
+                    (fn [acc proc-name {:keys [handler-fn topics]}]
+                      (assoc acc proc-name
+                             (tp/start {:event-pubsub ps
+                                        :topics topics
+                                        :handler-fn handler-fn
+                                        :context base-ctx})))
+                    {}
+                    @tp/processor-registry*)]
+    (assoc base-ctx :event-pubsub ps :processors processors)))
+
+(defn stop-llm-test-context
+  "Stop the LLM test context and clean up resources."
+  [ctx]
+  (doseq [[_ processor] (:processors ctx)]
+    (tp/stop processor))
+  (when-let [ps (:event-pubsub ctx)]
+    (pubsub/stop ps))
+  (rmp/l1-clear!)
+  (when-let [cache (:cache ctx)]
+    (kv/stop cache))
+  (when-let [event-store (:event-store ctx)]
+    (es/stop event-store))
+  (when-let [dir (::cache-dir ctx)]
+    (delete-dir-recursively dir)))
+
+(defmacro with-llm-test-context
+  "Execute body with an LLM-enabled test context, cleaning up afterward."
+  [[ctx-sym] & body]
+  `(let [~ctx-sym (create-llm-test-context)]
+     (try
+       ~@body
+       (finally
+         (stop-llm-test-context ~ctx-sym)))))
 
 ;; =============================================================================
 ;; Test Data
@@ -88,14 +186,14 @@
   "Test full JSON extraction pipeline - REQUIRES LLM.
 
    This will make actual API calls. Ensure you have:
-   - ANTHROPIC_API_KEY or OPENAI_API_KEY set
-   - A running ORC context with LLM configured"
+   - Called (setup-openrouter! \"your-api-key\") first
+   - Or set OPENROUTER_API_KEY environment variable"
   []
   (println "\n=== TEST: JSON Extraction Pipeline (Requires LLM) ===\n")
-  (println "⚠️  This test makes real LLM calls. Ensure API keys are configured.\n")
+  (println "⚠️  This test makes real LLM calls. Ensure OpenRouter is configured.\n")
 
   (try
-    (h/with-test-context [ctx]
+    (with-llm-test-context [ctx]
       (println "1. Building JSON ontology pipeline...")
       (let [sheet-id (json-ont/build-json-ontology-pipeline! ctx)]
         (println "   Sheet ID:" sheet-id)
@@ -120,7 +218,8 @@
               (println "\n❌ JSON Extraction: FAILED"))))))
     (catch Exception e
       (println "   ❌ Error:" (.getMessage e))
-      (println "\n❌ JSON Extraction: FAILED (check API keys and LLM configuration)"))))
+      (.printStackTrace e)
+      (println "\n❌ JSON Extraction: FAILED (check OpenRouter configuration)"))))
 
 ;; =============================================================================
 ;; Verification 3: Ontology-ID Scoping
@@ -213,13 +312,13 @@
    This makes actual LLM calls through the evolutionary builder pipeline."
   []
   (println "\n=== TEST: Evolutionary Builder JSON Support (Requires LLM) ===\n")
-  (println "⚠️  This test makes real LLM calls. Ensure API keys are configured.\n")
+  (println "⚠️  This test makes real LLM calls. Ensure OpenRouter is configured.\n")
 
   (try
-    (h/with-test-context [ctx]
+    (with-llm-test-context [ctx]
       (println "1. Calling build-ontology-from-sources with JSON...")
       (let [result (ontology/build-ontology-from-sources ctx
-                     {:sources [{:content (pr-str sample-people-json)
+                     {:sources [{:content (json/write-str sample-people-json)
                                  :type "json"}]
                       :config {:base-uri "http://test.org/"
                                :enable-colbert? false
@@ -234,6 +333,7 @@
           (println "\n⚠️  Evolutionary Builder JSON: No concepts extracted (check LLM response)"))))
     (catch Exception e
       (println "   ❌ Error:" (.getMessage e))
+      (.printStackTrace e)
       (println "\n❌ Evolutionary Builder JSON: FAILED"))))
 
 ;; =============================================================================
@@ -241,7 +341,8 @@
 ;; =============================================================================
 
 (defn run-all-verifications!
-  "Run all verification tests."
+  "Run all verification tests including LLM tests.
+   Call (setup-openrouter! \"your-api-key\") first, or set OPENROUTER_API_KEY env var."
   []
   (println "\n" (apply str (repeat 60 "=")) "\n")
   (println "  ORC-001 & ORC-002 VERIFICATION SUITE")
@@ -253,17 +354,12 @@
 
   ;; Tests that require LLM
   (println "\n--- LLM-Required Tests ---")
-  (println "The following tests require LLM API access.")
-  (println "If they fail, ensure ANTHROPIC_API_KEY or OPENAI_API_KEY is set.\n")
-
-  ;; Uncomment these to run LLM tests:
-  ;; (test-json-extraction!)
-  ;; (test-evolutionary-builder-json!)
+  (println "Running LLM tests with OpenRouter...")
+  (test-json-extraction!)
+  (test-evolutionary-builder-json!)
 
   (println "\n" (apply str (repeat 60 "=")) "\n")
   (println "  VERIFICATION COMPLETE")
-  (println "\n  Code-only tests: PASSED")
-  (println "  LLM tests: Skipped (uncomment in script to run)")
   (println "\n" (apply str (repeat 60 "=")) "\n"))
 
 ;; =============================================================================
@@ -279,18 +375,34 @@
   (println "\n✅ Quick check complete - all code-level tests passed"))
 
 (comment
+  ;; ==========================================================================
   ;; Run in REPL:
+  ;; ==========================================================================
 
   ;; Quick check (no LLM needed)
   (quick-check!)
 
-  ;; Full verification (requires LLM)
+  ;; ==========================================================================
+  ;; Full verification with LLM - requires OpenRouter API key
+  ;; ==========================================================================
+
+  ;; Option 1: Pass API key directly
+  (setup-openrouter! "sk-or-v1-your-api-key-here")
   (run-all-verifications!)
 
+  ;; Option 2: Use environment variable (set OPENROUTER_API_KEY first)
+  (setup-openrouter!)
+  (run-all-verifications!)
+
+  ;; ==========================================================================
   ;; Individual tests
-  (test-json-structure-analysis!)
-  (test-ontology-id-scoping!)
-  (test-json-extraction!)  ;; Requires LLM
-  (test-evolutionary-builder-json!)  ;; Requires LLM
+  ;; ==========================================================================
+  (test-json-structure-analysis!)  ;; No LLM
+  (test-ontology-id-scoping!)       ;; No LLM
+
+  ;; LLM tests - call setup-openrouter! first
+  (setup-openrouter! "your-key")
+  (test-json-extraction!)
+  (test-evolutionary-builder-json!)
 
   ,)
