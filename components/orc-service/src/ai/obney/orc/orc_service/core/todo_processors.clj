@@ -129,6 +129,460 @@
     (assoc node :instruction override)
     node))
 
+(defn- maybe-lookup-parent-summary
+  "Best-effort lookup of the parent sheet's consolidated :summary from
+   the ontology corpus. Returns the summary string when available, nil
+   otherwise. Graceful when the ontology component isn't loaded.
+
+   The parent sheet's description lives in the :tree-fingerprint
+   granularity, keyed by the sheet's canonical-tree-raw hash. C-2c-2's
+   first cut uses sheet-id as a proxy — the corpus may have the
+   description tagged under either form. We try sheet-id first; later
+   slices can add fingerprint translation."
+  [context sheet-id]
+  (try
+    (let [get-description (requiring-resolve
+                            'ai.obney.orc.ontology.interface/get-description)]
+      (when get-description
+        (let [body (get-description context :tree-fingerprint sheet-id)]
+          (:summary body))))
+    (catch Exception _ nil)))
+
+(defn maybe-auto-classify-and-set-context
+  "C-2c-2: when the node is an :rlm repl-researcher with
+   :auto-classify? true and no :context already set, run the classifier
+   and inject the resulting :tree-id into the node's :context.
+
+   Behavior:
+     - :context already set on node      → no-op, return node
+     - :auto-classify? false or absent   → no-op, return node
+     - else                              → call classify-task, dispatch
+                                            :ontology/assign-task-class
+                                            command, set :context
+
+   Context map must carry :sheet-id and :tick-id so the emitted event
+   carries the provenance triple needed for downstream auditing.
+
+   Returns the (possibly :context-modified) node map. Side effect: when
+   the classifier runs, an :ontology/task-classified event lands in the
+   store via the dispatched command."
+  [node context]
+  (let [rlm-config (:rlm node)
+        rlm-map? (map? rlm-config)
+        auto? (and rlm-map? (true? (:auto-classify? rlm-config)))
+        already-set? (some? (:context node))]
+    (if (or already-set? (not auto?))
+      node
+      (let [threshold (or (:auto-classify-threshold rlm-config) 0.7)
+            ;; Behavioral side surfaces few-shot examples to the model.
+            ;; Set lower than the structural match threshold (0.7) so we
+            ;; can show UP TO top-N behaviors when there are adjacent
+            ;; matches, but high enough that low-signal candidates
+            ;; (random pattern matches at <0.6) don't take up prompt
+            ;; tokens. Matches the min-display-confidence floor used
+            ;; for the structural side downstream. Override per-task
+            ;; via :rlm {:auto-classify-behavioral-threshold X}.
+            behavioral-threshold (or (:auto-classify-behavioral-threshold rlm-config)
+                                     0.6)
+            classify-task (requiring-resolve
+                            'ai.obney.orc.ontology.interface/classify-task)
+            classify-behaviors (requiring-resolve
+                                 'ai.obney.orc.ontology.interface/classify-behaviors)
+            build-sig (requiring-resolve
+                        'ai.obney.orc.ontology.core.task-classifier/build-task-signature)
+            signature (build-sig node)
+            parent-summary (maybe-lookup-parent-summary context (:sheet-id context))
+            result (classify-task context
+                     (cond-> {:task-signature signature
+                              :threshold threshold}
+                       parent-summary (assoc :parent-summary parent-summary)))
+            ;; R05b: after the structural classification, query the
+            ;; behavioral corpus with the structural :assigned-tree-id
+            ;; as :structural-context so behaviors that compose into
+            ;; this shell are surfaced. composes-into edges are
+            ;; retrieval hints — empty filtered set falls back to the
+            ;; unfiltered candidate set in classify-behaviors itself.
+            behavioral-result (classify-behaviors context
+                                {:task-signature signature
+                                 :threshold behavioral-threshold
+                                 :structural-context (:assigned-tree-id result)
+                                 ;; Bump top-n past classify-behaviors's
+                                 ;; default of 3 so the prepend's behavioral
+                                 ;; section can surface up to 5 candidates
+                                 ;; (matches behavioral-cap downstream).
+                                 :top-n 5})
+            behaviors (:behaviors behavioral-result)]
+        (cp/process-command
+          (assoc context :command
+                 (cond-> {:command/name :ontology/assign-task-class
+                          :command/id (random-uuid)
+                          :command/timestamp (time/now)
+                          :source-sheet-id (:sheet-id context)
+                          :source-tick-id (:tick-id context)
+                          :source-node-id (:id node)
+                          :assigned-tree-id (:assigned-tree-id result)
+                          :confidence (:confidence result)
+                          :top-candidates (:top-candidates result)
+                          :reasoning (or (:reasoning result) "")
+                          :was-fresh-mint? (:was-fresh-mint? result)}
+                   ;; C-2d-2: forward :parent-tree-id when walk-down returned
+                   ;; one. Nil means top-level match or walk-down disabled.
+                   (some? (:parent-tree-id result))
+                   (assoc :parent-tree-id (:parent-tree-id result))
+                   ;; R01: forward :rerank-fallback? as :rerank-failed?
+                   ;; when classify-task observed a reranker fallback.
+                   ;; Omit when false (legacy event shape preserved).
+                   (true? (:rerank-fallback? result))
+                   (assoc :rerank-failed? true)
+                   ;; R05b: forward behavioral classification when present.
+                   ;; Omit when nil/empty so the legacy event shape is
+                   ;; preserved on opt-out / failure paths.
+                   (seq behaviors)
+                   (assoc :behavioral-subtrees behaviors))))
+        (println (format "[DEBUG RLM] node '%s' auto-classified → %s (confidence %.2f, was-fresh-mint? %s, behavioral-count %d)"
+                         (or (:name node) (str (:id node)))
+                         (:assigned-tree-id result)
+                         (double (or (:confidence result) 0.0))
+                         (:was-fresh-mint? result)
+                         (count (:behaviors behavioral-result))))
+        ;; R-Inject: stash the full classifier payload on :context so
+        ;; apply-r05-classifier-context can prepend it to the model's
+        ;; Phase 1 prompt. :tree-id stays at the top level for downstream
+        ;; consumers (event tagging, telemetry); :self-learning? is
+        ;; dropped (it only existed for the legacy apply-ontology-context
+        ;; path which R-Inject replaces in the pipeline).
+        (assoc node :context
+               {:tree-id (:assigned-tree-id result)
+                :r05-classifier
+                {:structural {:assigned-tree-id (:assigned-tree-id result)
+                              :confidence (:confidence result)
+                              :was-fresh-mint? (:was-fresh-mint? result)
+                              :reasoning (:reasoning result)
+                              :top-candidates (vec (:top-candidates result))
+                              :rerank-fallback? (boolean (:rerank-fallback? result))}
+                 :behavioral {:behaviors (vec (:behaviors behavioral-result))
+                              :rerank-fallback? (boolean
+                                                  (:rerank-fallback? behavioral-result))}}})))))
+
+;; =============================================================================
+;; R-Inject — R05 classifier output reaches the model's Phase 1 prompt
+;; =============================================================================
+;;
+;; The wedge classifies the task (structural + behavioral) and stashes the
+;; full envelope on the node's :context.:r05-classifier payload. This
+;; helper reads the payload and prepends a principle-shaped block to
+;; :instruction so the model sees the corpus's actual examples (with
+;; reranker reasoning + seed :summary guidance) when designing its tree.
+;;
+;; Edge cases:
+;;   - structural :was-fresh-mint? true   → "no high-confidence" branch
+;;   - top-1 behavioral fresh-mint marker → "consider minting" branch
+;;   - :rerank-fallback? on either axis   → caution annotation
+;;
+;; Each branch is principle-shaped — no hardcoded phrase matches against
+;; instruction text.
+;; =============================================================================
+
+(def ^:private behavioral-cap
+  "Maximum behavioral suggestions surfaced to the model. We aim for up
+   to 5 strong matches; weaker ones below min-display-confidence are
+   filtered out before this cap takes effect. The wedge calls
+   classify-behaviors with `:top-n 5` so the candidate set is sized
+   to feed this cap. Adjust both in tandem if changing."
+  5)
+
+(def ^:private structural-cap
+  "Maximum structural candidates surfaced to the model. classify-task
+   retrieves :k 5 from the corpus; the reranker scores all of them.
+   We aim for up to 5 strong matches; the min-display-confidence floor
+   below prunes weak ones. So you see breadth WHEN the corpus has
+   strong adjacent shapes, and a tight focused set when it doesn't."
+  5)
+
+(def ^:private min-display-confidence
+  "Floor for surfacing a candidate in the prepend. Candidates that
+   score below this on the reranker are dropped before the cap is
+   applied — keeps weak/noisy matches out of the model's prompt
+   regardless of how many slots we'd otherwise have. Tuned to the
+   reranker's typical 'cliff' between strong matches (>=0.85) and
+   noise (<=0.4): 0.6 catches the middle ground where a candidate
+   is plausibly related but not a clear fit."
+  0.6)
+
+(def ^:private traits-per-seed-cap
+  "Per matched seed, the max number of strengths AND max number of
+   weaknesses included in the prepend. Strengths/weaknesses are sorted
+   by :confidence descending; the top-N from each list are surfaced.
+   Caps prompt bloat — production seeds may have 3-5 strengths each."
+  2)
+
+(defn- truncate
+  "Cap a string at n chars for prepend safety (e.g. unusually long
+   :recommended-pattern snippets). Returns nil for nil input."
+  [s n]
+  (cond
+    (nil? s) nil
+    (<= (count s) n) s
+    :else (str (subs s 0 n) "…[truncated]")))
+
+(defn- format-principle-entry
+  "Render one entry from :strengths or :weaknesses as a prose block the
+   model can read. `kind` is :strength or :weakness; selects which
+   fields to include and how to label them."
+  [kind entry]
+  (let [{:keys [trait good-when avoid-when recommended-pattern
+                recommended-alternative confidence evidence-count]} entry
+        ev-suffix (cond
+                    (and confidence evidence-count)
+                    (format " (confidence %.2f, evidence-count %d)"
+                            (double confidence) (int evidence-count))
+                    confidence
+                    (format " (confidence %.2f)" (double confidence))
+                    :else "")]
+    (case kind
+      :strength
+      (str "  - **Trait:** " (or trait "(no trait recorded)") ev-suffix "\n"
+           (when good-when
+             (str "    - Good when: " good-when "\n"))
+           (when recommended-pattern
+             (str "    - Worked example DSL (corpus reference — adapt to your task):\n"
+                  "      ```clojure\n"
+                  "      " (truncate recommended-pattern 1200) "\n"
+                  "      ```\n")))
+      :weakness
+      (str "  - **Failure mode:** " (or trait "(no trait recorded)") ev-suffix "\n"
+           (when avoid-when
+             (str "    - Avoid when: " avoid-when "\n"))
+           (when recommended-alternative
+             (str "    - Recommended fix: " recommended-alternative "\n"))))))
+
+(defn- format-seed-body
+  "Render the rich seed body (capabilities + strengths + weaknesses +
+   representative-uses) as prose the model can read. Each section is
+   optional — missing fields are skipped silently. Returns nil if the
+   body is nil (caller-side gate).
+
+   `traits-cap` is the per-list maximum count for strengths and
+   weaknesses (sorted by :confidence desc before truncation)."
+  [body traits-cap]
+  (when body
+    (let [{:keys [capabilities strengths weaknesses representative-uses]} body
+          rank-by-conf (fn [coll] (sort-by (fn [e] (- (double (or (:confidence e) 0.0))))
+                                           (or coll [])))
+          top-strengths (take traits-cap (rank-by-conf strengths))
+          top-weaknesses (take traits-cap (rank-by-conf weaknesses))]
+      (str
+        (when (seq capabilities)
+          (str "Capabilities:\n"
+               (->> capabilities (map (fn [c] (str "  - " c))) (str/join "\n"))
+               "\n\n"))
+        (when (seq top-strengths)
+          (str "Strengths (proven traits — these patterns have been observed to work; mimic where they fit, adapt as needed):\n"
+               (->> top-strengths
+                    (map (partial format-principle-entry :strength))
+                    (str/join "\n"))
+               "\n"))
+        (when (seq top-weaknesses)
+          (str "Weaknesses (observed failure modes — avoid these patterns, apply the recommended fix where applicable):\n"
+               (->> top-weaknesses
+                    (map (partial format-principle-entry :weakness))
+                    (str/join "\n"))
+               "\n"))
+        (when (seq representative-uses)
+          (str "Representative uses (concrete tasks this pattern has shipped on):\n"
+               (->> representative-uses (map (fn [u] (str "  - " u))) (str/join "\n"))
+               "\n"))))))
+
+(defn- fetch-tree-body
+  "Pull a tree-fingerprint description body via ontology/get-description.
+   Returns nil on any failure (helper is best-effort — the prepend
+   degrades to summary-only when the full body is unavailable)."
+  [ctx target-id]
+  (when target-id
+    (let [get-description (requiring-resolve
+                            'ai.obney.orc.ontology.interface/get-description)]
+      (try
+        (when get-description
+          (get-description ctx :tree-fingerprint target-id))
+        (catch Exception _ nil)))))
+
+(defn- derive-seed-name
+  "Extract a human-readable seed name from the start of a `:summary`
+   string. Most seeds begin with their own name followed by a stative
+   verb or 'trees' / 'is' / 'evaluates' / etc.:
+     'Legal-issue-detection trees flag...' → 'Legal-issue-detection'
+     'Risk-analysis trees identify...'     → 'Risk-analysis'
+     'Critique evaluates...'                → 'Critique'
+     'Comparative summary is the...'        → 'Comparative summary'
+     'ResearchThenSynthesize is a...'       → 'ResearchThenSynthesize'
+
+   Falls back to nil when no clear name can be extracted (caller can
+   then use a generic header). Best-effort — corpus authors should keep
+   summaries written with the name first to make this work."
+  [summary]
+  (when (and (string? summary) (not (str/blank? summary)))
+    (let [name-tail-re #"(?i)^(.+?)\s+(trees?|is|are|evaluates?|reasons?|integrates?|turns?|checks?|flag|identif(?:y|ies)|compare|extract|generates?|produces?|synthes(?:ize|izes)|investigates?|handles?|composes?|consists?|builds?|classifies?|validates?|gather|gathers|analyzes?)\b"
+          m (re-find name-tail-re summary)]
+      (when m
+        (let [candidate (str/trim (nth m 1))]
+          ;; Sanity-bound: anything longer than ~50 chars is probably
+          ;; the whole first sentence, not a name. Return nil so the
+          ;; caller falls back to the generic header.
+          (when (<= (count candidate) 50)
+            candidate))))))
+
+(defn- format-structural-candidate
+  "Render one structural candidate with its full seed body.
+   `idx` is the 1-based position in the top-N list (used to label
+   primary vs alternative)."
+  [ctx idx candidate]
+  (let [{:keys [content fitness-score reasoning rerank-source
+                document-metadata]} candidate
+        target-id (:target-id document-metadata)
+        body (fetch-tree-body ctx target-id)
+        rich (format-seed-body body traits-per-seed-cap)
+        seed-name (derive-seed-name content)
+        rank-label (cond
+                     (= 1 idx) "Top match"
+                     :else (str "Alternative #" (dec idx)))
+        ;; If the seed name was extractable, the header reads
+        ;;   #### Top match — Legal-issue-detection (confidence: 1.00)
+        ;; Falling back to just the rank label when extraction fails.
+        header-label (if seed-name
+                       (str rank-label " — " seed-name)
+                       rank-label)]
+    (str "#### " header-label " (confidence: "
+         (format "%.2f" (double (or fitness-score 0.0))) ")"
+         (when (= :colbert-fallback rerank-source)
+           " [reranker fell back to ColBERT — treat with caution]")
+         "\n"
+         "Why this fits: " (or reasoning "(no reasoning recorded)") "\n\n"
+         "Pattern guidance (seed `:summary`):\n"
+         (or content "(no guidance content recorded)") "\n\n"
+         (or rich ""))))
+
+(defn- format-structural-section [ctx structural]
+  (let [{:keys [was-fresh-mint? top-candidates rerank-fallback?]} structural
+        ;; Apply the display-confidence floor BEFORE the cap so a weak
+        ;; candidate doesn't push out the slot for a stronger one. In
+        ;; practice classify-task returns 5; the reranker scores spread
+        ;; from 1.00 down to 0.0 — only the >= floor entries reach the
+        ;; model.
+        strong-candidates (filter
+                            (fn [c] (>= (double (or (:fitness-score c) 0.0))
+                                        min-display-confidence))
+                            (or top-candidates []))
+        candidates (take structural-cap strong-candidates)]
+    (cond
+      ;; No high-confidence match — caller fresh-minted at root.
+      was-fresh-mint?
+      (str "### Structural patterns\n"
+           "No high-confidence structural match was returned by the classifier. "
+           "Design at the abstract pattern level — the structural shape is the "
+           "primary signal you have. The behavioral suggestions below reflect "
+           "what the task ACCOMPLISHES.\n")
+
+      ;; Real match with content.
+      (seq candidates)
+      (str "### Structural patterns (top "
+           (count candidates)
+           " from corpus retrieval)\n"
+           (when rerank-fallback?
+             "Classifier reranker fell back to similarity scoring; treat suggestions with caution and prioritize your own reading of the task.\n\n")
+           (->> candidates
+                (map-indexed (fn [i c] (format-structural-candidate ctx (inc i) c)))
+                (str/join "\n"))))))
+
+(defn- format-behavioral-entry [ctx idx behavior]
+  (let [{:keys [behavior-id confidence was-fresh-mint? reasoning
+                rerank-source]} behavior]
+    (if was-fresh-mint?
+      (str (inc idx) ". Behavioral suggestion (no candidate above threshold)\n"
+           "   No behavioral candidate above threshold was found in the "
+           "corpus. Consider whether your tree introduces a new behavioral "
+           "abstraction worth contributing via `(mint-behavior! ...)`.\n")
+      (let [body (fetch-tree-body ctx behavior-id)
+            summary (:summary body)
+            rich (format-seed-body body traits-per-seed-cap)
+            seed-name (derive-seed-name summary)
+            header-label (if seed-name
+                           (str (inc idx) ". Behavioral: " seed-name)
+                           (str (inc idx) ". Behavioral suggestion"))]
+        (str header-label " (confidence: "
+             (format "%.2f" (double (or confidence 0.0))) ")"
+             (when (= :colbert-fallback rerank-source)
+               " [reranker fell back to ColBERT — treat with caution]")
+             "\n"
+             "   Why this fits: " (or reasoning "(no reasoning recorded)") "\n\n"
+             "   Guidance (seed `:summary`):\n"
+             "   " (or summary reasoning "(no guidance recorded)") "\n\n"
+             (or rich ""))))))
+
+(defn- format-behavioral-section [ctx behavioral]
+  (let [{:keys [behaviors rerank-fallback?]} behavioral
+        entries (take behavioral-cap behaviors)]
+    (when (seq entries)
+      (str "### Behavioral competencies (top " (count entries)
+           " from corpus retrieval)\n"
+           (when rerank-fallback?
+             "Classifier reranker fell back on the behavioral axis; treat the suggestions below with caution.\n\n")
+           (->> entries
+                (map-indexed (partial format-behavioral-entry ctx))
+                (str/join "\n"))))))
+
+(defn apply-r05-classifier-context
+  "R-Inject: prepend R05's classifier output to the node's :instruction
+   when the wedge has stashed a :r05-classifier payload on :context.
+
+   When :r05-classifier is absent (node not auto-classified or :context
+   set manually), returns the node unchanged. Otherwise prepends a
+   principle-shaped block — structural pattern + behavioral top-3 with
+   reasoning + seed :summary guidance — so the model designing the tree
+   in Phase 1 sees the corpus's actual examples.
+
+   Pure transformation; the only effect is reading description bodies
+   for behavioral seeds via ontology/get-description (3 reads max)."
+  [node ctx]
+  (let [payload (get-in node [:context :r05-classifier])]
+    (if-not payload
+      node
+      (let [structural (:structural payload)
+            behavioral (:behavioral payload)
+            block (str "## Suggested patterns from corpus\n\n"
+                       "These are concrete EXAMPLES retrieved from the seed corpus based on "
+                       "classification of your task. Each example includes:\n"
+                       "  - WHY the candidate fits (reranker reasoning)\n"
+                       "  - The pattern's prose summary (seed `:summary`)\n"
+                       "  - Capabilities it provides\n"
+                       "  - Proven STRENGTHS — traits observed to work, each with a worked-example DSL snippet you can adapt\n"
+                       "  - Observed WEAKNESSES — failure modes others hit, with the recommended fix\n"
+                       "  - Representative uses where this pattern has shipped\n\n"
+                       "Mimic what works, modify what's risky for your task, OR design from scratch. They are not mandates — your job is to design the RIGHT tree for THIS task, using the corpus as evidence not gospel.\n\n"
+                       (format-structural-section ctx structural)
+                       "\n"
+                       (format-behavioral-section ctx behavioral)
+                       "\n---\n")
+            result (update node :instruction (fn [inst] (str block inst)))
+            ;; Trace capture: write the rendered prepend + full classifier
+            ;; payload to a sidecar file keyed by sheet-id so the bench
+            ;; runner can pair it with the saved EDN. Best-effort; failures
+            ;; are silent (we don't want trace IO to break the request).
+            sheet-id (:sheet-id ctx)]
+        (when sheet-id
+          (try
+            (spit (str "/tmp/r-inject-trace-" sheet-id ".edn")
+                  (pr-str {:rendered-at (str (java.time.Instant/now))
+                           :prepend block
+                           :prepend-chars (count block)
+                           :original-instruction-chars (- (count (:instruction result))
+                                                          (count block))
+                           :classifier-payload payload}))
+            (catch Exception _ nil)))
+        (println (format "[DEBUG R-Inject] prepended %d chars (instruction now %d chars)"
+                         (count block)
+                         (count (:instruction result))))
+        result))))
+
 (defn- apply-ontology-context
   "If node has :context parameter, inject ontology context into instruction.
 
@@ -298,7 +752,11 @@
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
                  (apply-instruction-override overrides)
-                 (apply-ontology-context context))]
+                 ;; R-Inject: leaves don't carry :r05-classifier (only the
+                 ;; repl-researcher path runs the wedge), so this is a
+                 ;; no-op for leaves. Calling the same helper everywhere
+                 ;; gives the pipeline a single context-prepend contract.
+                 (apply-r05-classifier-context context))]
     (when (= :leaf (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             ;; Merge event inputs into blackboard (e.g., map-each item values)
@@ -439,7 +897,18 @@
         overrides (resolve-instruction-overrides context tick-id)
         node (-> (get nodes-by-id node-id)
                  (apply-instruction-override overrides)
-                 (apply-ontology-context context))]
+                 (maybe-auto-classify-and-set-context
+                   (assoc context :sheet-id sheet-id :tick-id tick-id))
+                 ;; R-Inject: replaces the legacy apply-ontology-context
+                 ;; call. The wedge stashes R05's full classifier payload
+                 ;; on :context; this helper prepends a principle-shaped
+                 ;; "Suggested patterns from corpus" block to :instruction
+                 ;; so the model designs trees informed by real corpus
+                 ;; examples (with reasoning + seed :summary guidance).
+                 ;; Pass sheet-id explicitly so the helper can write a
+                 ;; sidecar trace file the bench runner picks up.
+                 (apply-r05-classifier-context
+                   (assoc context :sheet-id sheet-id :tick-id tick-id)))]
     (when (= :repl-researcher (:type node))
       (let [raw-blackboard (resolve-blackboard context sheet-id tick-id)
             blackboard (reduce (fn [bb [k v]]
@@ -455,7 +924,7 @@
             (let [result (if provider
                            (executor/execute-repl-researcher node blackboard provider context)
                            {:status :failure :error "No DSCloj provider configured"})
-                  {:keys [status outputs error duration-ms generated-tree-raw usage iterations]} result
+                  {:keys [status outputs error duration-ms generated-tree-raw iteration-reasonings usage iterations]} result
                   ;; Track usage for this tick (RLM mode aggregates all LLM calls)
                   _ (when usage (add-usage! tick-id usage))
                   ;; Handle :tree-generated status - only propagate raw tree (canonical contains fns)
@@ -473,7 +942,13 @@
                   ;; Include sanitized generated-tree-raw in outputs when present
                   ;; (for Phase 2 auto-execution observability)
                   effective-outputs (cond-> (or outputs {})
-                                      sanitized-tree-raw (assoc :generated-tree-raw sanitized-tree-raw))]
+                                      sanitized-tree-raw (assoc :generated-tree-raw sanitized-tree-raw)
+                                      (seq iteration-reasonings) (assoc :iteration-reasonings (vec iteration-reasonings))
+                                      ;; Iteration history — code + result + stdout + error + vars-created
+                                      ;; per iteration. Surfaced so bench reports can show the model's
+                                      ;; full Phase 1 work (including syntax-error retries) alongside
+                                      ;; its reasoning + the final tree.
+                                      (seq iterations) (assoc :iterations (vec iterations)))]
               ;; Emit :rlm/tree-generated event when tree is generated
               ;; Check for generated-tree-raw presence (Phase 2 auto-execution returns :success with this field)
               (when (some? generated-tree-raw)
@@ -1660,6 +2135,63 @@
 ;; Execution Completion Delivery
 ;; =============================================================================
 
+(defn- build-node-trace
+  "Build a per-leaf-node execution trace for a completed tick. Reads all
+   `:sheet/node-execution-completed` events with timestamp >= the tick's
+   start time, capturing the parent tick's nodes AND any Phase 2 child
+   sheet/tick events (which have different tick-ids but are spawned from
+   within this tick's lifecycle).
+
+   Returns a vector of selected per-event fields, sorted by timestamp.
+   The shape mirrors what bench harnesses (predict_rlm_comparison, R-Inject)
+   used to query themselves — it's now a first-class part of the tick
+   completion result so consumers don't have to compose it.
+
+   Each entry:
+     {:node-id <uuid> :sheet-id <uuid> :tick-id <uuid> :status <kw>
+      :timestamp <OffsetDateTime>
+      :inputs {…optional…} :writes {…optional…}
+      :usage {…optional…} :duration-ms <ms optional>}
+
+   When events of that type haven't been emitted (or event-store is nil),
+   returns an empty vector. Never throws."
+  [event-store tenant-id tick-id]
+  (try
+    (when event-store
+      (let [;; Find this tick's :sheet/tree-tick-started timestamp so we
+            ;; filter out completions from prior runs.
+            tick-events (into [] (es/read event-store
+                                  (cond-> {:tags #{[:tick tick-id]}}
+                                    tenant-id (assoc :tenant-id tenant-id))))
+            started-event (first (filter #(= :sheet/tree-tick-started (:event/type %))
+                                         tick-events))
+            start-ts (some-> started-event :event/timestamp)
+            ;; Query ALL completions across the event store (parent +
+            ;; any child sheets spawned during Phase 2). The timestamp
+            ;; filter scopes us to events emitted on or after this
+            ;; tick's start.
+            all-completions (into [] (es/read event-store
+                                      (cond-> {:types #{:sheet/node-execution-completed}}
+                                        tenant-id (assoc :tenant-id tenant-id))))]
+        (->> all-completions
+             (filter (fn [ev]
+                       (let [ts (:event/timestamp ev)]
+                         (or (nil? start-ts)
+                             (.isAfter ^java.time.OffsetDateTime ts start-ts)
+                             (.isEqual ^java.time.OffsetDateTime ts start-ts)))))
+             (sort-by :event/timestamp)
+             (mapv (fn [ev]
+                     (cond-> {:node-id (:node-id ev)
+                              :sheet-id (:sheet-id ev)
+                              :tick-id (:tick-id ev)
+                              :status (:status ev)
+                              :timestamp (:event/timestamp ev)}
+                       (:inputs ev) (assoc :inputs (:inputs ev))
+                       (:writes ev) (assoc :writes (:writes ev))
+                       (:usage ev) (assoc :usage (:usage ev))
+                       (:duration-ms ev) (assoc :duration-ms (:duration-ms ev))))))))
+    (catch Exception _ [])))
+
 (defn- aggregate-tick-by-node
   "Read all :sheet/node-execution-completed events for the given tick-id
    from the event store, and aggregate per-node usage with a structured
@@ -1748,7 +2280,12 @@
       (let [usage (get-tick-usage tick-id)
             by-node (aggregate-tick-by-node event-store tenant-id tick-id)
             usage-with-breakdown (cond-> usage
-                                   (seq by-node) (assoc :by-node by-node))]
+                                   (seq by-node) (assoc :by-node by-node))
+            ;; Build per-leaf-node execution trace from the event store.
+            ;; First-class field — consumers (bench harnesses, eval frameworks,
+            ;; ontology consolidators) read `:node-trace` from the result
+            ;; instead of querying the event store themselves.
+            node-trace (build-node-trace event-store tenant-id tick-id)]
         ;; Clean up budget and usage tracking for this tick
         (clear-llm-count! tick-id)
         (clear-tick-usage! tick-id)
@@ -1772,7 +2309,9 @@
                    :trace-id tick-id
                    :error error}
             ;; Include usage if any LLM calls were made
-            (pos? (:total-tokens usage 0)) (assoc :usage usage-with-breakdown)))))
+            (pos? (:total-tokens usage 0)) (assoc :usage usage-with-breakdown)
+            ;; Always include :node-trace when we have any leaf events.
+            (seq node-trace) (assoc :node-trace node-trace)))))
     ;; No events to emit
     nil))
 

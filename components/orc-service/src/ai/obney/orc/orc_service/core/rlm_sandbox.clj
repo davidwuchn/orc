@@ -29,6 +29,8 @@
             [litellm.router :as litellm-router]
             [malli.core :as m]
             [ai.obney.grain.event-store-v3.interface :as es]
+            [ai.obney.grain.command-processor-v2.interface :as cp]
+            [ai.obney.grain.time.interface :as time]
             [ai.obney.orc.orc-service.core.sci-sandbox :as base-sandbox]
             [ai.obney.orc.orc-service.core.rlm-dsl :as rlm-dsl]
             [ai.obney.orc.orc-service.core.rlm-drill-down :as drill]
@@ -316,7 +318,8 @@
    - :tenant-id - Optional; passed through to the event-store read"
   [{:keys [provider blackboard declared-writes parent-trace-id
            call-tool-fn mcp-tools browser-tools sandbox-vars usage-tracker
-           recursive? event-store tenant-id]}]
+           recursive? event-store tenant-id
+           sheet-id tick-id command-registry]}]
   (let [;; Atom to capture final! output
         final-output (atom nil)
 
@@ -555,6 +558,75 @@
                           ;; Return the canonical form
                           canonical))
 
+        ;; R05c — mint-behavior! primitive
+        ;;
+        ;; (mint-behavior! "name" body) → "<uuid-string>"
+        ;; (mint-behavior! "name" body :parent parent-id) → "<uuid-string>"
+        ;;
+        ;; Dispatches :ontology/mint-behavioral-subtree with
+        ;; :provenance :agent-minted stamped automatically + :minted-by-*
+        ;; populated from build-rlm-context's :sheet-id / :tick-id opts.
+        ;; Returns the new behavior's UUID as a STRING so the agent can
+        ;; interpolate it into subsequent DSL forms.
+        ;;
+        ;; Throws when the sandbox wasn't given a command context (no
+        ;; :event-store / :command-registry / :sheet-id / :tick-id) so
+        ;; the failure surfaces loudly rather than silently no-opping.
+        command-context-ready?
+        (and (some? event-store)
+             (some? command-registry)
+             (some? sheet-id)
+             (some? tick-id))
+        mint-behavior!-fn
+        (fn [name body & kw-args]
+          (when-not command-context-ready?
+            (throw (ex-info
+                     (str "mint-behavior! requires a command context "
+                          "(needs :event-store + :command-registry + :sheet-id + :tick-id "
+                          "in build-rlm-context opts). The sandbox was built without one — "
+                          "running in dry-run/test mode.")
+                     {:missing (cond-> []
+                                 (nil? event-store) (conj :event-store)
+                                 (nil? command-registry) (conj :command-registry)
+                                 (nil? sheet-id) (conj :sheet-id)
+                                 (nil? tick-id) (conj :tick-id))})))
+          (let [opts-map (apply hash-map kw-args)
+                parent (:parent opts-map)
+                parent-as-uuid (when parent
+                                 (cond
+                                   (uuid? parent) parent
+                                   (string? parent) (try
+                                                      (java.util.UUID/fromString parent)
+                                                      (catch Exception _ parent))
+                                   :else parent))
+                cmd-result (cp/process-command
+                             (assoc
+                               (cond-> {:event-store event-store
+                                        :command-registry command-registry
+                                        :sheet-id sheet-id
+                                        :tick-id tick-id}
+                                 tenant-id (assoc :tenant-id tenant-id))
+                               :command
+                               (cond-> {:command/name :ontology/mint-behavioral-subtree
+                                        :command/id (random-uuid)
+                                        :command/timestamp (time/now)
+                                        :name name
+                                        :body body
+                                        :provenance :agent-minted
+                                        :minted-by-sheet-id sheet-id
+                                        :minted-by-tick-id tick-id}
+                                 parent-as-uuid (assoc :parent-behavior parent-as-uuid))))
+                ;; The mint defcommand emits both events; the audit-trail
+                ;; carries the freshly-generated target-id. The event body
+                ;; fields land at the top level of each event map (Grain
+                ;; flattens them), so :target-id is accessed directly.
+                minted-event (->> (:command-result/events cmd-result)
+                                  (filter #(= :ontology/behavioral-subtree-minted
+                                              (:event/type %)))
+                                  first)
+                target-id (:target-id minted-event)]
+            (str target-id)))
+
         ;; ---------------------------------------------------------------
         ;; R-2: Drill-down primitives, exposed ONLY when :recursive? true.
         ;;
@@ -632,7 +704,12 @@
                              'fallback fallback-fn
                              'condition condition-fn
                              'code code-fn
-                             'emit-tree! emit-tree!-fn}
+                             'emit-tree! emit-tree!-fn
+                             ;; R05c: minting affordance for the recursive RLM
+                             ;; researcher. Always exposed — agents can mint
+                             ;; behaviors in terminal mode too (a final
+                             ;; (mint-behavior! ...) before (final! ...)).
+                             'mint-behavior! mint-behavior!-fn}
                             drill-bindings)
 
         ;; Combine all bindings

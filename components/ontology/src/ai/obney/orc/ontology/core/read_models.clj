@@ -112,6 +112,17 @@
           (update-in [source-uri :related] (fnil conj #{}) target-uri)
           (update-in [target-uri :related] (fnil conj #{}) source-uri))
 
+      ;; R05a — behavior:composes-into is the bridge from behavioral
+      ;; subtrees (Layer 2) to structural shells (Layer 1). The behavior
+      ;; carries an outgoing :composes-into set of shell URIs; the shell
+      ;; carries an incoming :composed-by set of behavior URIs. R05b's
+      ;; classify-behaviors traverses these edges when narrowing
+      ;; candidates by structural-context.
+      "behavior:composes-into"
+      (-> state
+          (update-in [source-uri :composes-into] (fnil conj #{}) target-uri)
+          (update-in [target-uri :composed-by] (fnil conj #{}) source-uri))
+
       ;; Other predicates (owl:causes, etc.) - store as related
       (-> state
           (update-in [source-uri :related] (fnil conj #{}) target-uri)))))

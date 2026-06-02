@@ -818,6 +818,115 @@
              :set-at (now-str)}})]})
 
 ;; =============================================================================
+;; C-2c-2 — Auto-classifier command
+;; =============================================================================
+;;
+;; Dispatched by the executor's auto-classify wedge after `classify-task`
+;; computes a tree-class assignment. Stamps :classified-at and emits
+;; :ontology/task-classified with the full body. The [:tick tick-id] tag
+;; lets the runtime cheaply query "what was this tick's classification?"
+;; when constructing the run-result envelope.
+
+(defcommand :ontology assign-task-class
+  "C-2c-2 + C-2d-2: record an auto-classification decision. Takes the
+   result of `ontology/classify-task` plus the (source-sheet-id,
+   source-tick-id, source-node-id) provenance triple and emits
+   :ontology/task-classified. Stateless beyond the event itself; the
+   classification machinery (classify-task) is pure and runs upstream
+   in the executor wedge.
+
+   C-2d-2 — optional :parent-tree-id forwarded from the walk-down
+   classifier when the result is a deep match or fresh-mint under a
+   matched ancestor. Omitted on top-level matches and when walk-down
+   is disabled."
+  [{{:keys [source-sheet-id source-tick-id source-node-id
+            assigned-tree-id confidence top-candidates reasoning
+            was-fresh-mint? parent-tree-id rerank-failed?
+            behavioral-subtrees]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/task-classified
+      :tags #{[:tick source-tick-id]
+              [:description-target assigned-tree-id]}
+      :body (cond-> {:source-sheet-id source-sheet-id
+                     :source-tick-id source-tick-id
+                     :source-node-id source-node-id
+                     :assigned-tree-id assigned-tree-id
+                     :confidence confidence
+                     :top-candidates top-candidates
+                     :reasoning reasoning
+                     :classified-at (now-str)
+                     :was-fresh-mint? was-fresh-mint?}
+              parent-tree-id (assoc :parent-tree-id parent-tree-id)
+              ;; R01: forward reranker-failure flag when present.
+              (some? rerank-failed?) (assoc :rerank-failed? rerank-failed?)
+              ;; R05b: forward behavioral-subtree classification when
+              ;; the wedge called classify-behaviors after classify-task.
+              ;; Omit when absent so legacy events stay unchanged.
+              (some? behavioral-subtrees)
+              (assoc :behavioral-subtrees behavioral-subtrees))})]})
+
+;; =============================================================================
+;; R05c — Mint a new behavioral-subtree concept
+;; =============================================================================
+;; Closes the self-evolution loop on the agent side: the recursive RLM
+;; researcher's sandbox primitive (mint-behavior! ...) (orc-service)
+;; dispatches this command with :provenance :agent-minted, populating
+;; :minted-by-sheet-id / :minted-by-tick-id from the sandbox context.
+;; Hand-authored mints dispatch directly with :provenance :human-authored.
+;;
+;; The handler:
+;;   - Generates a fresh UUID for the new target-id (single owner of
+;;     identity; callers don't pass :target-id)
+;;   - Emits TWO events: the audit-trail :ontology/behavioral-subtree-minted
+;;     AND the standard :ontology/tree-description-updated so the R05a
+;;     reactive processor projects the concept + composes-into edges +
+;;     parent-behavior skos:broader link.
+;;   - Stamps :scope :behavioral-subtree on the description body so the
+;;     R05a processor's filter fires. Rejects bodies that explicitly
+;;     declare a different scope to surface intent mismatch.
+;;   - Stamps :minted-at ISO timestamp.
+
+(defcommand :ontology mint-behavioral-subtree
+  "R05c: mint a new behavioral-subtree concept. Returns two events:
+   the provenance-tagged audit-trail event and the standard
+   tree-description-updated event the R05a processor projects into the
+   concept graph. :provenance is MANDATORY — never default; mixing
+   agent-minted and human-authored entries breaks the audit trail for
+   future C-3 review queues."
+  [{{:keys [name body parent-behavior provenance
+            minted-by-sheet-id minted-by-tick-id]} :command}]
+  (let [body-scope (:scope body)]
+    (when (and (some? body-scope) (not= body-scope :behavioral-subtree))
+      (throw (ex-info
+               (str "mint-behavioral-subtree rejects body with :scope " body-scope
+                    "; mint affordance only routes to :behavioral-subtree.")
+               {::anom/category ::anom/incorrect
+                :body-scope body-scope}))))
+  (let [target-id (random-uuid)
+        minted-at (now-str)
+        stamped-body (cond-> (assoc body :scope :behavioral-subtree)
+                       parent-behavior (assoc :parent-behavior parent-behavior))]
+    {:command-result/events
+     [(->event
+        {:type :ontology/behavioral-subtree-minted
+         :tags #{[:behavioral-subtree-minted target-id]}
+         :body (cond-> {:target-id target-id
+                        :name name
+                        :provenance provenance
+                        :minted-at minted-at}
+                 parent-behavior   (assoc :parent-behavior parent-behavior)
+                 minted-by-sheet-id (assoc :minted-by-sheet-id minted-by-sheet-id)
+                 minted-by-tick-id  (assoc :minted-by-tick-id minted-by-tick-id))})
+      (->event
+        {:type :ontology/tree-description-updated
+         :tags #{[:description-target target-id]}
+         :body {:target-type :tree-fingerprint
+                :target-id target-id
+                :body stamped-body
+                :recorded-at minted-at}})]}))
+
+;; =============================================================================
 ;; Site Registry Commands (Generic Site Pattern Learning)
 ;; =============================================================================
 

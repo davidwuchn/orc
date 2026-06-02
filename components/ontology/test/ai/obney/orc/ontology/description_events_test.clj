@@ -302,15 +302,22 @@
             "Returned body should match the seed's :body verbatim")))))
 
 ;; =============================================================================
-;; RED #8 — every strength/weakness entry across all 22 seeds is principle-shaped
+;; RED #8 — every strength/weakness entry across all seeds is principle-shaped
 ;; =============================================================================
+;;
+;; Counts grow as new seed batches land:
+;; - C-2a-1 baseline:    22 (10 node-type + 12 tree-fingerprint)
+;; - R02 children added: 33 (10 + 23 tree-fingerprint)
+;; - R05a behavioral:    44 (10 + 23 + 11 behavioral-subtree)
+;; - R07 + Investigation: 45 (10 + 23 + 12 behavioral-subtree)
 
 (deftest all-seeds-are-principle-shaped
-  (testing "Every strength/weakness entry across all 22 seeds has the principle-entry shape (trait + guard + recommendation + confidence + evidence-count)"
+  (testing "Every strength/weakness entry across all seeds has the principle-entry shape (trait + guard + recommendation + confidence + evidence-count)"
     (let [all-seeds (concat seeds/all-node-type-seeds
-                            seeds/all-tree-fingerprint-seeds)]
-      (is (= 22 (count all-seeds))
-          (str "Expected 22 hand-authored seeds total. Got " (count all-seeds) "."))
+                            seeds/all-tree-fingerprint-seeds
+                            seeds/all-behavioral-subtree-seeds)]
+      (is (= 45 (count all-seeds))
+          (str "Expected 45 hand-authored seeds total (10 node-type + 23 tree-fingerprint + 12 behavioral-subtree). Got " (count all-seeds) "."))
       (doseq [{:keys [target-id body]} all-seeds
               entry (concat (:strengths body) (:weaknesses body))]
         (is (seeds/principle-shaped? entry)
@@ -356,28 +363,39 @@
        (filter string?)))
 
 ;; =============================================================================
-;; RED #11 — seed-all! emits all 22 seeds + each is queryable through the
+;; RED #11 — seed-all! emits every authored seed + each is queryable through the
 ;;            public get-description interface
 ;; =============================================================================
+;;
+;; Counts grow as new seed batches land — see all-seeds-are-principle-shaped
+;; for the running tally. R05a behavioral-subtree seeds are emitted via the
+;; same :ontology/record-tree-description command (their body carries
+;; :scope :behavioral-subtree to route to the R05a reactive processor) so
+;; they're queryable via get-description :tree-fingerprint just like the
+;; structural tree-fingerprint seeds.
 
-(deftest seed-all-emits-all-22-and-each-is-queryable
+(deftest seed-all-emits-everything-and-each-is-queryable
   (testing "seed-all! emits every authored seed; get-description retrieves each one's body verbatim"
     (with-test-ctx [ctx]
       (let [results (seeds/seed-all! ctx)]
-        (is (= 22 (count results))
-            (str "seed-all! should emit exactly 22 commands (10 node-type + 12 tree-fingerprint). Got " (count results))))
+        (is (= 45 (count results))
+            (str "seed-all! should emit exactly 45 commands (10 node-type + 23 tree-fingerprint + 12 behavioral-subtree). Got " (count results))))
       (Thread/sleep 200)
       (doseq [{:keys [target-id body]} seeds/all-node-type-seeds]
         (is (= body (ontology/get-description ctx :node-type target-id))
             (str "Node-type seed " (pr-str target-id) " should be queryable verbatim")))
       (doseq [{:keys [target-id body]} seeds/all-tree-fingerprint-seeds]
         (is (= body (ontology/get-description ctx :tree-fingerprint target-id))
-            (str "Tree-fingerprint seed " (pr-str target-id) " should be queryable verbatim"))))))
+            (str "Tree-fingerprint seed " (pr-str target-id) " should be queryable verbatim")))
+      (doseq [{:keys [target-id body]} seeds/all-behavioral-subtree-seeds]
+        (is (= body (ontology/get-description ctx :tree-fingerprint target-id))
+            (str "Behavioral-subtree seed " (pr-str target-id) " should be queryable verbatim"))))))
 
 (deftest all-seed-recommended-patterns-validate-via-rlm-dsl
   (testing "Every :recommended-pattern / :recommended-alternative snippet either passes rlm-dsl/rlm-dsl->orc-dsl OR uses a documented-unsupported node type (:fallback/:condition)"
     (let [all-seeds (concat seeds/all-node-type-seeds
-                            seeds/all-tree-fingerprint-seeds)]
+                            seeds/all-tree-fingerprint-seeds
+                            seeds/all-behavioral-subtree-seeds)]
       (doseq [{:keys [target-id body]} all-seeds
               snippet (snippet-strings-from-body body)]
         (let [form (try (read-string snippet)

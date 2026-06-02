@@ -7,7 +7,37 @@
    - Completion registry for sync callers waiting on async execution"
   (:require [ai.obney.orc.orc-service.core.read-models :as rm]
             [ai.obney.grain.command-processor-v2.interface :as cp]
+            [ai.obney.grain.event-store-v3.interface :as es]
             [ai.obney.grain.time.interface :as time]))
+
+;; =============================================================================
+;; C-2c-2 — auto-classification envelope helper
+;;
+;; The wedge in todo_processors.clj dispatches :ontology/assign-task-class
+;; which emits :ontology/task-classified tagged with [:tick tick-id]. After
+;; a tick completes, we query by that tag and fold the latest match into
+;; the run-result envelope as :auto-classification.
+;; =============================================================================
+
+(defn collect-tick-classification
+  "Query the event store for :ontology/task-classified events tagged with
+   [:tick tick-id]; if any, return the latest as a run-result envelope
+   map {:tree-id :confidence :top-candidates :was-fresh-mint?}. Returns
+   nil when no classification event exists for this tick."
+  [context tick-id]
+  (try
+    (when-let [event-store (:event-store context)]
+      (let [events (->> (es/read event-store
+                                  {:tenant-id (:tenant-id context)
+                                   :types #{:ontology/task-classified}
+                                   :tags #{[:tick tick-id]}})
+                        (into []))]
+        (when-let [e (last events)]
+          {:tree-id (:assigned-tree-id e)
+           :confidence (:confidence e)
+           :top-candidates (vec (take 3 (:top-candidates e)))
+           :was-fresh-mint? (:was-fresh-mint? e)})))
+    (catch Exception _ nil)))
 
 ;; =============================================================================
 ;; Snapshot Parsing for Published Version Execution
@@ -239,4 +269,9 @@
           {:status :timeout
            :error "Execution timed out"
            :duration-ms duration-ms}
-          (assoc result :duration-ms duration-ms))))))
+          (cond-> (assoc result :duration-ms duration-ms)
+            ;; Fold the C-2c-2 auto-classification envelope when an
+            ;; :ontology/task-classified event was emitted during this tick.
+            (collect-tick-classification context tick-id)
+            (assoc :auto-classification
+                   (collect-tick-classification context tick-id))))))))

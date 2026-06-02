@@ -13,8 +13,15 @@
 ;; =============================================================================
 
 (def ontology-scope
-  "Scope levels for ontology concepts"
-  [:enum :failure :success :problem :node-type :custom])
+  "Scope levels for ontology concepts. `:tree-class` is added (C-2d-1)
+   for the hierarchical tree-class taxonomy — projects tree-fingerprint
+   descriptions into the concepts graph via SKOS broader/narrower.
+   `:behavioral-subtree` is added (R05a) for the behavioral retrieval
+   dimension — reusable competencies (analysis / validation / research /
+   etc.) that compose into structural tree-class shells via
+   `behavior:composes-into` edges."
+  [:enum :failure :success :problem :node-type :custom :tree-class
+   :behavioral-subtree])
 
 (def severity-level
   "Severity levels for failures"
@@ -63,7 +70,15 @@
    The :summary field is the canonical free-text representation that
    downstream ColBERT indexing embeds for semantic retrieval. The
    structured fields (:capabilities, :strengths, :weaknesses, etc.)
-   power principle-shaped rendering for direct prompt injection."
+   power principle-shaped rendering for direct prompt injection.
+
+   The OPTIONAL :parent-tree-id (added in C-2d-1) carries the
+   tree-class parent in the SKOS broader/narrower hierarchy. The raw
+   target-id form (UUID or string fingerprint) is stored; the reactive
+   processor `on-tree-description-updated-project-concept` translates
+   to the `tree-class:<id>` URI when projecting into the concepts
+   graph. Only meaningful for :tree-fingerprint descriptions; other
+   granularities ignore it."
   [:map
    [:capabilities              [:vector :string]]
    [:strengths                 [:vector principle-entry]]
@@ -72,12 +87,64 @@
    [:avoid-when                [:vector :string]]
    [:summary                   :string]
    [:version                   :int]
-   [:consolidated-from-event-count :int]])
+   [:consolidated-from-event-count :int]
+   [:parent-tree-id            {:optional true} [:or :uuid :string]]
+   ;; R05a additions — behavioral subtree layer (C-2e foundation):
+   ;; `:scope` declares which retrieval dimension this description
+   ;; lives in. Absent or `:tree-class` keeps today's structural
+   ;; behavior. `:behavioral-subtree` routes the event to the new
+   ;; R05a reactive processor that projects under behavioral-subtree:<id>.
+   ;; `:composes-into` (only meaningful for behavioral-subtree scope)
+   ;; declares the structural tree-class shells the behavior commonly
+   ;; composes into; the processor emits behavior:composes-into edges.
+   ;; `:parent-behavior` is the SKOS broader axis WITHIN Layer 2 (nil
+   ;; for top-level behaviors). Raw target-id form is stored; the
+   ;; processor translates to the `behavioral-subtree:<id>` URI.
+   [:scope                     {:optional true} ontology-scope]
+   [:composes-into             {:optional true} [:vector [:or :uuid :string]]]
+   [:parent-behavior           {:optional true} [:or :uuid :string]]
+   ;; R05d — consolidator-inferred behavioral subtree IDs.
+   ;; When the consolidator processes a first-time tree-fingerprint
+   ;; description, it calls classify-behaviors (with the tree-class id
+   ;; as :structural-context) and stamps the top-N above-threshold
+   ;; behavior IDs here. Sticky on subsequent consolidations. Absent
+   ;; for non-tree-fingerprint granularities and on the orphan path
+   ;; (classify-behaviors returned the fresh-mint marker).
+   [:behavioral-subtree-ids    {:optional true} [:vector [:or :uuid :string]]]])
 
 (def node-instance-target
   "Identity tuple for a node-instance description target —
    [sheet-id node-id]."
   [:tuple :uuid :uuid])
+
+;; =============================================================================
+;; C-2b-2 — Reranker output shape
+;; =============================================================================
+
+(def reranked-result
+  "One entry in the C-2b-2 reranker's :reranked-results output vector.
+
+   The reranker is delta-only: it returns just the (document-id,
+   reasoning, fitness-score) triple. The full candidate (content,
+   ColBERT score, document-metadata) is JOINED back in search-descriptions
+   via :document-id, keeping the structured-output prompt small.
+
+   :fitness-score is an absolute [0.0, 1.0] interpretation per the
+   reranker instruction (1.0 = perfect fit for the caller's intent,
+   0.0 = irrelevant). Kept separate from ColBERT's raw similarity
+   :score so downstream consumers can see both signals.
+
+   `:number` (not `:double`) so that JSON-parsed integers (e.g. `1`
+   or `0`) round-trip correctly through the LLM's structured output."
+  [:map
+   [:document-id   :string]
+   [:reasoning     :string]
+   [:fitness-score [:and number? [:>= 0.0] [:<= 1.0]]]])
+
+(def reranked-results
+  "Vector of reranked-result entries, descending by :fitness-score
+   per the reranker's instruction."
+  [:vector reranked-result])
 
 ;; =============================================================================
 ;; Event Schemas
@@ -246,6 +313,76 @@
     [:target-id [:or :string :uuid]]
     [:body description-body]
     [:recorded-at :string]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2c-1 — Auto-classifier event
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; When the C-2c auto-classifier assigns a tree-class to a repl-researcher
+   ;; node at first-tick (and dispatches :ontology/assign-task-class), the
+   ;; defcommand handler emits this event. The body carries the full
+   ;; decision audit trail so downstream consumers can:
+   ;;   - replay classifications when the classifier improves
+   ;;   - dashboard low-confidence routes
+   ;;   - retroactively re-classify when the corpus grows
+   ;;
+   ;; :was-fresh-mint? distinguishes a confident-match (false; :assigned-tree-id
+   ;; matched a corpus entry above threshold) from a novel-task mint (true;
+   ;; :assigned-tree-id is a fresh UUID because no candidate passed threshold).
+
+   :ontology/task-classified
+   [:map
+    [:source-sheet-id   :uuid]
+    [:source-tick-id    :uuid]
+    [:source-node-id    :uuid]
+    [:assigned-tree-id  :uuid]
+    [:confidence        [:and number? [:>= 0.0] [:<= 1.0]]]
+    [:top-candidates    [:vector :map]]
+    [:reasoning         :string]
+    [:classified-at     :string]
+    [:was-fresh-mint?   :boolean]
+    ;; C-2d-2: when the walk-down classifier descends from an abstract
+    ;; parent OR fresh-mints under a matched ancestor, the parent's
+    ;; tree-id is carried here so the concept-graph projector can wire
+    ;; the new tree-class as a child of the parent.
+    [:parent-tree-id    {:optional true} [:or :uuid :string]]
+    ;; R01: true when the LLM reranker failed (workflow error, JSON
+    ;; parse error, all entries dropped, or thrown exception) and the
+    ;; classifier saw the pure-ColBERT fallback ordering with no
+    ;; :fitness-score / :reasoning. The :assigned-tree-id in this case
+    ;; is fresh-mint at root via the not-matched path — but driven by
+    ;; reranker failure, not legitimate low confidence. Operators
+    ;; monitoring this field can distinguish the two cases.
+    [:rerank-failed?    {:optional true} :boolean]
+    ;; R05a: optional behavioral-subtree classification result. Each
+    ;; entry carries a behavior-id, confidence, optional was-fresh-mint?,
+    ;; reasoning, and rerank-source. Populated by R05b's classify-behaviors
+    ;; via the wedge; absent on legacy events and on first-tick classify
+    ;; calls that opt out of behavioral classification.
+    [:behavioral-subtrees {:optional true} [:vector :map]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; R05c — Behavioral subtree minting (audit-trail event)
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; Emitted alongside :ontology/tree-description-updated by the
+   ;; :ontology/mint-behavioral-subtree defcommand. Carries provenance
+   ;; (agent-minted vs human-authored) so a future C-3 review queue can
+   ;; filter on agent-authored content.
+   ;;
+   ;; :provenance is MANDATORY (no default) — load-bearing for the audit
+   ;; trail; mixing the two provenance classes makes the review queue
+   ;; meaningless.
+
+   :ontology/behavioral-subtree-minted
+   [:map
+    [:target-id          :uuid]
+    [:name               :string]
+    [:parent-behavior    {:optional true} [:or :uuid :string]]
+    [:provenance         [:enum :agent-minted :human-authored]]
+    [:minted-by-sheet-id {:optional true} :uuid]
+    [:minted-by-tick-id  {:optional true} :uuid]
+    [:minted-at          :string]]
 
    ;; -------------------------------------------------------------------------
    ;; C-2a-3a — Consolidation trigger events
@@ -523,6 +660,74 @@
     ;; for the rationale.
     [:target-id [:or :string :uuid]]
     [:body description-body]]
+
+   ;; -------------------------------------------------------------------------
+   ;; C-2c-1 — Auto-classifier command
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; Dispatched by the executor wedge at first-tick when a repl-researcher
+   ;; with :auto-classify? true has no :context set. The handler (C-2c-2)
+   ;; emits :ontology/task-classified.
+   ;;
+   ;; Mirrors the event body minus :classified-at (the handler stamps that).
+
+   :ontology/assign-task-class
+   [:map
+    [:source-sheet-id   :uuid]
+    [:source-tick-id    :uuid]
+    [:source-node-id    :uuid]
+    [:assigned-tree-id  :uuid]
+    [:confidence        [:and number? [:>= 0.0] [:<= 1.0]]]
+    [:top-candidates    [:vector :map]]
+    [:reasoning         :string]
+    [:was-fresh-mint?   :boolean]
+    ;; C-2d-2: optional parent ancestor (UUID or fingerprint string)
+    ;; surfaced by walk-down. The defcommand forwards this to the
+    ;; emitted task-classified event body.
+    [:parent-tree-id    {:optional true} [:or :uuid :string]]
+    ;; R01: reranker failure flag forwarded by the executor wedge.
+    ;; The defcommand carries this through to the emitted event body
+    ;; when present.
+    [:rerank-failed?    {:optional true} :boolean]
+    ;; R05a: behavioral-subtree classification result forwarded by the
+    ;; wedge (set by R05b's classify-behaviors call). The defcommand
+    ;; carries this through to the emitted task-classified event body.
+    [:behavioral-subtrees {:optional true} [:vector :map]]]
+
+   ;; -------------------------------------------------------------------------
+   ;; R05c — Mint a new behavioral-subtree concept
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; The recursive RLM researcher's affordance for contributing new
+   ;; behavioral abstractions to the corpus when no candidate from
+   ;; classify-behaviors fits. Hand-authored mints go through the same
+   ;; defcommand with :provenance :human-authored.
+   ;;
+   ;; The handler generates a fresh UUID for the new behavior's target-id
+   ;; and emits TWO events:
+   ;;   1. :ontology/behavioral-subtree-minted — the provenance-tagged
+   ;;      audit-trail event
+   ;;   2. :ontology/tree-description-updated — so the R05a reactive
+   ;;      processor projects the concept (and any :composes-into edges
+   ;;      / :parent-behavior skos:broader link) into :ontology/concepts.
+   ;;
+   ;; :scope :behavioral-subtree is stamped by the handler. Callers may
+   ;; omit it from :body; if they explicitly pass a non-:behavioral-subtree
+   ;; scope the defcommand rejects to surface the intent mismatch.
+
+   :ontology/mint-behavioral-subtree
+   [:map
+    [:name               :string]
+    [:body               description-body]
+    [:parent-behavior    {:optional true} [:or :uuid :string]]
+    ;; :provenance is MANDATORY — never default. Mixing the two
+    ;; provenance classes would break the audit trail for future review.
+    [:provenance         [:enum :agent-minted :human-authored]]
+    ;; Sandbox-only fields; absent on hand-authored mints. The sandbox
+    ;; primitive (mint-behavior! ...) populates these from the
+    ;; build-rlm-context's :sheet-id / :tick-id opts.
+    [:minted-by-sheet-id {:optional true} :uuid]
+    [:minted-by-tick-id  {:optional true} :uuid]]
 
    ;; -------------------------------------------------------------------------
    ;; C-2a-3a — Consolidation trigger commands

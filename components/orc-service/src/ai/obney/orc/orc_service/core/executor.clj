@@ -207,14 +207,16 @@
      blackboard keys, even though they appear in phase2-result :outputs).
    - Appends the summary entry to :tree-results (existing vector preserved;
      nil → []).
-   - Dissoc's :generated-tree and :generated-tree-raw so the dispatch doesn't
-     re-fire on the same tree on the next iteration."
+   - Dissoc's :generated-tree (the canonical dispatch marker) so the dispatch
+     doesn't re-fire on the same tree on the next iteration. PRESERVES
+     :generated-tree-raw so the final! return path (and downstream consumers
+     like benchmark EDN capture) can record WHAT the model actually designed."
   [sandbox-vars phase2-result writes summary]
   (let [writes-set (set writes)
         outputs-to-merge (select-keys (:outputs phase2-result) writes-set)
         prior-results (get sandbox-vars :tree-results [])]
     (-> sandbox-vars
-        (dissoc :generated-tree :generated-tree-raw)
+        (dissoc :generated-tree)
         (merge outputs-to-merge)
         (assoc :tree-results (conj prior-results summary)))))
 
@@ -1025,26 +1027,66 @@
     (when-let [m (re-find #"at\s+\[(\d+)\s+(\d+)\]" error)]
       [(Long/parseLong (nth m 1)) (Long/parseLong (nth m 2))])))
 
+(defn- diagnose-parse-error
+  "Look at a SCI parse error message and return a short actionable hint
+   when the failure matches a known recurring pattern. Returns nil for
+   error messages that don't match a known pattern.
+
+   Patterns recognized:
+   - 'Unmatched delimiter' — the common failure in :output-schemas with
+     nested maps; suggests walking back through the parent {} of the
+     reported column.
+   - 'EOF while reading' — code truncated mid-form; usually a brace or
+     paren never closed.
+   - 'Could not resolve symbol' — usually a typo or missing require."
+  [error]
+  (cond
+    (re-find #"(?i)unmatched delimiter" error)
+    (str "Diagnostic hint: an 'Unmatched delimiter' error in (emit-tree! [...]) "
+         "almost always means a nested map schema (e.g. inside :output-schemas) "
+         "has a missing or mis-typed closing brace. Walk back from the column "
+         "marker until you find the unclosed { — fix THAT brace, not the one "
+         "the error points at.")
+
+    (re-find #"(?i)eof while reading" error)
+    (str "Diagnostic hint: 'EOF while reading' means a delimiter "
+         "(paren/bracket/brace) was opened but never closed. Re-emit the "
+         "whole tree carefully — count opens vs closes at each depth.")
+
+    (re-find #"(?i)could not resolve symbol" error)
+    (str "Diagnostic hint: 'Could not resolve symbol' usually means a typo. "
+         "Only the primitives listed in your instruction (llm, code, "
+         "emit-tree!, final!, get-input, get-var, store!) are bound. "
+         "Don't reference clojure.core fns by alias.")
+
+    :else nil))
+
 (defn- format-error-with-context
   "R-6: For SCI parse errors with [line col] markers, append the offending
    line of code + a caret pointer pinning the column. This surfaces the
    structural-exact location so the model can fix the specific character
    rather than re-emitting similar-broken code on the next iteration.
 
+   Adds a diagnostic hint when the error matches a known recurring pattern
+   (Unmatched delimiter / EOF while reading / Could not resolve symbol).
+
    Non-parse errors (or codes that don't have the indicated line) pass
-   through with just the error message."
+   through with just the error message + the diagnostic hint when known."
   [code error]
-  (if-let [[line col] (parse-error-position error)]
-    (let [lines (str/split (or code "") #"\n")
-          target-line (when (<= 1 line (count lines))
-                        (nth lines (dec line)))]
-      (if target-line
-        (str "Error: " error "\n"
-             "At that line:\n"
-             "  " target-line "\n"
-             "  " (apply str (repeat (dec col) " ")) "^")
-        (str "Error: " error)))
-    (str "Error: " error)))
+  (let [hint (diagnose-parse-error (or error ""))
+        hint-line (when hint (str "\n" hint))]
+    (if-let [[line col] (parse-error-position error)]
+      (let [lines (str/split (or code "") #"\n")
+            target-line (when (<= 1 line (count lines))
+                          (nth lines (dec line)))]
+        (if target-line
+          (str "Error: " error "\n"
+               "At that line:\n"
+               "  " target-line "\n"
+               "  " (apply str (repeat (dec col) " ")) "^"
+               hint-line)
+          (str "Error: " error hint-line)))
+      (str "Error: " error hint-line))))
 
 (defn- build-iteration-history
   "Format iteration history for LLM context.
@@ -1420,7 +1462,10 @@
                             :spec :string
                             :description "Catalog of pre-built Clojure functions you can reference in emit-tree! :code nodes via {:fn \"ns/sym\" ...}. Read this carefully if present."}))]
     {:inputs all-inputs
-   :outputs [{:name :code
+   :outputs [{:name :reasoning
+              :spec :string
+              :description "Brief explanation (2-5 sentences) of WHY you are choosing this tree shape: which inputs are driving the design, which primitives you picked and why, what alternative you considered and rejected, and which prepended corpus suggestions (if any) you adopted or skipped. Write this BEFORE you write :code."}
+             {:name :code
               :spec :string
               :description "Clojure code to execute"}]
    :instructions (str "You are an RLM (Recursive Language Model) that constructs behavior trees to solve tasks.\n\n"
@@ -1618,6 +1663,60 @@
                              "with 22 of 24 chunks succeeded is usually fine). For others it requires "
                              "follow-up (e.g., obligations extraction where missing chunks could miss "
                              "obligations). You decide based on your task and the outputs you got.\n\n"
+
+                             ;; R-Recover: failure-recovery nudge.
+                             ;;
+                             ;; When a prior tree fails or partially fails, the natural-but-wasteful
+                             ;; reaction is to re-emit the same tree from scratch. That re-runs every
+                             ;; sub-LLM that already succeeded, doubling cost. The recursive RLM
+                             ;; design already preserves successful writes in sandbox-vars across
+                             ;; iterations — but only if the model CHOOSES to use them.
+                             ;;
+                             ;; This section tells the model how to recover correctly: investigate
+                             ;; the failure first, then design a tree that RESUMES from surviving
+                             ;; vars and only re-runs the failed nodes.
+                             ;;
+                             ;; Sentinel phrase: 'recover from a failed tree' (pinned by unit test).
+                             "### Recover from a failed tree — investigate then resume, don't rebuild\n"
+                             "When `:tree-results` shows `:status :failure`, `:partial`, or `:timeout`, "
+                             "DO NOT re-emit the same tree from scratch — that wastes every sub-LLM "
+                             "call that already succeeded. Successful writes are preserved in your "
+                             "sandbox variables across iterations. Use them.\n\n"
+                             "Recovery flow:\n"
+                             "  1. **Investigate**: read `:failure-reasons` and `:failure-indices` on "
+                             "the failed entry. If those fields aren't specific enough, drill in with "
+                             "`(tree-failures)` / `(tree-detail tick-id)` / `(node-output node-id)`.\n"
+                             "  2. **Inventory surviving vars**: check `(list-vars)` or `:outputs-keys` "
+                             "from the same `:tree-results` entry to see EXACTLY what data already "
+                             "exists in your sandbox. Often the failure is downstream of work that "
+                             "produced perfectly usable intermediate outputs.\n"
+                             "  3. **Design a smaller resume tree** that reads the surviving vars via "
+                             "`(get-var ...)` and ONLY runs the nodes needed to finish the work the "
+                             "failed tree didn't complete. Do not include nodes that recompute data "
+                             "you already have.\n\n"
+                             "Concrete pattern:\n"
+                             "```clojure\n"
+                             ";; Prior tree produced :findings and :missing_items successfully,\n"
+                             ";; but the recommendations :llm and the final :code transform failed.\n"
+                             ";; DO NOT re-emit the whole extraction + gap-analysis tree.\n"
+                             ";; RESUME from the surviving structured data:\n"
+                             "(emit-tree!\n"
+                             "  [:sequence\n"
+                             "   [:llm {:instruction \"Generate recommendations from findings + gaps\"\n"
+                             "          :reads [:findings :missing_items]\n"
+                             "          :writes [:recommendation_data]}]\n"
+                             "   [:code {:fn shape-final-writes\n"
+                             "           :reads [:findings :missing_items :recommendation_data]\n"
+                             "           :writes [:issues :ambiguities :missing :recommendations]}]\n"
+                             "   [:final {:keys [:issues :ambiguities :missing :recommendations]}]])\n"
+                             "```\n\n"
+                             "Re-emitting a tree is appropriate ONLY when the failure is fundamental "
+                             "to the design (e.g., the prior tree never produced ANY usable outputs, "
+                             "or the failure exposes that the original design was structurally wrong "
+                             "and needs a different shape). In those cases, treat the prior tree as "
+                             "diagnostic information — what you learned from its failure should inform "
+                             "the new design, not be discarded.\n\n"
+
                              "### After a tree completes\n"
                              "You can:\n"
                              "  - Call `(emit-tree! ...)` again to run another tree\n"
@@ -1767,14 +1866,26 @@
              history []]
         (cond
           (>= iteration max-iterations)
-          (let [total-elapsed (- (System/currentTimeMillis) start-time)]
-            {:status :failure
-             :error "Max iterations reached without final!"
-             :iterations history
-             :duration-ms total-elapsed
-             :usage @total-usage
-             :cumulative-tree-ms @cumulative-tree-ms
-             :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))})
+          (let [total-elapsed (- (System/currentTimeMillis) start-time)
+                ;; Surface what survived even on failure so bench reports +
+                ;; downstream consumers can inspect what the model produced.
+                final-sandbox @sandbox-vars
+                surviving-vars (dissoc final-sandbox
+                                       :generated-tree :generated-tree-raw
+                                       :iteration-reasonings :tree-results)
+                generated-tree-raw (:generated-tree-raw final-sandbox)
+                iteration-reasonings (:iteration-reasonings final-sandbox)]
+            (cond-> {:status :failure
+                     :error "Max iterations reached without final!"
+                     :outputs surviving-vars
+                     :iterations history
+                     :duration-ms total-elapsed
+                     :usage @total-usage
+                     :cumulative-tree-ms @cumulative-tree-ms
+                     :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))}
+              generated-tree-raw (assoc :generated-tree-raw generated-tree-raw)
+              (seq iteration-reasonings) (assoc :iteration-reasonings
+                                                (vec iteration-reasonings))))
 
           ;; Pre-iteration budget check. The existing check inside the
           ;; emit-tree! branch only fires when the model successfully emits
@@ -1879,6 +1990,17 @@
 
                          :else nil))
 
+                ;; Extract reasoning from LLM result and stash it into sandbox-vars
+                ;; under :iteration-reasonings (vector accumulates one per iteration).
+                ;; This is the model's stated rationale for the tree it's about to emit —
+                ;; useful for understanding whether the prepended corpus suggestions
+                ;; actually influenced the design choices.
+                reasoning (or (:reasoning llm-result)
+                              (get-in llm-result [:outputs :reasoning]))
+                _ (when (string? reasoning)
+                    (swap! sandbox-vars update :iteration-reasonings
+                           (fnil conj []) reasoning))
+
                 ;; Update usage tracking (normalize handles snake_case -> kebab-case)
                 _ (when-let [u (normalize-usage (:usage llm-result))]
                     (swap! total-usage
@@ -1963,15 +2085,31 @@
 
                   ;; final! was called - return the validated output
                   final-output
-                  (let [total-elapsed (- (System/currentTimeMillis) start-time)]
-                    {:status :success
-                     :outputs final-output
-                     :final-answer final-output
-                     :iterations new-history
-                     :duration-ms total-elapsed
-                     :usage @total-usage
-                     :cumulative-tree-ms @cumulative-tree-ms
-                     :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))})
+                  (let [total-elapsed (- (System/currentTimeMillis) start-time)
+                        ;; When the model called emit-tree! before final!,
+                        ;; the designed tree lives in sandbox-vars. Propagate
+                        ;; it to the return so downstream consumers (bench
+                        ;; runner, ontology recorders, observability) can
+                        ;; capture WHAT the model designed — not just what
+                        ;; final! produced. nil when the model went direct
+                        ;; without ever emit-tree!-ing.
+                        generated-tree-raw (:generated-tree-raw @sandbox-vars)
+                        iteration-reasonings (:iteration-reasonings @sandbox-vars)
+                        _ (when debug?
+                            (dbg "RETURN PATH: final! branch; sandbox-vars keys:" (keys @sandbox-vars))
+                            (dbg "RETURN PATH: :iteration-reasonings count:"
+                                 (count (or iteration-reasonings []))))]
+                    (cond-> {:status :success
+                             :outputs final-output
+                             :final-answer final-output
+                             :iterations new-history
+                             :duration-ms total-elapsed
+                             :usage @total-usage
+                             :iteration-reasonings (vec (or iteration-reasonings []))
+                             :cumulative-tree-ms @cumulative-tree-ms
+                             :cumulative-thinking-ms (max 0 (- total-elapsed @cumulative-tree-ms))}
+                      generated-tree-raw
+                      (assoc :generated-tree-raw generated-tree-raw)))
 
                   ;; emit-tree! was called - trigger Phase 2 execution automatically
                   ;; Phase 1 generated the tree, now execute it via child ORC tick
@@ -2110,6 +2248,29 @@
                             _ (swap! sandbox-vars merge-tree-result-into-sandbox
                                      phase2-result+budget declared-writes summary)
                             _ (swap! cumulative-tree-ms + (or (:duration-ms phase2-result) 0))
+                            ;; Aggregate Phase 2 sub-LLM usage into the
+                            ;; tick-level total-usage. Without this the
+                            ;; saved EDN's :usage reflects only Phase 1
+                            ;; (design + final-call) tokens, hiding the
+                            ;; actual cost of executing the model's tree.
+                            ;; The non-recursive return path already does
+                            ;; this combine via combined-usage; recursive
+                            ;; mode needs the equivalent per-iteration
+                            ;; accumulation.
+                            p2-usage (:usage phase2-result)
+                            _ (when (and p2-usage (pos? (:total-tokens p2-usage 0)))
+                                (swap! total-usage
+                                       (fn [acc]
+                                         (-> acc
+                                             (update :prompt-tokens
+                                                     (fnil + 0 0)
+                                                     (or (:prompt-tokens p2-usage) 0))
+                                             (update :completion-tokens
+                                                     (fnil + 0 0)
+                                                     (or (:completion-tokens p2-usage) 0))
+                                             (update :total-tokens
+                                                     (fnil + 0 0)
+                                                     (or (:total-tokens p2-usage) 0))))))
                             _ (dbg "\n[DEBUG RLM] Recursive recur — :tree-results entries:"
                                    (count (:tree-results @sandbox-vars))
                                    "summary status:" (:status summary))
@@ -2153,6 +2314,7 @@
                         {:status (:status phase2-result)
                          :outputs (:outputs phase2-result)
                          :generated-tree-raw generated-tree-raw
+                         :iteration-reasonings (:iteration-reasonings @sandbox-vars)
                          :iterations new-history
                          :duration-ms (+ phase1-duration (or (:duration-ms phase2-result) 0))
                          :usage combined-usage

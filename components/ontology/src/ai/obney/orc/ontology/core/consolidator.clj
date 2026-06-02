@@ -21,6 +21,7 @@
             [ai.obney.orc.ontology.interface.schemas :as ontology-schemas]
             [ai.obney.grain.command-processor-v2.interface :as command-processor]
             [ai.obney.grain.event-store-v3.interface :as es]
+            [ai.obney.grain.read-model-processor-v2.interface :as rmp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]
             [com.brunobonacci.mulog :as u]))
@@ -282,6 +283,204 @@
     (inc (or (:version current-description) 0))
     1))
 
+;; =============================================================================
+;; C-2d-2 — parent-tree-id hydration
+;;
+;; When the consolidator emits a new tree-fingerprint description, the
+;; body should carry :parent-tree-id so the C-2d-1 reactive projector can
+;; wire the new tree-class as a child of an abstract parent in the
+;; concept graph.
+;;
+;; Three cases (per C-2d Decision 5):
+;;   - non-tree-fingerprint target → body unchanged
+;;   - sticky (subsequent consolidation): preserve existing :parent-tree-id
+;;     from the prior description; classify-task NOT called
+;;   - first-time (no prior description): call classify-task with
+;;     :walk-down? false to infer the top-1 abstract parent. If match,
+;;     assoc :parent-tree-id. If fresh-mint, omit :parent-tree-id and log
+;;     ::orphan-tree-class-created for HITL surfacing.
+;; =============================================================================
+
+(def ^:private parent-inference-threshold
+  "Confidence threshold used when asking classify-task to identify the
+   abstract parent of a brand-new tree-fingerprint. Mirrors the
+   :auto-classify-threshold default from the C-2c-2 wedge — one knob
+   to tune for both call sites."
+  0.7)
+
+(defn- build-parent-inference-signature
+  "Build a task-signature for the consolidator's parent-inference call
+   from the just-consolidated description body. Uses :summary,
+   :capabilities, and :representative-uses so the classifier sees what
+   the tree IS rather than what produced it."
+  [body]
+  (str "TREE SUMMARY:\n"
+       (or (:summary body) "(none)")
+       "\n\nCAPABILITIES:\n"
+       (str/join "\n" (map #(str "- " %) (or (:capabilities body) [])))
+       "\n\nREPRESENTATIVE USES:\n"
+       (str/join "\n" (map #(str "- " %) (or (:representative-uses body) [])))))
+
+;; =============================================================================
+;; R05d — behavioral-subtree-ids hydration
+;;
+;; Parallel to maybe-hydrate-parent-tree-id but on the BEHAVIORAL axis.
+;; Same three cases:
+;;   - non-tree-fingerprint target → body unchanged
+;;   - sticky (prior :behavioral-subtree-ids on current description) →
+;;     preserve them; classify-behaviors NOT called
+;;   - first-time → classify-behaviors with :structural-context = the
+;;     tree-class id. Top-N above-threshold IDs assoc'd as
+;;     :behavioral-subtree-ids. Fresh-mint marker → omit + log
+;;     ::orphan-behavioral-subtree-inferred
+;;
+;; The composes-into edge growth (dispatch-observed-composes-into-edges!)
+;; is a separate post-emit step.
+;; =============================================================================
+
+(def ^:private behavioral-inference-threshold
+  "Confidence threshold for the consolidator's behavioral inference call.
+   Mirrors the classify-behaviors default. Distinct from
+   parent-inference-threshold so the two retrieval surfaces can be tuned
+   independently as the corpus matures."
+  0.7)
+
+(def ^:private behavioral-inference-top-n
+  "How many top behaviors to stamp on the body. Three keeps the
+   downstream display compact while giving the RLM researcher enough
+   examples to triangulate."
+  3)
+
+(defn maybe-hydrate-behavioral-subtree-ids
+  "Return `body` possibly with :behavioral-subtree-ids assoc'ed per the
+   R05d rules. Pure-effects-aside: when first-time inference runs, it
+   calls the classify-behaviors var (which talks to the corpus +
+   reranker). When classify-behaviors's top-1 is the fresh-mint marker,
+   an orphan log is emitted.
+
+   Public for test access; callers within the consolidator's body
+   assembly are the only production users."
+  [context target-type target-id current-description body]
+  (cond
+    (not= target-type :tree-fingerprint)
+    body
+
+    (seq (:behavioral-subtree-ids current-description))
+    (assoc body :behavioral-subtree-ids (:behavioral-subtree-ids current-description))
+
+    (nil? current-description)
+    (let [classify-behaviors (requiring-resolve
+                               'ai.obney.orc.ontology.interface/classify-behaviors)
+          signature (build-parent-inference-signature body)
+          result (try
+                   (classify-behaviors context
+                                       {:task-signature signature
+                                        :threshold behavioral-inference-threshold
+                                        :structural-context target-id
+                                        :top-n behavioral-inference-top-n})
+                   (catch Exception e
+                     (u/log ::behavioral-inference-error
+                            :target-id target-id
+                            :error (.getMessage e))
+                     nil))
+          behaviors (when result (:behaviors result))
+          top-1 (first behaviors)
+          fresh-mint? (or (nil? top-1) (:was-fresh-mint? top-1))]
+      (if (or (nil? result) fresh-mint?)
+        (do (u/log ::orphan-behavioral-subtree-inferred
+                   :target-id target-id
+                   :reason (cond
+                             (nil? result) :inference-error
+                             fresh-mint?   :fresh-mint
+                             :else         :below-threshold))
+            body)
+        (do (u/log ::behavioral-subtree-ids-inferred
+                   :target-id target-id
+                   :count (count behaviors))
+            (assoc body
+                   :behavioral-subtree-ids
+                   (mapv :behavior-id behaviors)))))
+
+    :else body))
+
+(defn dispatch-observed-composes-into-edges!
+  "R05d: for each behavioral-subtree id the consolidator inferred for
+   this tree-fingerprint, dispatch :ontology/create-relationship with
+   predicate \"behavior:composes-into\" when the edge is not already
+   present in the concept graph. Sticky once added (the read-model's
+   :composes-into set is conj-only); the no-op skip makes repeat calls
+   safe.
+
+   No-op when `behavior-ids` is nil or empty.
+
+   Public for test access; the consolidator calls this after the
+   description-updated event lands."
+  [context shell-id behavior-ids]
+  (when (seq behavior-ids)
+    (let [shell-uri (str "tree-class:" shell-id)
+          concepts (rmp/project context :ontology/concepts)]
+      (doseq [behavior-id behavior-ids]
+        (let [behavior-uri (str "behavioral-subtree:" behavior-id)
+              already-linked? (contains? (get-in concepts [behavior-uri :composes-into])
+                                          shell-uri)]
+          (when-not already-linked?
+            (command-processor/process-command
+              (assoc context :command
+                     {:command/name :ontology/create-relationship
+                      :command/id (random-uuid)
+                      :command/timestamp (time/now)
+                      :source-uri behavior-uri
+                      :target-uri shell-uri
+                      :predicate "behavior:composes-into"
+                      :properties {}}))))))))
+
+(defn maybe-hydrate-parent-tree-id
+  "Return `body` possibly with :parent-tree-id assoc'ed per the C-2d-2
+   rules. Pure-effects-aside: when first-time inference runs, it calls
+   the classify-task var (which talks to the corpus + reranker). When
+   classify-task returns fresh-mint, an orphan log is emitted.
+
+   Public for test access; callers within the consolidator's body
+   assembly are the only production users."
+  [context target-type target-id current-description body]
+  (cond
+    (not= target-type :tree-fingerprint)
+    body
+
+    (some? (:parent-tree-id current-description))
+    (assoc body :parent-tree-id (:parent-tree-id current-description))
+
+    (nil? current-description)
+    (let [classify-task (requiring-resolve
+                          'ai.obney.orc.ontology.interface/classify-task)
+          signature (build-parent-inference-signature body)
+          result (try
+                   (classify-task context
+                                  {:task-signature signature
+                                   :threshold parent-inference-threshold
+                                   :walk-down? false})
+                   (catch Exception e
+                     (u/log ::parent-inference-error
+                            :target-id target-id
+                            :error (.getMessage e))
+                     nil))]
+      (if (and result (not (:was-fresh-mint? result)))
+        (do (u/log ::parent-tree-class-inferred
+                   :target-id target-id
+                   :parent-tree-id (:assigned-tree-id result)
+                   :confidence (:confidence result))
+            (assoc body :parent-tree-id (:assigned-tree-id result)))
+        (do (u/log ::orphan-tree-class-created
+                   :target-id target-id
+                   :confidence (when result (:confidence result))
+                   :reason (cond
+                             (nil? result)               :inference-error
+                             (:was-fresh-mint? result)   :fresh-mint
+                             :else                       :below-threshold))
+            body)))
+
+    :else body))
+
 (defn- consolidate!-inner
   "The actual consolidation body — split out so the public consolidate!
    can do a clean budget-gate check before kicking off the LLM workflow."
@@ -307,18 +506,31 @@
         ;; Clojure data, but complex vector-of-map fields (:strengths,
         ;; :weaknesses) sometimes arrive as EDN/JSON-encoded strings —
         ;; we parse those before assembling.
-        body (when (and outputs
-                        (every? #(contains? outputs %)
-                                [:capabilities :strengths :weaknesses
-                                 :representative-uses :avoid-when :summary]))
-               {:capabilities                  (:capabilities outputs)
-                :strengths                     (parse-vector-of-maps (:strengths outputs))
-                :weaknesses                    (parse-vector-of-maps (:weaknesses outputs))
-                :representative-uses           (:representative-uses outputs)
-                :avoid-when                    (:avoid-when outputs)
-                :summary                       (:summary outputs)
-                :version                       (next-version current-description)
-                :consolidated-from-event-count (count recent-events)})]
+        raw-body (when (and outputs
+                            (every? #(contains? outputs %)
+                                    [:capabilities :strengths :weaknesses
+                                     :representative-uses :avoid-when :summary]))
+                   {:capabilities                  (:capabilities outputs)
+                    :strengths                     (parse-vector-of-maps (:strengths outputs))
+                    :weaknesses                    (parse-vector-of-maps (:weaknesses outputs))
+                    :representative-uses           (:representative-uses outputs)
+                    :avoid-when                    (:avoid-when outputs)
+                    :summary                       (:summary outputs)
+                    :version                       (next-version current-description)
+                    :consolidated-from-event-count (count recent-events)})
+        ;; C-2d-2: hydrate :parent-tree-id when applicable. Sticky for
+        ;; subsequent consolidations; classify-task on first-time;
+        ;; passthrough for non-tree-fingerprint targets.
+        body (when raw-body
+               (maybe-hydrate-parent-tree-id context target-type target-id
+                                              current-description raw-body))
+        ;; R05d: hydrate :behavioral-subtree-ids on the same body. Same
+        ;; sticky/first-time/orphan/passthrough rules; runs after
+        ;; :parent-tree-id so both retrieval axes appear on the emitted
+        ;; description.
+        body (when body
+               (maybe-hydrate-behavioral-subtree-ids context target-type target-id
+                                                      current-description body))]
     (cond
       (not= :success (:status exec-result))
       (u/log ::consolidate-execution-failed
@@ -334,8 +546,16 @@
              :explain (me/humanize (m/explain ontology-schemas/description-body body)))
 
       :else
-      (command-processor/process-command
-        (assoc context :command (record-description-command target-type target-id body))))))
+      (do
+        (command-processor/process-command
+          (assoc context :command (record-description-command target-type target-id body)))
+        ;; R05d: after the description-updated event lands, grow the
+        ;; behavior:composes-into graph for any newly-observed (behavior
+        ;; → shell) pairs. Sticky / idempotent — re-running on the same
+        ;; pair is a no-op.
+        (when (= :tree-fingerprint target-type)
+          (dispatch-observed-composes-into-edges!
+            context target-id (:behavioral-subtree-ids body)))))))
 
 (defn consolidate!
   "Run the consolidation for a single (target-type, target-id) target.

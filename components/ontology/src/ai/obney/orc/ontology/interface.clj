@@ -29,6 +29,8 @@
             [ai.obney.orc.ontology.core.commands] ;; Register defcommand handlers for tree profiles
             [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
             [ai.obney.orc.ontology.core.todo-processors :as todo-processors] ;; Register todo processors for auto-learning
+            [ai.obney.orc.ontology.core.reranker :as reranker]
+            [ai.obney.orc.ontology.core.task-classifier :as task-classifier]
             [ai.obney.orc.colbert.interface :as colbert]
             [ai.obney.grain.event-store-v3.interface :as event-store]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]
@@ -224,10 +226,73 @@
         (assoc :document-metadata norm-meta)
         (dissoc :document_id :document_metadata))))
 
+(def ^:private rerank-over-fetch-multiplier
+  "Default over-fetch when reranking: pull 2x the caller's :k from
+   ColBERT so the reranker has signal to actually re-order."
+  2)
+
+(def ^:private rerank-hard-cap
+  "Hard cap on the candidate count fed to the reranker. Bounds the
+   structured-output prompt size regardless of caller :k."
+  50)
+
+(defn- rerank-fetch-k
+  "How many candidates to pull from ColBERT when reranking. Caller asks
+   for top-:k; we pull 2x that for the reranker to choose from, hard-
+   capped at rerank-hard-cap."
+  [k]
+  (min rerank-hard-cap (max k (* rerank-over-fetch-multiplier k))))
+
+(defn- apply-rerank
+  "JOIN the reranker's delta output back to the original ColBERT
+   candidates on :document-id, returning the top-N in the reranker's
+   order. Each result carries the original ColBERT fields PLUS
+   :reasoning, :fitness-score, and :rerank-source from the reranker.
+
+   R01: each result is stamped with :rerank-source. On the success
+   path the value is :reranker. On the fallback path (reranker threw,
+   returned nil, or returned empty) the value is :colbert-fallback
+   AND :fitness-score/:reasoning are explicitly nil so downstream
+   `(or (:fitness-score x) 0.0)` short-circuits don't mask the
+   absence."
+  [ctx candidates rerank-intent query k]
+  (let [reranked (try
+                   (reranker/rerank! ctx
+                     {:query query
+                      :intent rerank-intent
+                      :candidates candidates})
+                   (catch Throwable t
+                     (u/log ::rerank-failed
+                            :query query
+                            :error (.getMessage t))
+                     nil))]
+    (if (seq reranked)
+      (let [by-doc-id (into {} (map (juxt :document-id identity)) candidates)
+            joined (keep (fn [r]
+                           (when-let [orig (get by-doc-id (:document-id r))]
+                             (-> orig
+                                 (assoc :reasoning (:reasoning r))
+                                 (assoc :fitness-score (:fitness-score r))
+                                 (assoc :rerank-source :reranker))))
+                         reranked)]
+        (vec (take k joined)))
+      (do
+        (u/log ::rerank-failed
+               :query query
+               :note "Reranker returned no results; falling back to pure ColBERT ordering.")
+        (->> candidates
+             (take k)
+             (mapv (fn [c]
+                     (-> c
+                         (assoc :reasoning nil)
+                         (assoc :fitness-score nil)
+                         (assoc :rerank-source :colbert-fallback)))))))))
+
 (defn search-descriptions
-  "C-2b-1: parameterized retrieval over the ColBERT-indexed Living
-   Description corpus. Returns top-K ColBERT results, optionally filtered
-   by granularity.
+  "C-2b-1+C-2b-2: parameterized retrieval over the ColBERT-indexed
+   Living Description corpus. Returns top-K results, optionally
+   filtered by granularity and optionally reranked by an LLM against
+   the caller's intent.
 
    Args:
      ctx  - context map with :event-store, :tenant-id, etc.
@@ -236,26 +301,36 @@
        :granularity        - filter to one of :node-type, :node-instance,
                              :tree-fingerprint; or :all (default :all)
        :k                  - top-K to return (default 10)
-       :rerank-with-intent - IGNORED in C-2b-1; activated by C-2b-2
+       :rerank-with-intent - optional string. When provided, the
+                             ColBERT top-(2k or capped 50) is run
+                             through an LLM reranker that returns
+                             a reordered list with per-result
+                             :reasoning + :fitness-score.
 
    Returns a vector of result maps:
      [{:content \"...\" :score 0.87 :rank 1 :document-id \"...\"
-       :document-metadata {:granularity :target-id :confidence :last-update}}]
+       :document-metadata {:granularity :target-id :confidence :last-update}
+       ;; Present only when :rerank-with-intent was provided:
+       :reasoning \"...\" :fitness-score 0.87}]
 
    Cold-search semantics: if no ontology-descriptions index has been
    built yet, returns [] and logs ::search-cold-no-index. NEVER
-   triggers a synchronous rebuild (would block the caller ~30-60s)."
-  [ctx {:keys [query granularity k] :or {granularity :all k 10}}]
+   triggers a synchronous rebuild (would block the caller ~30-60s).
+
+   Rerank-failure semantics: if the LLM call throws or returns nil,
+   fall back to the pure-ColBERT top-K + log ::rerank-failed. The
+   caller sees no exception."
+  [ctx {:keys [query granularity k rerank-with-intent]
+        :or {granularity :all k 10}}]
   (if-let [index (latest-ontology-descriptions-index ctx)]
-    (let [raw-results (mapv normalize-search-result
+    (let [fetch-k (if rerank-with-intent
+                    (rerank-fetch-k k)
+                    (if (= granularity :all) k (* 3 k)))
+          raw-results (mapv normalize-search-result
                             (colbert/search ctx
                               {:query query
                                :index-id (:index-id index)
-                               :k (if (= granularity :all)
-                                    k
-                                    ;; over-fetch when filtering so we
-                                    ;; still have ~k after filter
-                                    (* 3 k))}))
+                               :k fetch-k}))
           filtered (if (= granularity :all)
                      raw-results
                      (let [g-name (granularity-name granularity)]
@@ -263,12 +338,40 @@
                                     (granularity-name
                                       (-> % :document-metadata :granularity)))
                                 raw-results)))]
-      (vec (take k filtered)))
+      (if rerank-with-intent
+        (apply-rerank ctx filtered rerank-with-intent query k)
+        (vec (take k filtered))))
     (do
       (u/log ::search-cold-no-index
              :query query
              :note "No ontology-descriptions index has been built yet. Returning empty results.")
       [])))
+
+;; =============================================================================
+;; C-2c-1 — classify-task: pure task → tree-class classification
+;; =============================================================================
+
+(def classify-task
+  "C-2c-1: pure classification function. Given a task signature +
+   optional parent-context summary + threshold, returns a tree-class
+   assignment (matched corpus entry above threshold OR fresh UUID mint).
+
+   See `ai.obney.orc.ontology.core.task-classifier/classify-task` for
+   the full docstring."
+  task-classifier/classify-task)
+
+(def classify-behaviors
+  "R05b: pure behavioral classification. Given a task signature +
+   threshold (+ optional :structural-context + :top-n), returns top-N
+   behavioral-subtree examples from the Layer-2 corpus with reasoning.
+
+   The corpus is FEW-SHOT EXAMPLE MATERIAL for the recursive RLM
+   researcher; the model decides reuse/adapt/mint. composes-into
+   edges in the concept graph are RETRIEVAL HINTS, not gates.
+
+   See `ai.obney.orc.ontology.core.task-classifier/classify-behaviors`
+   for the full docstring."
+  task-classifier/classify-behaviors)
 
 (defn get-all-tree-profiles
   "Get all tree profiles."
