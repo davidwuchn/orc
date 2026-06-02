@@ -62,6 +62,25 @@
    :auto-detect-embedding-fields? true})
 
 ;; =============================================================================
+;; Ontology ID Normalization (Issue 001: Grain Schema Compliance)
+;; =============================================================================
+
+(defn- normalize-ontology-id
+  "Normalize ontology-id to UUID for Grain schema compliance.
+
+   Grain's tag schema requires [:tuple :keyword :uuid], so ontology-ids
+   must be UUIDs. This function:
+   - Passes through existing UUIDs unchanged
+   - Converts strings to deterministic UUIDs using nameUUIDFromBytes
+
+   Deterministic conversion means the same string always produces the
+   same UUID, preserving query semantics."
+  [id]
+  (if (uuid? id)
+    id
+    (java.util.UUID/nameUUIDFromBytes (.getBytes (str id)))))
+
+;; =============================================================================
 ;; Source Loading
 ;; =============================================================================
 
@@ -654,7 +673,8 @@
       :events [...]}"
   [{:keys [event-store] :as ctx} {:keys [sources config]}]
   (let [config (merge default-config config)
-        ontology-id (or (:ontology-id config) (java.util.UUID/randomUUID))
+        ;; Normalize ontology-id to UUID for Grain schema compliance (Issue 001)
+        ontology-id (normalize-ontology-id (or (:ontology-id config) (java.util.UUID/randomUUID)))
         build-id (java.util.UUID/randomUUID)
         config (assoc config :ontology-id ontology-id)
 
@@ -849,6 +869,8 @@
    Returns: Same as build-from-sources"
   [{:keys [event-store] :as ctx} {:keys [ontology-id sources config]}]
   (let [config (merge default-config config)
+        ;; Normalize ontology-id to UUID for Grain schema compliance (Issue 001)
+        ontology-id (normalize-ontology-id ontology-id)
         build-id (java.util.UUID/randomUUID)
         config (assoc config :ontology-id ontology-id)
 
