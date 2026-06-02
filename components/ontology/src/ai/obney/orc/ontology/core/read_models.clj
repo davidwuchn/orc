@@ -275,12 +275,23 @@
 ;; =============================================================================
 
 (defn get-concepts
-  "Get all concepts, optionally filtered by scope."
-  [ctx & [{:keys [scope broader-uri]}]]
-  (let [all-concepts (vals (rmp/project ctx :ontology/concepts))]
+  "Get all concepts, optionally filtered by scope and/or ontology-id.
+
+   Options:
+     :scope       - Filter by concept scope
+     :broader-uri - Filter by concepts with this URI in their broader set
+     :ontology-id - Filter by single ontology-id
+     :ontology-ids - Filter by multiple ontology-ids (returns union)"
+  [ctx & [{:keys [scope broader-uri ontology-id ontology-ids]}]]
+  (let [all-concepts (vals (rmp/project ctx :ontology/concepts))
+        ont-id-set (cond
+                     ontology-ids (set ontology-ids)
+                     ontology-id #{ontology-id}
+                     :else nil)]
     (cond->> all-concepts
       scope (filter #(= scope (:scope %)))
-      broader-uri (filter #(contains? (:broader %) broader-uri)))))
+      broader-uri (filter #(contains? (:broader %) broader-uri))
+      ont-id-set (filter #(contains? ont-id-set (:ontology-id %))))))
 
 (defn get-concept-by-uri
   "Get a single concept by URI."

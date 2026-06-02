@@ -17,8 +17,10 @@
             [ai.obney.orc.ontology.sheets.csv-ontology :as csv-ont]
             [ai.obney.orc.ontology.sheets.ontology-exploration :as text-ont]
             [ai.obney.orc.ontology.sheets.sql-ontology :as sql-ont]
+            [ai.obney.orc.ontology.sheets.json-ontology :as json-ont]
             [clojure.string :as str]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.data.json :as json]))
 
 ;; =============================================================================
 ;; Source Type Detection
@@ -119,6 +121,12 @@
         (swap! sheet-ids assoc :sql id)
         id)))
 
+(defn- ensure-json-sheet! [ctx]
+  (or (get @sheet-ids :json)
+      (let [id (json-ont/build-json-ontology-pipeline! ctx)]
+        (swap! sheet-ids assoc :json id)
+        id)))
+
 ;; =============================================================================
 ;; Extraction Routing
 ;; =============================================================================
@@ -163,13 +171,32 @@
       (throw (ex-info "SQL database not found" {:path path})))))
 
 (defn extract-json
-  "Extract ontology from JSON source."
-  [_ctx {:keys [path content]}]
-  ;; TODO: Implement JSON extraction sheet
-  {:status :not-implemented
-   :message "JSON extraction not yet implemented"
-   :path path
-   :content-provided? (boolean content)})
+  "Extract ontology from JSON source.
+
+   Args:
+     ctx - ORC context
+     opts:
+       :path     - Path to JSON file
+       :content  - Inline JSON string
+       :base-uri - Ontology namespace URI (default: http://json.ai/)
+       :domain   - Optional domain hint for LLM
+
+   Returns extraction result with :concepts, :relationships, :tbox, :abox, etc."
+  [ctx {:keys [path content base-uri domain]}]
+  (let [sheet-id (ensure-json-sheet! ctx)
+        json-data (cond
+                    content
+                    (json/read-str content :key-fn keyword)
+
+                    (and path (file-exists? path))
+                    (json/read-str (slurp path) :key-fn keyword)
+
+                    :else
+                    (throw (ex-info "JSON source not found" {:path path})))]
+    (json-ont/run-json-to-ontology ctx sheet-id
+      {:json-data json-data
+       :base-uri (or base-uri "http://json.ai/")
+       :domain domain})))
 
 (defn extract-rdf
   "Import existing RDF/OWL ontology."
