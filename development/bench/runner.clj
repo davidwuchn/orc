@@ -20,7 +20,16 @@
   "
   (:require [ai.obney.orc.orc-service.test-helpers :as h]
             [ai.obney.orc.orc-service.core.runtime :as runtime]
+            [ai.obney.orc.ontology.interface :as ontology]
+            [ai.obney.orc.ontology.interface.schemas]
+            [ai.obney.orc.ontology.core.commands]
+            [ai.obney.orc.ontology.core.read-models]
+            [ai.obney.orc.ontology.core.todo-processors :as ont-tp]
+            [ai.obney.orc.ontology.core.reranker]
+            [ai.obney.orc.colbert.interface]
+            [ai.obney.orc.colbert.interface.schemas]
             [ai.obney.grain.event-store-v3.interface :as es]
+            [ai.obney.grain.event-store-v3.interface.schemas]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.query-processor.interface :as qp]
             [ai.obney.grain.pubsub.interface :as pubsub]
@@ -29,6 +38,7 @@
             [ai.obney.grain.kv-store-lmdb.interface :as lmdb]
             [ai.obney.grain.time.interface :as time]
             [litellm.router :as litellm-router]
+            [seed-descriptions :as seeds]
             [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
@@ -63,13 +73,21 @@
                   :query-registry (qp/global-query-registry)
                   :dscloj-provider :openrouter
                   ::cache-dir cache-dir}
+        ;; Skip the async reindex processor — seed-corpus-and-build-index!
+        ;; emits 125 description-updated events at startup which would
+        ;; otherwise trigger 125 parallel ColBERT rebuilds (and hang the
+        ;; system). seed-corpus-and-build-index! calls maybe-rebuild!
+        ;; once synchronously after all seeds land.
+        skip-procs #{:ontology/on-description-updated-maybe-reindex}
         processors (reduce-kv
                     (fn [acc proc-name {:keys [handler-fn topics]}]
-                      (assoc acc proc-name
-                             (tp/start {:event-pubsub ps
-                                        :topics topics
-                                        :handler-fn handler-fn
-                                        :context base-ctx})))
+                      (if (contains? skip-procs proc-name)
+                        acc
+                        (assoc acc proc-name
+                               (tp/start {:event-pubsub ps
+                                          :topics topics
+                                          :handler-fn handler-fn
+                                          :context base-ctx}))))
                     {}
                     @tp/processor-registry*)]
     (assoc base-ctx :event-pubsub ps :processors processors)))
@@ -127,7 +145,11 @@
                                              sheet-id :repl-researcher :parent-id seq-id))
           node-id (-> node-result :command-result/events first :node-id)]
 
-      ;; Configure RLM mode
+      ;; Configure RLM mode. Per-task :rlm map override merges over the
+      ;; bench default of {:debug? true}. Tasks can opt into auto-classify
+      ;; (so the C-2c-2 wedge fires and the model sees Layer-1 + Layer-2
+      ;; classifier context) by setting :rlm {:auto-classify? true} in
+      ;; the task definition.
       (h/run-and-apply! ctx (h/make-set-repl-researcher-config-command
                               sheet-id node-id
                               (:instruction task)
@@ -136,7 +158,7 @@
                               []
                               :model (:model config)
                               :max-iterations 5
-                              :rlm {:debug? true}))
+                              :rlm (merge {:debug? true} (:rlm task))))
       {:sheet-id sheet-id :node-id node-id})))
 
 (defn- execute-task! [ctx sheet-id documents timeout-ms]
@@ -155,6 +177,33 @@
         result (deref p timeout-ms {:status :timeout :error "Execution timed out"})
         duration-ms (- (System/currentTimeMillis) start-time)]
     (assoc result :duration-ms duration-ms)))
+
+;; =============================================================================
+;; Node-trace aggregation helper
+;; =============================================================================
+;; ORC's repl-researcher delivers `:node-trace` as a first-class field on
+;; the tick completion result (see todo_processors.clj → build-node-trace).
+;; The runner just propagates it. This helper sums per-event :usage into a
+;; comparable shape so reports can show total system cost (Phase 1 + Phase 2
+;; sub-LLM calls aggregated). Cross-check against the executor's :usage
+;; field — divergence implies a missed aggregation somewhere upstream.
+
+(defn- summarize-trace-tokens
+  "Sum :usage :total-tokens across a node-trace vector. Returns a map with
+   the same shape as :usage so callers can compare apples to apples against
+   the executor's aggregated :usage field."
+  [node-trace]
+  (reduce
+    (fn [acc ev]
+      (let [u (:usage ev)]
+        (if (and u (pos? (:total-tokens u 0)))
+          (-> acc
+              (update :prompt-tokens (fnil + 0) (or (:prompt-tokens u) 0))
+              (update :completion-tokens (fnil + 0) (or (:completion-tokens u) 0))
+              (update :total-tokens (fnil + 0) (or (:total-tokens u) 0)))
+          acc)))
+    {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0}
+    node-trace))
 
 ;; =============================================================================
 ;; Result Management
@@ -196,8 +245,73 @@
 ;; Public API
 ;; =============================================================================
 
+(defn- drive-projectors!
+  "Synchronously drive BOTH the C-2d-1 tree-class projector AND the R05a
+   behavioral-subtree projector over every :ontology/tree-description-updated
+   event in the store. Mirrors the c2e-behavioral-live-verify orchestrator
+   pattern."
+  [ctx]
+  (let [c2d1 (requiring-resolve
+               'ai.obney.orc.ontology.core.todo-processors/on-tree-description-updated-project-concept)
+        r05a (requiring-resolve
+               'ai.obney.orc.ontology.core.todo-processors/on-behavioral-subtree-description-updated-project-concept)]
+    (doseq [e (into [] (es/read (:event-store ctx)
+                                {:tenant-id (:tenant-id ctx)
+                                 :types #{:ontology/tree-description-updated}}))]
+      (c2d1 (assoc ctx :event e))
+      (r05a (assoc ctx :event e)))))
+
+(defn- emit-synthetic-padding!
+  "Emit N synthetic placeholder node-instance descriptions so the
+   ColBERT FAISS clustering has enough documents to build. R05e learned
+   this — without padding the index build hangs or fails."
+  [ctx n]
+  (dotimes [i n]
+    (let [target-id [(random-uuid) (random-uuid)]]
+      (cp/process-command
+        (assoc ctx :command
+               {:command/name :ontology/record-node-instance-description
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :target-id target-id
+                :body {:capabilities ["generic placeholder"]
+                       :strengths [{:trait "synthetic padding entry"
+                                    :good-when "never used in production retrieval"
+                                    :recommended-pattern "[:noop {}]"
+                                    :confidence 0.1
+                                    :evidence-count 1
+                                    :first-observed-at "2026-05-28T00:00:00Z"
+                                    :last-reinforced-at "2026-05-28T00:00:00Z"}]
+                       :weaknesses []
+                       :representative-uses ["padding"]
+                       :avoid-when ["always"]
+                       :summary (str "Synthetic padding entry #" i
+                                     " — irrelevant filler to satisfy FAISS clustering floor.")
+                       :version 1
+                       :consolidated-from-event-count 0}})))))
+
+(defn- seed-corpus-and-build-index!
+  "Seed the description corpus (R05a's 22 + 11 + 12 = 45 seeds + 80
+   synthetic padding entries for FAISS), drive both concept-graph
+   projectors, and rebuild the ColBERT index so the wedge's
+   classify-task + classify-behaviors find candidates above threshold."
+  [ctx]
+  (println "Emitting synthetic padding (80 entries for FAISS clustering floor)...")
+  (emit-synthetic-padding! ctx 80)
+  (println "Seeding description corpus (45 hand-authored seeds)...")
+  (seeds/seed-all! ctx)
+  (Thread/sleep 1000)
+  (println "Driving concept-graph projectors...")
+  (drive-projectors! ctx)
+  (println "Building ColBERT description index (one-time, expect 2-4 min)...")
+  (ont-tp/maybe-rebuild! ctx)
+  (Thread/sleep 1000)
+  (println "Index state:" (pr-str (ontology/get-reindex-state ctx))))
+
 (defn start!
-  "Initialize the benchmark system."
+  "Initialize the benchmark system. Also seeds the description corpus and
+   builds the ColBERT index so tasks with `:rlm {:auto-classify? true}`
+   can exercise the R05 classifier path (R-Inject)."
   []
   (when @system-state
     (stop-context @system-state))
@@ -211,9 +325,11 @@
     (litellm-router/register! :openrouter base-config)
     (litellm-router/register! (keyword (str "openrouter/" (:model config)))
                               (assoc base-config :model (:model config))))
-  (reset! system-state (create-context))
+  (let [ctx (create-context)]
+    (reset! system-state ctx)
+    (seed-corpus-and-build-index! ctx))
   (println "\n" (apply str (repeat 60 "=")) "\n")
-  (println "  ORC RLM Benchmark Runner started")
+  (println "  ORC RLM Benchmark Runner started (corpus seeded, index built)")
   (println "\n" (apply str (repeat 60 "=")) "\n")
   :started)
 
@@ -268,6 +384,24 @@
           ;; Extract usage
           usage (or (:usage result) {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})
 
+          ;; Per-leaf-node trace is now a first-class field on the result
+          ;; delivered by ORC's deliver-completion! (todo_processors.clj —
+          ;; build-node-trace). We just propagate; no event-store query
+          ;; needed here. Future bench/eval harnesses can do the same.
+          node-trace (or (:node-trace result) [])
+          node-trace-usage-total (summarize-trace-tokens node-trace)
+
+          ;; Pick up the R-Inject trace sidecar (verbatim prepend + full
+          ;; classifier payload with top-candidates and scores) written by
+          ;; apply-r05-classifier-context when auto-classify fired. Pair
+          ;; it with the EDN so the report can quote the prepend the
+          ;; model literally saw alongside the tree it designed.
+          r-inject-trace (let [trace-file (str "/tmp/r-inject-trace-" sheet-id ".edn")]
+                           (when (.exists (io/file trace-file))
+                             (try
+                               (edn/read-string (slurp trace-file))
+                               (catch Exception _ nil))))
+
           ;; Build result record
           record (cond-> {:task slug
                           :task-name (:name task)
@@ -282,7 +416,26 @@
                           :evaluation-criteria (:evaluation-criteria task)}
                    (:error result) (assoc :error (:error result))
                    (:phase2-error result) (assoc :phase2-error (:phase2-error result))
-                   (:generated-tree-raw result) (assoc :generated-tree-raw (:generated-tree-raw result)))]
+                   (:generated-tree-raw result) (assoc :generated-tree-raw (:generated-tree-raw result))
+                   (or (contains? result :iteration-reasonings)
+                       (contains? (:outputs result) :iteration-reasonings))
+                   (assoc :iteration-reasonings (or (:iteration-reasonings result)
+                                                    (:iteration-reasonings (:outputs result))))
+                   r-inject-trace (assoc :r-inject-trace r-inject-trace)
+                   ;; Node-trace: per-leaf-node completion events from the
+                   ;; event store, each with their own :usage. Sum equals
+                   ;; total system token cost (Phase 1 + Phase 2 sub-LLM).
+                   ;; Pair this with the executor's :usage field for the
+                   ;; report's headline number.
+                   (seq node-trace) (assoc :node-trace node-trace
+                                           :node-trace-usage-total node-trace-usage-total)
+                   ;; Full Phase 1 iteration history (code + error + vars-created
+                   ;; per iteration). Lets reports show what the model TRIED at
+                   ;; each step, including any syntax-error recovery.
+                   (or (contains? result :iterations)
+                       (contains? (:outputs result) :iterations))
+                   (assoc :iterations (or (:iterations result)
+                                          (:iterations (:outputs result)))))]
 
       ;; Print summary
       (println "\n" (apply str (repeat 70 "-")))

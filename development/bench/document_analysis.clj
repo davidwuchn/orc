@@ -29,6 +29,7 @@ Task: Produce a structured extraction of this RFP with three outputs:
 
 Quality requirements: Information must be accurate and traceable to the source. Do not invent dates, people, or organizations not present in the document."
    :writes [:summary :key-dates :entities]
+   :rlm {:auto-classify? true}
    :evaluation-criteria
    ["Identifies RFP issue/response dates"
     "Extracts contact information (Procurement Manager, CFO, etc.)"

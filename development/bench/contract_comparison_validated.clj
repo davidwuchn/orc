@@ -46,6 +46,7 @@ Other quality requirements:
 - Do not rely on general knowledge about microFIT contracts - only on what is actually present in the documents
 - Prefer fewer verified claims over many unverified ones"
    :writes [:document-survey :section-diffs :major-changes :impact-analysis :executive-summary]
+   :rlm {:auto-classify? true}
    :evaluation-criteria
    ["Tree designed by model includes some form of validation/verification stage (observe what shape it takes)"
     "Final claims include citations or text quotes from source"

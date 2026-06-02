@@ -35,6 +35,7 @@ Produce four outputs:
 
 Quality requirements: Risk classifications must be justified by document content. Do not invent obligations or penalties not in the document."
    :writes [:obligations :penalties :risk-matrix :executive-summary]
+   :rlm {:auto-classify? true}
    :evaluation-criteria
    ["Identifies mandatory pre-bid meeting requirement (disqualification if missed)"
     "Identifies Letter of Credit requirement (5% of management fee)"

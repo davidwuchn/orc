@@ -39,6 +39,7 @@ Quality requirements:
 - If a section is essentially identical between versions, say so explicitly rather than inventing differences
 - Do not assume changes based on general knowledge about microFIT contracts - rely only on what is actually present in the documents"
    :writes [:document-survey :section-diffs :major-changes :impact-analysis :executive-summary]
+   :rlm {:auto-classify? true}
    :evaluation-criteria
    ["Correctly identifies both documents as microFIT contracts"
     "Notes version numbers (2.0 vs 3.1.1)"

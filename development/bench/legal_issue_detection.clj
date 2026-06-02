@@ -33,6 +33,7 @@ Produce four outputs:
 
 Quality requirements: All issues must be traceable to specific clause text. Do not invent problems not in the document."
    :writes [:issues :ambiguities :missing :recommendations]
+   :rlm {:auto-classify? true}
    :evaluation-criteria
    ["Identifies non-compete clause scope concerns"
     "Notes confidentiality obligations extent"
