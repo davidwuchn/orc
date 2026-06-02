@@ -25,3 +25,7 @@ development/resources/
 # These are local infrastructure for the description corpus, not source.
 .venv-colbert/
 .ragatouille/
+
+# Local-only follow-up working notes. Survive compaction (filesystem-tracked)
+# but never committed — they're scratch planning that becomes stale fast.
+docs/issues/c2d-followups/
