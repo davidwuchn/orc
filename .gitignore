@@ -20,3 +20,8 @@ development/bench/generalization-results/
 
 # Large binary test fixtures. Keep these local; share via external storage if needed.
 development/resources/
+
+# ColBERT runtime artifacts — Python virtualenv + binary index data.
+# These are local infrastructure for the description corpus, not source.
+.venv-colbert/
+.ragatouille/
