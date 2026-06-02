@@ -1584,7 +1584,7 @@
      - \"csv\" - CSV files (provide :entity-column, :entity-type in config)
      - \"text\" - Text documents (provide :domain in config)
      - \"sql\"/\"sqlite\"/\"db\" - SQLite databases
-     - \"json\" - JSON files (planned)
+     - \"json\" - JSON files/data (provide :domain in config for better extraction)
      - \"rdf\" - RDF/OWL imports (planned)
 
    Returns:

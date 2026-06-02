@@ -36,6 +36,7 @@
             [ai.obney.orc.orc-service.interface :as sheet]
             [clojure.string :as str]
             [clojure.data.csv :as csv]
+            [clojure.data.json :as json]
             [clojure.java.io :as io]
             [com.brunobonacci.mulog :as mu]))
 
@@ -142,6 +143,16 @@
             sql-ns (requiring-resolve 'ai.obney.orc.ontology.sheets.sql-ontology/build-sql-ontology-pipeline!)
             sheet-id (sql-ns ctx)]
         (swap! orc-sheet-ids assoc :sql sheet-id)
+        sheet-id)))
+
+(defn- ensure-json-sheet!
+  "Ensure the JSON ontology ORC sheet is built, return its ID."
+  [ctx]
+  (or (get @orc-sheet-ids :json)
+      (let [;; Require dynamically to avoid circular deps at compile time
+            json-ns (requiring-resolve 'ai.obney.orc.ontology.sheets.json-ontology/build-json-ontology-pipeline!)
+            sheet-id (json-ns ctx)]
+        (swap! orc-sheet-ids assoc :json sheet-id)
         sheet-id)))
 
 ;; =============================================================================
@@ -386,6 +397,72 @@
                        :db-path db-path
                        :status (:status result)})))))
 
+(defn extract-concepts-from-json
+  "Extract concepts from JSON source using json_ontology ORC sheet.
+
+   Args:
+     ctx - Context with :event-store
+     source-id - UUID of the source
+     json-data - Parsed JSON data (map or vector) or JSON string
+     config - Configuration with :base-uri, :domain
+
+   Returns:
+     {:concepts [...] :relationships [...] :tbox {...} :abox [...] :owl-output string}"
+  [ctx source-id json-data config]
+  (let [;; Parse JSON string if needed
+        parsed-data (if (string? json-data)
+                      (json/read-str json-data :key-fn keyword)
+                      json-data)
+
+        ;; Build/get ORC sheet
+        sheet-id (ensure-json-sheet! ctx)
+
+        ;; Require run function dynamically
+        run-fn (requiring-resolve 'ai.obney.orc.ontology.sheets.json-ontology/run-json-to-ontology)
+
+        ;; Execute ORC workflow
+        result (run-fn ctx sheet-id
+                 {:json-data parsed-data
+                  :base-uri (or (:base-uri config) "http://json.local/")
+                  :domain (:domain config)})]
+
+    (if (= :success (:status result))
+      ;; Map ORC output to evolutionary format
+      (let [concepts (or (:concepts result) [])
+            relationships (or (:relationships result) [])
+            tbox (:tbox result)
+            abox (or (:abox result) [])]
+        {:concepts
+         (mapv (fn [c]
+                 {:uri (or (:uri c) (str (:base-uri config) (str/replace (or (:label c) "Unknown") #"\s+" "_")))
+                  :label (or (:label c) "Unknown")
+                  :definition (or (:definition c) "")
+                  :entity-type (or (:entity-type c) "Entity")
+                  :source-id source-id
+                  :confidence (or (:confidence c) 0.8)})
+               concepts)
+
+         :relationships
+         (mapv (fn [r]
+                 {:subject (or (:subject r) "")
+                  :predicate (or (:predicate r) "relatedTo")
+                  :object (or (:object r) "")
+                  :confidence (or (:confidence r) 0.8)})
+               relationships)
+
+         :tbox {:classes (or (:classes tbox) [])
+                :object-properties (or (:object-properties tbox) [])
+                :datatype-properties (or (:datatype-properties tbox) [])}
+
+         :abox abox
+         :owl-output (:owl-output result)})
+
+      ;; NEVER fall back - throw so the issue can be debugged and fixed
+      (throw (ex-info "ORC JSON extraction failed"
+                      {:error (:error result)
+                       :source-id source-id
+                       :status (:status result)})))))
+
 (defn extract-from-source
   "Extract concepts and relationships from a source.
    Dispatches to the appropriate ORC extraction pipeline based on source type.
@@ -417,7 +494,7 @@
         (throw (ex-info "SQL extraction requires :db-path or .db file path"
                         {:source-id source-id :source-type source-type}))))
 
-    "json" {:concepts [] :relationships []}  ;; TODO: JSON extraction
+    "json" (extract-concepts-from-json ctx source-id content config)
     "rdf" {:concepts [] :relationships []}   ;; TODO: RDF import
 
     ;; Auto-detect based on content/path
