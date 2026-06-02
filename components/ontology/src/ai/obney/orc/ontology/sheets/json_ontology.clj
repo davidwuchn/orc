@@ -201,16 +201,46 @@ Sample Data (first 2 records):
             :object-properties object-properties
             :datatype-properties []}}))
 
+(defn- extract-label
+  "Extract label from item using fallback chain (Issue 003).
+
+   Fallback order:
+   1. Use LLM-specified label-field if present
+   2. Fall back to first source-field
+   3. Fall back to synthetic label (type-index)"
+  [item label-field source-fields primary-type idx]
+  (let [;; Helper to get value from item (handles both keyword and string keys)
+        get-field (fn [field-name]
+                    (when field-name
+                      (or (get item (keyword field-name))
+                          (get item field-name))))
+        ;; Try label-field first
+        label-from-field (get-field label-field)
+        ;; Fall back to first source-field
+        label-from-source (when (and (nil? label-from-field) (seq source-fields))
+                            (get-field (first source-fields)))]
+    ;; Return first non-nil, or synthetic label
+    (or (some-> label-from-field str)
+        (some-> label-from-source str)
+        (str primary-type "-" idx))))
+
 (defn build-abox-fn
-  "Phase 9: Build A-Box (instances from JSON data)."
+  "Phase 9: Build A-Box (instances from JSON data).
+
+   Issue 003: Includes :label field in each individual for Grain schema compliance.
+   Label is extracted using fallback chain: label-field → source-field → synthetic."
   [{:keys [inputs]}]
   (let [{:keys [json-data concepts base-uri]} inputs
-        primary-type (or (:entity-type (first concepts)) "Entity")
+        primary-concept (first concepts)
+        primary-type (or (:entity-type primary-concept) "Entity")
+        label-field (:label-field primary-concept)
+        source-fields (:source-fields primary-concept)
         data-items (if (vector? json-data) json-data [json-data])
         instances (map-indexed
                     (fn [idx item]
                       {:uri (str base-uri (str/lower-case primary-type) "-" idx)
                        :type primary-type
+                       :label (extract-label item label-field source-fields primary-type idx)
                        :properties (into {} (map (fn [[k v]] [(name k) v]) item))})
                     data-items)]
     {:abox (vec instances)}))
@@ -263,11 +293,13 @@ Sample Data (first 2 records):
 
        ;; === Phase 3: Entity Discovery ===
        :entity-reasoning [:string {:description "Step-by-step reasoning for entity discovery"}]
+       ;; Issue 002: Added :label-field for Grain schema compliance
        :entity-types [:vector {:description "Discovered entity types"}
                       [:map
                        [:name :string]
                        [:type :string]
                        [:source-fields [:vector :string]]
+                       [:label-field {:optional true} :string]  ;; Field to use as label for individuals
                        [:definition :string]
                        [:confidence :double]]]
 
@@ -332,6 +364,7 @@ Even if field names are cryptic (like 'n' for name, 'a' for age), infer their me
         :retry {:max-attempts 2 :backoff-ms [200 1000]})
 
       ;; PHASE 3: Entity Type Discovery (LLM)
+      ;; Issue 002: Added label-field request for Grain schema compliance
       (sheet/llm "discover-entity-types"
         :model "google/gemini-3-flash-preview"
         :instruction "Identify entity types represented in this JSON.
@@ -340,11 +373,13 @@ For each entity type, provide:
 1. A meaningful name (PascalCase) - even if the JSON fields are cryptic
 2. The type category (Person, Organization, Event, Product, Location, Concept, etc.)
 3. Which JSON fields belong to this entity
-4. A brief definition based on the data
+4. Which field should be used as the human-readable label (label-field)
+5. A brief definition based on the data
 
 Return as JSON array:
-[{\"name\": \"Person\", \"type\": \"Person\", \"source-fields\": [\"n\", \"a\"], \"definition\": \"An individual with name and age\", \"confidence\": 0.9}]
+[{\"name\": \"Person\", \"type\": \"Person\", \"source-fields\": [\"n\", \"a\"], \"label-field\": \"n\", \"definition\": \"An individual with name and age\", \"confidence\": 0.9}]
 
+The label-field should be the field that best identifies each instance (usually name, title, or id).
 For cryptic fields, explain your reasoning (e.g., 'n' appears to be name based on string values like 'John Smith')."
         :reads [:structure-summary :domain :domain-description :naming-patterns]
         :writes [:entity-reasoning :entity-types]
