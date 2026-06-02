@@ -615,6 +615,8 @@
      query-text: Natural language search query
      opts:
        :scope - Filter to specific ontology scope (:failure, :success, :problem)
+       :ontology-id - Filter by single ontology-id
+       :ontology-ids - Filter by multiple ontology-ids (returns union)
        :limit - Maximum results (default 10)
        :min-similarity - Minimum cosine similarity threshold (default 0.5)
        :model-id - Embedding model to use (default: all-MiniLM-L6-v2)
@@ -623,16 +625,20 @@
      Vector of {:uri :similarity :label :description} sorted by similarity
 
    Requires concept embeddings to be generated first via ontology/embed-concepts-batch."
-  [ctx query-text & {:keys [scope limit min-similarity model-id]
+  [ctx query-text & {:keys [scope ontology-id ontology-ids limit min-similarity model-id]
                       :or {limit 10 min-similarity 0.5}}]
   (when (and ctx query-text)
     (let [;; Generate query embedding
           query-embedding (embedding/embed-text query-text
                                                  (when model-id {:model-id model-id}))
 
-          ;; Get stored concept embeddings
+          ;; Get stored concept embeddings (filtered by scope and/or ontology-id)
+          filter-opts (cond-> {}
+                        scope (assoc :scope scope)
+                        ontology-id (assoc :ontology-id ontology-id)
+                        ontology-ids (assoc :ontology-ids ontology-ids))
           concept-embeddings (rm/get-all-concept-embeddings ctx
-                                                             (when scope {:scope scope}))]
+                                                             (when (seq filter-opts) filter-opts))]
 
       (when (and query-embedding (seq concept-embeddings))
         ;; Search using embedding similarity
@@ -757,6 +763,8 @@
        :seed-uris - Collection of starting concept URIs for graph expansion
        :query-text - Natural language query for embedding/ColBERT search
        :scope - Filter to specific ontology scope
+       :ontology-id - Filter by single ontology-id
+       :ontology-ids - Filter by multiple ontology-ids (returns union)
        :limit - Maximum results (default 10)
        :min-similarity - Minimum embedding similarity (default 0.3)
        :max-depth - BFS expansion depth (default 2)
@@ -774,7 +782,7 @@
       :colbert-results [...]
       :method \"rrf\"
       :batches-used [:graph :embedding :colbert]}"
-  [ctx {:keys [seed-uris query-text scope limit min-similarity max-depth decay
+  [ctx {:keys [seed-uris query-text scope ontology-id ontology-ids limit min-similarity max-depth decay
                        colbert-index-id weights signals]
                 :or {limit 10 min-similarity 0.3 max-depth 2 decay 0.6
                      weights {:graph 1.0 :embedding 1.0 :colbert 1.0}
@@ -798,6 +806,8 @@
         embedding-results (when (and embedding-enabled? query-text)
                             (semantic-search-concepts ctx query-text
                                                        :scope scope
+                                                       :ontology-id ontology-id
+                                                       :ontology-ids ontology-ids
                                                        :limit (* 2 limit)
                                                        :min-similarity min-similarity))
 

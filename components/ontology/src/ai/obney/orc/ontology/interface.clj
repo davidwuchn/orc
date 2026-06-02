@@ -753,6 +753,8 @@
        :seed-uris - Collection of starting concept URIs for graph expansion
        :query-text - Natural language query for embedding search
        :scope - Filter to specific ontology scope
+       :ontology-id - Filter by single ontology-id
+       :ontology-ids - Filter by multiple ontology-ids (returns union)
        :limit - Maximum results (default 10)
        :min-similarity - Minimum embedding similarity (default 0.3)
        :max-depth - BFS expansion depth (default 2)

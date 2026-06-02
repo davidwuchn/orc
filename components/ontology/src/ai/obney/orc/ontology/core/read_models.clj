@@ -480,11 +480,23 @@
   (get (rmp/project ctx :ontology/concept-embeddings {:tags #{[:uri uri]}}) uri))
 
 (defn get-all-concept-embeddings
-  "Get all concept embeddings, optionally filtered by scope."
-  [ctx & [{:keys [scope]}]]
-  (if scope
-    (rmp/project ctx :ontology/concept-embeddings {:tags #{[:scope scope]}})
-    (rmp/project ctx :ontology/concept-embeddings)))
+  "Get all concept embeddings, optionally filtered by scope and/or ontology-id.
+
+   Options:
+     :scope       - Filter by concept scope
+     :ontology-id - Filter by single ontology-id
+     :ontology-ids - Filter by multiple ontology-ids (returns union)"
+  [ctx & [{:keys [scope ontology-id ontology-ids]}]]
+  (let [all-embeddings (if scope
+                         (rmp/project ctx :ontology/concept-embeddings {:tags #{[:scope scope]}})
+                         (rmp/project ctx :ontology/concept-embeddings))
+        ont-id-set (cond
+                     ontology-ids (set ontology-ids)
+                     ontology-id #{ontology-id}
+                     :else nil)]
+    (if ont-id-set
+      (into {} (filter #(contains? ont-id-set (:ontology-id (val %))) all-embeddings))
+      all-embeddings)))
 
 (defn get-tree-profile-embedding
   "Get embedding for a specific tree profile."
