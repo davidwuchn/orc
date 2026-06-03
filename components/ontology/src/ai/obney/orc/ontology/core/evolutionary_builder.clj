@@ -772,16 +772,17 @@
                                (mu/log ::embedding-failed :error (.getMessage e))
                                nil)))
 
-        ;; Emit embedding events if successful
-        ;; 1. Summary event for tracking
-        embedding-summary-event (when embedding-result
+        ;; Emit embedding events if successful and there are actual embeddings
+        ;; 1. Summary event for tracking (only if embeddings were generated)
+        embedding-summary-event (when (and embedding-result
+                                           (pos? (:embedded-count embedding-result 0)))
                                   (->event {:type :evolutionary/concepts-embedded
                                             :tags #{[:ontology ontology-id]
                                                     [:build build-id]}
                                             :body {:ontology-id ontology-id
                                                    :build-id build-id
                                                    :embedded-count (:embedded-count embedding-result)
-                                                   :embedding-fields (:fields-used embedding-result)
+                                                   :embedding-fields (or (:fields-used embedding-result) [])
                                                    :model-id (:model-id embedding-result)
                                                    :embedded-at (str (java.time.Instant/now))}}))
 
