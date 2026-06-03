@@ -23,9 +23,13 @@
 
 (def concept-events
   "Events that affect the concept graph read model"
-  #{:ontology/concept-created
+  #{;; Domain events (from commands)
+    :ontology/concept-created
     :ontology/concept-updated
-    :ontology/relationship-created})
+    :ontology/relationship-created
+    ;; Evolutionary events (from builder)
+    :evolutionary/concepts-extracted
+    :evolutionary/relationships-extracted})
 
 (def tree-profile-events
   "Events that affect tree profile read model"
@@ -105,6 +109,62 @@
       (-> state
           (update-in [source-uri :related] (fnil conj #{}) target-uri)))))
 
+;; -----------------------------------------------------------------------------
+;; Evolutionary Event Handlers
+;; -----------------------------------------------------------------------------
+;; These handlers process events from the evolutionary ontology builder,
+;; allowing concepts extracted from JSON/CSV/SQL/text sources to be queryable
+;; through the same read model as domain-created concepts.
+
+(defmethod concepts* :evolutionary/concepts-extracted
+  [state event]
+  ;; event has :concepts vector, each with :uri :label :definition :entity-type etc
+  (let [ontology-id (:ontology-id event)]
+    (reduce (fn [acc concept]
+              (let [uri (:uri concept)]
+                (assoc acc uri
+                       {:uri uri
+                        :id nil  ;; No concept-id from evolutionary path
+                        :ontology-id ontology-id
+                        :label (:label concept)
+                        :description (or (:definition concept) "")
+                        :scope (keyword (or (:entity-type concept) "entity"))
+                        :broader #{}
+                        :narrower #{}
+                        :related #{}
+                        :indicators []
+                        :alt-labels (or (:alt-labels concept) [])
+                        :confidence (:confidence concept 1.0)
+                        :source-id (:source-id concept)
+                        :created-at (:extracted-at event)})))
+            state
+            (:concepts event))))
+
+(defmethod concepts* :evolutionary/relationships-extracted
+  [state event]
+  ;; event has :relationships vector, each with :subject :predicate :object
+  (reduce (fn [acc {:keys [subject predicate object]}]
+            (case predicate
+              "skos:broader"
+              (-> acc
+                  (update-in [subject :broader] (fnil conj #{}) object)
+                  (update-in [object :narrower] (fnil conj #{}) subject))
+
+              "skos:narrower"
+              (-> acc
+                  (update-in [subject :narrower] (fnil conj #{}) object)
+                  (update-in [object :broader] (fnil conj #{}) subject))
+
+              "skos:related"
+              (-> acc
+                  (update-in [subject :related] (fnil conj #{}) object)
+                  (update-in [object :related] (fnil conj #{}) subject))
+
+              ;; Other predicates - store as related by default
+              (update-in acc [subject :related] (fnil conj #{}) object)))
+          state
+          (:relationships event)))
+
 (defmethod concepts* :default [state _] state)
 
 (defn concepts
@@ -113,7 +173,7 @@
   (reduce concepts* initial-state events))
 
 (defreadmodel :ontology concepts
-  {:events concept-events, :version 1}
+  {:events concept-events, :version 2}  ;; v2: Added evolutionary event support
   [state event] (concepts* state event))
 
 ;; =============================================================================

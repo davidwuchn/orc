@@ -346,3 +346,108 @@
 ;; 4. retrieval/hybrid-search - ✅ :ontology-id, :ontology-ids (passes through)
 ;;
 ;; All functions preserve backward compatibility (no filter = return all).
+
+;; =============================================================================
+;; Evolutionary Event Support Tests (ORC-003)
+;; =============================================================================
+;; Tests that the concepts read model correctly processes evolutionary events
+;; from the evolutionary ontology builder (JSON/CSV/SQL/text extraction).
+
+(defn make-concepts-extracted-event
+  "Create an evolutionary/concepts-extracted event for testing."
+  [{:keys [ontology-id concepts]}]
+  {:event/type :evolutionary/concepts-extracted
+   :ontology-id ontology-id
+   :concepts concepts
+   :extracted-at "2026-06-03T00:00:00Z"})
+
+(defn make-relationships-extracted-event
+  "Create an evolutionary/relationships-extracted event for testing."
+  [{:keys [ontology-id relationships]}]
+  {:event/type :evolutionary/relationships-extracted
+   :ontology-id ontology-id
+   :relationships relationships
+   :extracted-at "2026-06-03T00:00:00Z"})
+
+(deftest evolutionary-concepts-extracted-reduces-correctly
+  (testing "concepts from extraction event appear in read model"
+    (let [events [(make-concepts-extracted-event
+                    {:ontology-id ontology-a-id
+                     :concepts [{:uri "person:tavidee"
+                                 :label "Tavidee"
+                                 :entity-type "Person"
+                                 :definition "A person in the organization"}
+                                {:uri "org:bryc"
+                                 :label "BRYC"
+                                 :entity-type "Organization"
+                                 :alt-labels ["Blue Ridge Youth Collective"]}]})]
+          state (rm/concepts {} events)]
+      (is (= 2 (count state)) "should have 2 concepts")
+      (is (= "Tavidee" (:label (get state "person:tavidee"))))
+      (is (= :Person (:scope (get state "person:tavidee"))))
+      (is (= "BRYC" (:label (get state "org:bryc"))))
+      (is (= :Organization (:scope (get state "org:bryc"))))
+      (is (= ["Blue Ridge Youth Collective"] (:alt-labels (get state "org:bryc")))))))
+
+(deftest evolutionary-concepts-preserve-ontology-id
+  (testing "evolutionary concepts preserve ontology-id for filtering"
+    (let [events [(make-concepts-extracted-event
+                    {:ontology-id ontology-a-id
+                     :concepts [{:uri "person:alice" :label "Alice" :entity-type "Person"}]})
+                  (make-concepts-extracted-event
+                    {:ontology-id ontology-b-id
+                     :concepts [{:uri "org:acme" :label "Acme Corp" :entity-type "Organization"}]})]
+          state (rm/concepts {} events)]
+      (is (= ontology-a-id (:ontology-id (get state "person:alice"))))
+      (is (= ontology-b-id (:ontology-id (get state "org:acme")))))))
+
+(deftest evolutionary-relationships-build-graph
+  (testing "relationships create broader/narrower/related edges"
+    (let [concept-event (make-concepts-extracted-event
+                          {:ontology-id ontology-a-id
+                           :concepts [{:uri "failure:grounding" :label "Grounding" :entity-type "FailureType"}
+                                      {:uri "failure:hallucination" :label "Hallucination" :entity-type "FailureType"}]})
+          rel-event (make-relationships-extracted-event
+                      {:ontology-id ontology-a-id
+                       :relationships [{:subject "failure:hallucination"
+                                        :predicate "skos:broader"
+                                        :object "failure:grounding"}]})
+          state (rm/concepts {} [concept-event rel-event])]
+      (is (contains? (:broader (get state "failure:hallucination")) "failure:grounding")
+          "hallucination should have grounding as broader")
+      (is (contains? (:narrower (get state "failure:grounding")) "failure:hallucination")
+          "grounding should have hallucination as narrower"))))
+
+(deftest evolutionary-related-relationships
+  (testing "skos:related creates bidirectional edges"
+    (let [concept-event (make-concepts-extracted-event
+                          {:ontology-id ontology-a-id
+                           :concepts [{:uri "concept:a" :label "Concept A" :entity-type "Concept"}
+                                      {:uri "concept:b" :label "Concept B" :entity-type "Concept"}]})
+          rel-event (make-relationships-extracted-event
+                      {:ontology-id ontology-a-id
+                       :relationships [{:subject "concept:a"
+                                        :predicate "skos:related"
+                                        :object "concept:b"}]})
+          state (rm/concepts {} [concept-event rel-event])]
+      (is (contains? (:related (get state "concept:a")) "concept:b"))
+      (is (contains? (:related (get state "concept:b")) "concept:a")))))
+
+(deftest mixed-domain-and-evolutionary-events
+  (testing "domain and evolutionary events coexist in same projection"
+    (let [domain-event (make-concept-event
+                         {:ontology-id ontology-a-id
+                          :uri "failure:timeout"
+                          :label "Timeout"
+                          :scope :failure})
+          evolutionary-event (make-concepts-extracted-event
+                               {:ontology-id ontology-b-id
+                                :concepts [{:uri "person:bob"
+                                            :label "Bob"
+                                            :entity-type "Person"}]})
+          state (rm/concepts {} [domain-event evolutionary-event])]
+      (is (= 2 (count state)) "should have 2 concepts total")
+      (is (some? (get state "failure:timeout")) "domain concept should exist")
+      (is (some? (get state "person:bob")) "evolutionary concept should exist")
+      (is (= ontology-a-id (:ontology-id (get state "failure:timeout"))))
+      (is (= ontology-b-id (:ontology-id (get state "person:bob")))))))
