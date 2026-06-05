@@ -1545,45 +1545,26 @@
 ;; Slice 7: Rolling Judge Processor Tests
 ;; =============================================================================
 
-(deftest rlm-rolling-judge-evaluates-tree-test
-  (testing "Rolling judge processor evaluates :rlm/tree-generated events"
-    (with-rlm-test-context [ctx]
-      (let [call-count (atom 0)]
-        (with-redefs [dscloj/predict
-                      (fn [provider module inputs opts]
-                        (let [n (swap! call-count inc)]
-                          (cond
-                            (= n 1)
-                            {:outputs {:code "(emit-tree!
-                                                [:sequence
-                                                  [:llm {:instruction \"Test\" :reads [:doc] :writes [:out]}]
-                                                  [:final {:keys [:summary]}]])"}
-                             :usage {:prompt_tokens 100 :completion_tokens 80 :total_tokens 180}}
-                            :else
-                            {:outputs {:code "(final! {:summary \"done\"})"}
-                             :usage {:prompt_tokens 50 :completion_tokens 30 :total_tokens 80}})))]
-          (let [{:keys [sheet-id]} (setup-rlm-repl-researcher-sheet!
-                                     ctx
-                                     :instruction "Generate a BT"
-                                     :rlm-config {:recursive? false})
-                {:keys [promise tick-id]} (dispatch-async-execute! ctx sheet-id {:document "test doc"})
-                result (wait-for-completion promise :timeout-ms 10000)]
-            ;; Wait a bit for async processor to run
-            (Thread/sleep 100)
-            ;; Query for :rlm/tree-evaluated events
-            (let [eval-events (read-events-by-type (:event-store ctx) :rlm/tree-evaluated (:tenant-id ctx))]
-              ;; Should have emitted evaluation event
-              (is (pos? (count eval-events))
-                  "Rolling judge should emit :rlm/tree-evaluated event")
-              ;; Event should contain evaluation data
-              (when (pos? (count eval-events))
-                (let [event (first eval-events)]
-                  (is (some? (:tree-id event))
-                      "Evaluation event should have tree-id")
-                  (is (some? (:score event))
-                      "Evaluation event should have score")
-                  (is (some? (:feedback event))
-                      "Evaluation event should have feedback"))))))))))
+;; rlm-rolling-judge-evaluates-tree-test — RETIRED in Gap-2.
+;;
+;; This test previously asserted that the standalone `:rlm evaluate-rlm-tree`
+;; processor (subscribed to `:rlm/tree-generated`) emitted `:rlm/tree-evaluated`
+;; events with score + feedback + tree-id. That standalone processor was
+;; retired in Gap-2 of the judge-system-unification arc — its functionality
+;; moved to the unified evaluator protocol under the `:heuristic-structural`
+;; judge type.
+;;
+;; The equivalent integration is now tested at:
+;;
+;;   components/evaluation/test/ai/obney/orc/evaluation/judge_runtime_test.clj
+;;
+;; Specifically the tests `heuristic-structural-judge-recognized-and-emits`
+;; and `heuristic-structural-uses-real-evaluator-not-stub` exercise the
+;; new path: attach `:heuristic-structural` judge to a leaf node → host
+;; node emits `:generated-tree-raw` in its `:writes` → judge runtime
+;; invokes the extracted `evaluation/heuristic-structural/evaluate-tree-
+;; structure` heuristic → emits `:judge/score-emitted` with the structural
+;; score + feedback + dimensions.
 
 ;; =============================================================================
 ;; Slice 8: Ontology Few-Shot Examples Tests

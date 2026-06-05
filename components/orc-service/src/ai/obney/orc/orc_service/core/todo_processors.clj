@@ -394,7 +394,15 @@
                "\n"))))))
 
 (defn- fetch-tree-body
-  "Pull a tree-fingerprint description body via ontology/get-description.
+  "Pull a tree-class description body via ontology/get-description.
+
+   C-Loop-1: reads from :tree-class scope so the Living Description
+   loop's consolidator-updated bodies surface in the next R-Inject
+   run's prepend. Seeds are also recorded under :tree-class (via
+   seed-all!), so first-time runs see seed content via the same read
+   path. The classifier search index continues to partition by
+   :tree-fingerprint — that's the index lookup, not the body read.
+
    Returns nil on any failure (helper is best-effort — the prepend
    degrades to summary-only when the full body is unavailable)."
   [ctx target-id]
@@ -403,7 +411,7 @@
                             'ai.obney.orc.ontology.interface/get-description)]
       (try
         (when get-description
-          (get-description ctx :tree-fingerprint target-id))
+          (get-description ctx :tree-class target-id))
         (catch Exception _ nil)))))
 
 (defn- derive-seed-name
@@ -987,6 +995,7 @@
                                 :sheet-id sheet-id
                                 :tick-id tick-id
                                 :node-id node-id
+                                :node-type :repl-researcher
                                 :status effective-status
                                 :writes (normalize-output-keys (or effective-outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
@@ -2728,82 +2737,24 @@
   (assemble-execution-trace context))
 
 ;; =============================================================================
-;; RLM Rolling Judge Processor
+;; RLM Rolling Judge — RETIRED in Gap-2
 ;; =============================================================================
-
-(defn- evaluate-tree-structure
-  "Evaluate an RLM-generated tree structure heuristically.
-   Returns a map with :score (0.0-1.0), :feedback, and :dimensions."
-  [raw-dsl]
-  (let [;; Check for key structural elements
-        has-sequence? (and (vector? raw-dsl) (= :sequence (first raw-dsl)))
-        has-llm-node? (some (fn find-llm [node]
-                              (cond
-                                (not (vector? node)) false
-                                (= :llm (first node)) true
-                                :else (some find-llm (rest node))))
-                            (if (vector? raw-dsl) raw-dsl []))
-        has-final? (some (fn find-final [node]
-                           (cond
-                             (not (vector? node)) false
-                             (= :final (first node)) true
-                             :else (some find-final (rest node))))
-                         (if (vector? raw-dsl) raw-dsl []))
-        has-map-each? (some (fn find-map-each [node]
-                              (cond
-                                (not (vector? node)) false
-                                (= :map-each (first node)) true
-                                :else (some find-map-each (rest node))))
-                            (if (vector? raw-dsl) raw-dsl []))
-        ;; Calculate dimension scores
-        structure-score (cond
-                          (and has-sequence? has-final?) 1.0
-                          has-sequence? 0.7
-                          :else 0.3)
-        decomposition-score (cond
-                              has-map-each? 1.0
-                              has-llm-node? 0.6
-                              :else 0.2)
-        ;; Weighted average
-        overall-score (* 0.5 (+ (* 0.6 structure-score)
-                                 (* 0.4 decomposition-score)))
-        feedback (cond
-                   (and has-sequence? has-map-each? has-final?)
-                   "Excellent tree structure with proper decomposition pattern."
-                   (and has-sequence? has-llm-node? has-final?)
-                   "Good tree structure but could use map-each for better decomposition."
-                   has-sequence?
-                   "Basic tree structure. Consider adding sub-LLM calls for analysis."
-                   :else
-                   "Tree structure needs improvement. Use :sequence as root.")]
-    {:score overall-score
-     :feedback feedback
-     :dimensions [{:name "Structure" :weight 0.6 :score structure-score
-                   :feedback (if has-sequence? "Valid sequence root" "Missing sequence root")}
-                  {:name "Decomposition" :weight 0.4 :score decomposition-score
-                   :feedback (if has-map-each? "Uses map-each for parallelism" "Could benefit from map-each")}]}))
-
-(defn evaluate-rlm-tree
-  "Rolling judge processor for :rlm/tree-generated events.
-   Evaluates the tree structure and emits :rlm/tree-evaluated event."
-  [{:keys [event event-store] :as context}]
-  (let [tree-id (:tree-id event)
-        execution-id (:execution-id event)
-        raw-dsl (:raw-dsl event)
-        {:keys [score feedback dimensions]} (evaluate-tree-structure raw-dsl)]
-    {:result/events
-     [(->event
-       {:type :rlm/tree-evaluated
-        :tags #{[:tree tree-id]}
-        :body {:tree-id tree-id
-               :execution-id execution-id
-               :score score
-               :feedback feedback
-               :dimensions dimensions
-               :evaluated-at (str (java.time.Instant/now))}})]}))
-
-(defprocessor :rlm evaluate-rlm-tree
-  {:topics #{:rlm/tree-generated}}
-  "Rolling judge: evaluate RLM-generated tree structure."
-  [context]
-  (evaluate-rlm-tree context))
+;;
+;; The standalone `:rlm evaluate-rlm-tree` processor (heuristic-only
+;; structural eval of model-generated trees) is no longer here. Its
+;; functionality moved to the unified evaluator protocol:
+;;
+;;   - Heuristic re-extracted to:
+;;     `components/evaluation/src/.../core/heuristic_structural.clj`
+;;   - Wired as the `:heuristic-structural` judge type in:
+;;     `components/evaluation/src/.../core/judge_runtime.clj`
+;;   - Consumers attach it via `:sheet/set-node-judges` to specific
+;;     leaf nodes. The judge fires when the host node's :writes carry
+;;     a `:generated-tree-raw` entry — what a repl-researcher's Phase 1
+;;     emit-tree! produces.
+;;
+;; The `:rlm/tree-evaluated` event TYPE remains in the schema registry
+;; for backward compatibility with any external consumer, but no code
+;; in this repo emits it. New evaluations land as `:judge/score-emitted`
+;; events with `:judge-name "<consumer-chosen-name>"` and
+;; `:judge-config {:type :heuristic-structural}`.

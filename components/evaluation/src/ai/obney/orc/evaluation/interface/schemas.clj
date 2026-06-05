@@ -22,7 +22,25 @@
 ;; =============================================================================
 
 (defschemas events
-  {:evaluation/trace-evaluated
+  {;; Gap-1: unified evaluator protocol — per-event evaluator output.
+   ;; Emitted by the judge-runtime processor (subscribed to
+   ;; :sheet/node-execution-completed) for each attached judge that
+   ;; runs successfully. The consolidator (under Gap-3) consumes these
+   ;; events alongside raw execution evidence to update Living
+   ;; Description bodies.
+   :judge/score-emitted
+   [:map
+    [:sheet-id :uuid]
+    [:tick-id :uuid]
+    [:node-id :uuid]
+    [:judge-name :string]
+    [:judge-config :map]
+    [:score [:and number? [:>= 0.0] [:<= 1.0]]]
+    [:feedback :string]
+    [:dimensions [:vector DimensionScore]]
+    [:emitted-at :string]]
+
+   :evaluation/trace-evaluated
    [:map
     [:trace-id :uuid]
     [:sheet-id :uuid]

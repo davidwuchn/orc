@@ -370,6 +370,38 @@
       default-consolidation-threshold))
 
 ;; =============================================================================
+;; Gap-1 — Living Description opt-in flag read-model
+;; =============================================================================
+;;
+;; System-level boolean gating the WRITING side of the Living Description
+;; loop. State is a map `{:enabled? boolean}` because read-models always
+;; project to a map shape; the lone field is the flag itself.
+;; Default false when no event has been emitted (consumer must opt in).
+
+(defmulti living-description-enabled*
+  (fn [_state event] (:event/type event)))
+
+(defmethod living-description-enabled* :default [state _] state)
+
+(defmethod living-description-enabled* :ontology/living-description-enabled-set
+  [state event]
+  (assoc state :enabled? (boolean (:enabled? event))))
+
+(defn living-description-enabled
+  "Build the opt-in flag state from a seq of events."
+  [initial-state events]
+  (reduce living-description-enabled* initial-state events))
+
+(defreadmodel :ontology living-description-enabled
+  {:events #{:ontology/living-description-enabled-set} :version 1}
+  [state event] (living-description-enabled* state event))
+
+(defn get-living-description-enabled?
+  "Return the current Living Description opt-in flag (default false)."
+  [ctx]
+  (boolean (:enabled? (rmp/project ctx :ontology/living-description-enabled))))
+
+;; =============================================================================
 ;; C-2a-3c — Consolidation budget config read-model
 ;; =============================================================================
 ;;
@@ -579,12 +611,17 @@
 ;;            the consolidation-requested append for exactly-once
 ;;            semantics across concurrent processor handlers)
 ;;
-;; Three event types project:
+;; Four event types project:
 ;;   :sheet/node-execution-completed     → increments :delta + :total for
 ;;                                          [:node-type kw] AND
 ;;                                          [:node-instance [sheet node]]
 ;;   :sheet/rlm-tree-execution-completed → increments :delta + :total for
 ;;                                          [:tree-fingerprint fp]
+;;   :ontology/task-classified           → increments :delta + :total for
+;;                                          [:tree-class assigned-tree-id]
+;;                                          (C-Loop-1: drives the Living
+;;                                          Description loop at the
+;;                                          classifier's substrate)
 ;;   :ontology/consolidation-requested   → resets :delta to 0 (:total
 ;;                                          continues climbing)
 
@@ -618,6 +655,12 @@
     (bump-counter state [:tree-fingerprint fp])
     state))
 
+(defmethod consolidation-delta-counters* :ontology/task-classified
+  [state event]
+  (if-let [tree-class-id (:assigned-tree-id event)]
+    (bump-counter state [:tree-class tree-class-id])
+    state))
+
 (defmethod consolidation-delta-counters* :ontology/consolidation-requested
   [state event]
   (let [target-type (:target-type event)
@@ -632,8 +675,9 @@
 (defreadmodel :ontology consolidation-delta-counters
   {:events #{:sheet/node-execution-completed
              :sheet/rlm-tree-execution-completed
+             :ontology/task-classified
              :ontology/consolidation-requested}
-   :version 1}
+   :version 2}
   [state event] (consolidation-delta-counters* state event))
 
 (defn get-consolidation-delta

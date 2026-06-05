@@ -305,7 +305,13 @@
 
    :ontology/tree-description-updated
    [:map
-    [:target-type [:= :tree-fingerprint]]
+    ;; C-Loop-1: `:tree-class` joins `:tree-fingerprint` as a valid
+    ;; target-type. Tree-class descriptions are the substrate R-Inject's
+    ;; classifier reads — one per assigned tree-class — and are the
+    ;; consolidator's update target on the Living Description loop.
+    ;; Tree-fingerprint descriptions stay for per-shape cross-sheet
+    ;; metrics; they no longer drive R-Inject's prepend.
+    [:target-type [:enum :tree-fingerprint :tree-class]]
     ;; Either a SHA hash of canonical tree-raw (production fingerprinting)
     ;; OR a task-class UUID (matches the seed_principles.clj task-class
     ;; identity that C-1 already uses). Both are stable abstract keys the
@@ -385,6 +391,46 @@
     [:minted-at          :string]]
 
    ;; -------------------------------------------------------------------------
+   ;; Gap-6 — Anti-recency runtime audit events
+   ;; -------------------------------------------------------------------------
+   ;;
+   ;; Emitted by the consolidator's post-LLM validator when a protected
+   ;; entry (prior :confidence >= threshold AND :evidence-count >=
+   ;; threshold) is at risk in the LLM's output. :anti-recency-rejection
+   ;; fires when the entry is missing entirely from the LLM body —
+   ;; emission of the new description is blocked. :anti-recency-clamp-
+   ;; applied fires when the LLM dropped the entry's confidence by more
+   ;; than the configured max — the new body still emits but with the
+   ;; clamped confidence value.
+   ;;
+   ;; Operators can audit these events to see whether the validator is
+   ;; intervening (LLM regressions caught) or quiet (LLM compliance).
+
+   :ontology/anti-recency-rejection
+   [:map
+    [:target-type     [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
+    [:target-id       :any]
+    [:bucket          [:enum :strengths :weaknesses]]
+    [:entry-trait     :string]
+    [:prior-confidence number?]
+    [:prior-evidence-count :int]
+    [:reason          :keyword]
+    [:rejected-body   :map]
+    [:detected-at     :string]]
+
+   :ontology/anti-recency-clamp-applied
+   [:map
+    [:target-type     [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
+    [:target-id       :any]
+    [:bucket          [:enum :strengths :weaknesses]]
+    [:entry-trait     :string]
+    [:prior-confidence number?]
+    [:llm-confidence  number?]
+    [:clamped-confidence number?]
+    [:reason          :keyword]
+    [:detected-at     :string]]
+
+   ;; -------------------------------------------------------------------------
    ;; C-2a-3a — Consolidation trigger events
    ;; -------------------------------------------------------------------------
    ;;
@@ -396,24 +442,36 @@
 
    :ontology/consolidation-requested
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     ;; Granularity-specific target-id shape (mirrors the description events):
     ;; - :node-type → keyword (e.g. :llm)
     ;; - :node-instance → [sheet-id node-id] tuple of UUIDs
     ;; - :tree-fingerprint → string OR UUID (production hash or task-class UUID)
+    ;; - :tree-class → UUID of an assigned tree-class (the substrate
+    ;;   R-Inject's classifier reads via get-description)
     [:target-id [:or :keyword [:tuple :uuid :uuid] :string :uuid]]
     [:on-demand? :boolean]
     [:requested-at :string]]
 
    :ontology/consolidation-threshold-set
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     [:threshold :int]
+    [:set-at :string]]
+
+   ;; Gap-1: system-level opt-in to the Living Description loop. Gates the
+   ;; WRITING side — consolidator activity, threshold-tracking event
+   ;; emission, per-event evaluator runtime (judges). Default off when no
+   ;; event has been emitted. Forward-compatible for C-3 judge-feedback
+   ;; integration and C-Loop-2 minting affordance.
+   :ontology/living-description-enabled-set
+   [:map
+    [:enabled? :boolean]
     [:set-at :string]]
 
    :ontology/consolidation-budget-set
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     [:budget :int]
     [:set-at :string]]
 
@@ -661,6 +719,44 @@
     [:target-id [:or :string :uuid]]
     [:body description-body]]
 
+   :ontology/record-tree-class-description
+   [:map
+    ;; C-Loop-1: tree-class id (stable seed UUID or fresh-mint root UUID
+    ;; the classifier assigned). Distinct from :tree-fingerprint, which
+    ;; keys on observed-tree SHA strings.
+    [:target-id [:or :string :uuid]]
+    [:body description-body]]
+
+   ;; Gap-6: audit-trail commands for the anti-recency validator.
+   ;; Dispatched by the consolidator processor when the validator
+   ;; intervenes; emit :ontology/anti-recency-rejection or
+   ;; :ontology/anti-recency-clamp-applied respectively. These exist
+   ;; instead of direct es/append calls so the consolidator follows
+   ;; the standard Grain pattern: events flow through command handlers,
+   ;; never bypassing them.
+
+   :ontology/record-anti-recency-rejection
+   [:map
+    [:target-type     [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
+    [:target-id       :any]
+    [:bucket          [:enum :strengths :weaknesses]]
+    [:entry-trait     :string]
+    [:prior-confidence number?]
+    [:prior-evidence-count :int]
+    [:reason          :keyword]
+    [:rejected-body   :map]]
+
+   :ontology/record-anti-recency-clamp
+   [:map
+    [:target-type     [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
+    [:target-id       :any]
+    [:bucket          [:enum :strengths :weaknesses]]
+    [:entry-trait     :string]
+    [:prior-confidence number?]
+    [:llm-confidence  number?]
+    [:clamped-confidence number?]
+    [:reason          :keyword]]
+
    ;; -------------------------------------------------------------------------
    ;; C-2c-1 — Auto-classifier command
    ;; -------------------------------------------------------------------------
@@ -735,7 +831,7 @@
 
    :ontology/request-consolidation
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     [:target-id [:or :keyword [:tuple :uuid :uuid] :string :uuid]]
     ;; Defaults to true when invoked through the REPL helper; the
     ;; threshold-tracking processor emits with :on-demand? false.
@@ -743,13 +839,19 @@
 
    :ontology/set-consolidation-threshold
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     [:threshold :int]]
 
    :ontology/set-consolidation-budget
    [:map
-    [:target-type [:enum :node-type :node-instance :tree-fingerprint]]
+    [:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]]
     [:budget :int]]
+
+   ;; Gap-1: opt-in flag command (see :ontology/living-description-enabled-set
+   ;; event for rationale).
+   :ontology/set-living-description-enabled
+   [:map
+    [:enabled? :boolean]]
 
    :ontology/set-reindex-config
    [:map

@@ -705,6 +705,70 @@
              :body body
              :recorded-at (now-str)}})]})
 
+(defcommand :ontology record-tree-class-description
+  "C-Loop-1: record (or update) the description for a tree-class —
+   the substrate R-Inject's classifier reads via get-description.
+   Distinct from :tree-fingerprint, which keys on canonical-S-expr
+   SHAs of observed trees; :tree-class keys on the stable seed UUID
+   (or fresh-mint root UUID) the classifier assigns. Emits the same
+   :ontology/tree-description-updated event with :target-type :tree-class."
+  [{{:keys [target-id body]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/tree-description-updated
+      :tags #{[:description-target (stable-uuid-from
+                                     (str "tree-class:" target-id))]}
+      :body {:target-type :tree-class
+             :target-id target-id
+             :body body
+             :recorded-at (now-str)}})]})
+
+(defcommand :ontology record-anti-recency-rejection
+  "Gap-6: record an audit event when the anti-recency validator
+   REJECTED an emission because the LLM-produced body dropped a
+   protected entry (high confidence + high evidence-count) from the
+   prior body. Emits :ontology/anti-recency-rejection. Audit trail
+   only — does not affect the description read-model."
+  [{{:keys [target-type target-id bucket entry-trait prior-confidence
+            prior-evidence-count reason rejected-body]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/anti-recency-rejection
+      :tags #{[:description-target (stable-uuid-from
+                                     (str target-type ":" target-id))]}
+      :body {:target-type target-type
+             :target-id target-id
+             :bucket bucket
+             :entry-trait entry-trait
+             :prior-confidence prior-confidence
+             :prior-evidence-count prior-evidence-count
+             :reason reason
+             :rejected-body rejected-body
+             :detected-at (now-str)}})]})
+
+(defcommand :ontology record-anti-recency-clamp
+  "Gap-6: record an audit event when the anti-recency validator
+   CLAMPED a protected entry's confidence because the LLM dropped it
+   by more than max-confidence-decrease-per-cycle. Emits :ontology/
+   anti-recency-clamp-applied. Audit trail only — the clamped body
+   is still emitted normally via record-description."
+  [{{:keys [target-type target-id bucket entry-trait prior-confidence
+            llm-confidence clamped-confidence reason]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/anti-recency-clamp-applied
+      :tags #{[:description-target (stable-uuid-from
+                                     (str target-type ":" target-id))]}
+      :body {:target-type target-type
+             :target-id target-id
+             :bucket bucket
+             :entry-trait entry-trait
+             :prior-confidence prior-confidence
+             :llm-confidence llm-confidence
+             :clamped-confidence clamped-confidence
+             :reason reason
+             :detected-at (now-str)}})]})
+
 ;; =============================================================================
 ;; C-2a-3a — Consolidation trigger commands
 ;; =============================================================================
@@ -786,6 +850,21 @@
                                      (str "threshold:" (name target-type)))]}
       :body {:target-type target-type
              :threshold threshold
+             :set-at (now-str)}})]})
+
+(defcommand :ontology set-living-description-enabled
+  "Gap-1: flip the system-level opt-in for the Living Description loop.
+   When set to true, the writing side of the loop activates — consolidator
+   handles requests, threshold processor's consolidation-requested emissions
+   are honored, the per-event evaluator runtime auto-executes attached
+   judges, and (future C-3) judge feedback feeds into consolidator inputs.
+   Default false (consumer must opt in)."
+  [{{:keys [enabled?]} :command}]
+  {:command-result/events
+   [(->event
+     {:type :ontology/living-description-enabled-set
+      :tags #{[:description-target (stable-uuid-from "living-description-enabled-config")]}
+      :body {:enabled? enabled?
              :set-at (now-str)}})]})
 
 (defcommand :ontology set-consolidation-budget

@@ -70,6 +70,20 @@
   (core/get-blackboard-by-key ctx sheet-id))
 
 ;; =============================================================================
+;; Judge Read Model Functions (Gap-1)
+;; =============================================================================
+
+(defn get-judges
+  "Get all judges declared for a sheet as a map keyed by judge name."
+  [ctx sheet-id]
+  (core/get-judges ctx sheet-id))
+
+(defn get-judge
+  "Get a single declared judge by name."
+  [ctx sheet-id judge-name]
+  (core/get-judge ctx sheet-id judge-name))
+
+;; =============================================================================
 ;; Tick Read Model Functions
 ;; =============================================================================
 

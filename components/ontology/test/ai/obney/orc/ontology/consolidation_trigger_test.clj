@@ -328,3 +328,111 @@
             "On-demand request emits consolidation-requested regardless of delta")
         (is (= 0 (ontology/get-consolidation-delta ctx :node-type :map-each))
             "After the on-demand fire, the counter is reset to 0")))))
+
+;; =============================================================================
+;; C-Loop-1 — Living Description loop: :tree-class as a target-type
+;; =============================================================================
+;;
+;; Option C: promote :tree-class to a first-class target-type so the
+;; consolidator updates per-tree-class bodies — the substrate that
+;; R-Inject's classifier reads via get-description. The threshold-driver
+;; source for :tree-class is :ontology/task-classified (one event per
+;; R-Inject run assigned to that class), distinct from the per-fingerprint
+;; layer which counts :sheet/rlm-tree-execution-completed.
+
+(defn- assign-task-class! [ctx assigned-tree-id]
+  (cp/process-command
+    (assoc ctx :command
+           {:command/name :ontology/assign-task-class
+            :command/id (random-uuid)
+            :command/timestamp (time/now)
+            :source-sheet-id (random-uuid)
+            :source-tick-id (random-uuid)
+            :source-node-id (random-uuid)
+            :assigned-tree-id assigned-tree-id
+            :confidence 0.95
+            :top-candidates []
+            :reasoning "test"
+            :was-fresh-mint? false})))
+
+(deftest delta-counter-ticks-on-task-classified-for-tree-class
+  (testing "After 3 :ontology/task-classified events for the same :assigned-tree-id, the counter for [:tree-class id] is 3"
+    (with-test-ctx [ctx]
+      (let [tree-class-id (random-uuid)]
+        (assign-task-class! ctx tree-class-id)
+        (assign-task-class! ctx tree-class-id)
+        (assign-task-class! ctx tree-class-id)
+        (Thread/sleep 100)
+        (is (= 3 (ontology/get-consolidation-delta ctx :tree-class tree-class-id))
+            "Counter ticks once per :ontology/task-classified with matching assigned-tree-id")))))
+
+;; =============================================================================
+;; Gap-1 RED#1 — Living Description opt-in flag round-trips
+;; =============================================================================
+;;
+;; New system-level flag gating the WRITING side of the Living Description
+;; loop (consolidator + threshold tracking + future per-event evaluator
+;; runtime). Mirrors the existing set-consolidation-threshold pattern:
+;; event-sourced config, read-model projects state, public query reads it.
+;; Default OFF — consumers must explicitly opt in.
+
+(deftest living-description-enabled-defaults-false-when-unset
+  (testing "get-living-description-enabled? returns false when no opt-in event has been emitted"
+    (with-test-ctx [ctx]
+      (is (false? (ontology/get-living-description-enabled? ctx))
+          "Default is false (opt-in only)"))))
+
+(deftest set-living-description-enabled-true-then-query-returns-true
+  (testing "After :ontology/set-living-description-enabled true, the query returns true"
+    (with-test-ctx [ctx]
+      (cp/process-command
+        (assoc ctx :command
+               {:command/name :ontology/set-living-description-enabled
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :enabled? true}))
+      (Thread/sleep 100)
+      (is (true? (ontology/get-living-description-enabled? ctx))
+          "Query reflects the set value"))))
+
+(deftest set-living-description-enabled-false-after-true-flips-it-off
+  (testing "Setting false after true flips the flag back off"
+    (with-test-ctx [ctx]
+      (cp/process-command
+        (assoc ctx :command
+               {:command/name :ontology/set-living-description-enabled
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :enabled? true}))
+      (Thread/sleep 100)
+      (cp/process-command
+        (assoc ctx :command
+               {:command/name :ontology/set-living-description-enabled
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :enabled? false}))
+      (Thread/sleep 100)
+      (is (false? (ontology/get-living-description-enabled? ctx))
+          "After flip-back, query returns false"))))
+
+(deftest threshold-processor-fires-on-task-classified-for-tree-class
+  (testing "After threshold-N task-classified events for the same tree-class-id, one :ontology/consolidation-requested fires"
+    (with-test-ctx [ctx]
+      ;; Lower threshold to 3 for a fast deterministic test
+      (cp/process-command
+        (assoc ctx :command
+               {:command/name :ontology/set-consolidation-threshold
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :target-type :tree-class
+                :threshold 3}))
+      (Thread/sleep 100)
+      (let [tree-class-id (random-uuid)]
+        (assign-task-class! ctx tree-class-id)
+        (assign-task-class! ctx tree-class-id)
+        (assign-task-class! ctx tree-class-id)
+        (Thread/sleep 400)
+        (is (= 1 (count-consolidation-requested-events ctx :tree-class tree-class-id))
+            "Exactly one consolidation-requested fires after threshold is crossed")
+        (is (= 0 (ontology/get-consolidation-delta ctx :tree-class tree-class-id))
+            "Counter resets to 0 after the trigger fires")))))

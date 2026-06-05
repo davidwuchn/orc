@@ -504,6 +504,9 @@
     [:writes [:map-of :keyword :any]]
     [:duration-ms {:optional true} :int]
     [:inputs {:optional true} [:map-of :keyword :any]]
+    ;; Gap-7: carry through to the event body. See :completion-kind on
+    ;; :sheet/node-execution-completed.
+    [:completion-kind {:optional true} [:enum :tree-iteration :terminal]]
     ;; Optional per-node token usage from LLM calls. Universal — applies to
     ;; any leaf node that calls an LLM, not just RLM Phase 2 contexts.
     [:usage {:optional true}
@@ -949,7 +952,14 @@
     ;; C-2a-2: node-type keyword carried through from the command for the
     ;; per-node-type rolling-metrics aggregator. Optional for backwards
     ;; compatibility with old replayed events.
-    [:node-type {:optional true} :keyword]]
+    [:node-type {:optional true} :keyword]
+    ;; Gap-7: distinguishes intermediate-tree-iteration completions of
+    ;; recursive repl-researcher nodes (where :generated-tree-raw is in
+    ;; :writes) from the terminal (final!) completion (where the
+    ;; synthesized task outputs are in :writes). Used by the judge
+    ;; runtime's resolver to route appropriate judges per kind.
+    ;; Optional — legacy / non-repl-researcher events omit it.
+    [:completion-kind {:optional true} [:enum :tree-iteration :terminal]]]
 
    ;; RLM-specific learning-signal event. Fires alongside the generic
    ;; node-execution-completed when an LLM call completes inside an RLM

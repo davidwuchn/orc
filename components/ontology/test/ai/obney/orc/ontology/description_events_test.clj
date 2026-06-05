@@ -238,6 +238,29 @@
           (is (= :tree-fingerprint (:target-type e)))
           (is (= fingerprint (:target-id e))))))))
 
+(deftest record-tree-class-description-fans-out-to-event
+  (testing "C-Loop-1: :ontology/record-tree-class-description emits :ontology/tree-description-updated with :target-type :tree-class"
+    (with-test-ctx [ctx]
+      (let [tree-class-id (random-uuid)
+            cmd {:command/name :ontology/record-tree-class-description
+                 :command/id (random-uuid)
+                 :command/timestamp (time/now)
+                 :target-id tree-class-id
+                 :body sample-description-body}
+            result (cp/process-command (assoc ctx :command cmd))
+            events (:command-result/events result)]
+        (is (= 1 (count events)))
+        (let [e (first events)]
+          (is (= :ontology/tree-description-updated (:event/type e)))
+          (is (= :tree-class (:target-type e)))
+          (is (= tree-class-id (:target-id e))))
+        (Thread/sleep 100)
+        (is (= (:summary sample-description-body)
+               (:summary (ontology/get-description ctx :tree-class tree-class-id)))
+            "get-description :tree-class returns the recorded body")
+        (is (nil? (ontology/get-description ctx :tree-fingerprint tree-class-id))
+            ":tree-class write does not leak into :tree-fingerprint scope")))))
+
 ;; =============================================================================
 ;; RED #6 — read model handles all three granularities cleanly
 ;; =============================================================================
@@ -377,16 +400,30 @@
 (deftest seed-all-emits-everything-and-each-is-queryable
   (testing "seed-all! emits every authored seed; get-description retrieves each one's body verbatim"
     (with-test-ctx [ctx]
-      (let [results (seeds/seed-all! ctx)]
-        (is (= 45 (count results))
-            (str "seed-all! should emit exactly 45 commands (10 node-type + 23 tree-fingerprint + 12 behavioral-subtree). Got " (count results))))
+      (let [results (seeds/seed-all! ctx)
+            tree-fp-count (count seeds/all-tree-fingerprint-seeds)
+            expected (+ (count seeds/all-node-type-seeds)
+                        tree-fp-count
+                        ;; C-Loop-1: each tree-fingerprint seed is also
+                        ;; recorded under :tree-class scope (same target-id,
+                        ;; same body) so the Living Description loop's
+                        ;; consolidator has a non-nil current-description
+                        ;; on its first cycle.
+                        tree-fp-count
+                        (count seeds/all-behavioral-subtree-seeds))]
+        (is (= expected (count results))
+            (str "seed-all! should emit " expected
+                 " commands (10 node-type + 23 tree-fingerprint + 23 tree-class duplicates + 12 behavioral-subtree). Got "
+                 (count results))))
       (Thread/sleep 200)
       (doseq [{:keys [target-id body]} seeds/all-node-type-seeds]
         (is (= body (ontology/get-description ctx :node-type target-id))
             (str "Node-type seed " (pr-str target-id) " should be queryable verbatim")))
       (doseq [{:keys [target-id body]} seeds/all-tree-fingerprint-seeds]
         (is (= body (ontology/get-description ctx :tree-fingerprint target-id))
-            (str "Tree-fingerprint seed " (pr-str target-id) " should be queryable verbatim")))
+            (str "Tree-fingerprint seed " (pr-str target-id) " should be queryable verbatim"))
+        (is (= body (ontology/get-description ctx :tree-class target-id))
+            (str "C-Loop-1: tree-class seed " (pr-str target-id) " should also be queryable verbatim under :tree-class scope")))
       (doseq [{:keys [target-id body]} seeds/all-behavioral-subtree-seeds]
         (is (= body (ontology/get-description ctx :tree-fingerprint target-id))
             (str "Behavioral-subtree seed " (pr-str target-id) " should be queryable verbatim"))))))

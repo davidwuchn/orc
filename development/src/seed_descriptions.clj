@@ -3214,7 +3214,8 @@
   (let [cmd-name (case granularity
                    :node-type        :ontology/record-node-type-description
                    :node-instance    :ontology/record-node-instance-description
-                   :tree-fingerprint :ontology/record-tree-description)]
+                   :tree-fingerprint :ontology/record-tree-description
+                   :tree-class       :ontology/record-tree-class-description)]
     (cp/process-command
       (assoc ctx :command {:command/name cmd-name
                            :command/id (random-uuid)
@@ -3227,11 +3228,20 @@
    command-result maps. R05a: behavioral-subtree seeds are emitted via
    the same :ontology/record-tree-description command path; their
    :scope :behavioral-subtree body routes them to the R05a reactive
-   processor rather than C-2d-1's tree-class processor."
+   processor rather than C-2d-1's tree-class processor.
+
+   C-Loop-1: each tree-fingerprint seed is ALSO recorded under
+   :tree-class scope (same target-id, same body). This gives the
+   Living Description loop's consolidator a non-nil current-description
+   to refine on its first cycle, AND lets apply-r05-classifier-context
+   read seed content via `get-description :tree-class` from bootstrap
+   onward. Tree-fingerprint events stay for the existing classifier
+   search index path (the ColBERT corpus partitions by granularity)."
   [ctx]
   (concat
     (mapv #(seed-one! ctx :node-type %) all-node-type-seeds)
     (mapv #(seed-one! ctx :tree-fingerprint %) all-tree-fingerprint-seeds)
+    (mapv #(seed-one! ctx :tree-class %) all-tree-fingerprint-seeds)
     (mapv #(seed-one! ctx :tree-fingerprint %) all-behavioral-subtree-seeds)))
 
 (comment

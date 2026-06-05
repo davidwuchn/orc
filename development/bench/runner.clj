@@ -125,9 +125,15 @@
 ;; =============================================================================
 
 (defn- setup-task-sheet! [ctx task documents]
-  "Create a sheet for the task with appropriate inputs."
+  "Create a sheet for the task with appropriate inputs.
+
+   Sheet name is suffixed with a fresh UUID so back-to-back runs of the
+   same task in one process don't collide on the :sheet/create-sheet
+   uniqueness constraint (which silently turns a re-run into a nil
+   sheet-id and a 600s tick-tree deref-timeout)."
   (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command
-                                            :name (str "Task: " (:name task))))
+                                            :name (str "Task: " (:name task)
+                                                       " — " (random-uuid))))
         sheet-id (-> sheet-result :command-result/events first :sheet-id)]
 
     ;; Declare document keys based on task

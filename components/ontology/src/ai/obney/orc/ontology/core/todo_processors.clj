@@ -220,16 +220,28 @@
   (when-let [fp (:tree-fingerprint event)]
     (maybe-fire-consolidation! context :tree-fingerprint fp)))
 
+(defn on-task-classified
+  "C-Loop-1 threshold-trigger logic for :ontology/task-classified.
+   The classifier's substrate — one assignment per R-Inject run ticks
+   the counter under [:tree-class assigned-tree-id]. When the per-
+   tree-class threshold crosses, the consolidator updates the
+   description body the classifier reads from."
+  [{:keys [event] :as context}]
+  (when-let [tree-class-id (:assigned-tree-id event)]
+    (maybe-fire-consolidation! context :tree-class tree-class-id)))
+
 (defprocessor :ontology on-execution-completed-check-threshold
   {:topics #{:sheet/node-execution-completed
-             :sheet/rlm-tree-execution-completed}}
-  "C-2a-3a: after each execution-completion event, check whether the
-   affected target's delta-counter has crossed its configured threshold;
-   emit :ontology/request-consolidation if so."
+             :sheet/rlm-tree-execution-completed
+             :ontology/task-classified}}
+  "C-2a-3a + C-Loop-1: after each execution-completion or task-classified
+   event, check whether the affected target's delta-counter has crossed
+   its configured threshold; emit :ontology/request-consolidation if so."
   [{:keys [event] :as context}]
   (case (:event/type event)
     :sheet/node-execution-completed     (on-node-execution-completed context)
     :sheet/rlm-tree-execution-completed (on-rlm-tree-execution-completed context)
+    :ontology/task-classified           (on-task-classified context)
     nil))
 
 ;; =============================================================================

@@ -402,3 +402,50 @@
         (testing ":tree-id stays accessible at top of :context for downstream consumers"
           (is (= structural-tree-id (get-in result-node [:context :tree-id]))
               ":tree-id preserved at the top level for any non-R-Inject reader"))))))
+
+;; =============================================================================
+;; C-Loop-1 — apply-r05-classifier-context reads tree bodies under :tree-class
+;; =============================================================================
+;;
+;; The Living Description loop: consolidator writes per-tree-class bodies
+;; (the substrate the prepend reads). Bootstrap seeds are also recorded
+;; under :tree-class (via seed-all!), so first-time runs see seed content
+;; via the same read path. The fetch-tree-body call site MUST request
+;; :tree-class scope so the Living Description loop's updates surface
+;; in the next R-Inject run's prepend.
+
+(deftest prepend-fetches-tree-body-under-tree-class-scope
+  (testing "C-Loop-1: apply-r05-classifier-context's fetch-tree-body calls get-description with :tree-class granularity"
+    (let [structural-target (random-uuid)
+          captured-calls (atom [])
+          tree-class-body {:summary "tree-class-bound body"
+                           :capabilities ["x"] :strengths [] :weaknesses []
+                           :representative-uses ["x"] :avoid-when ["x"]
+                           :version 2 :consolidated-from-event-count 5}
+          payload {:structural {:assigned-tree-id structural-target
+                                :confidence 0.92
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 match"
+                                :top-candidates [(mk-structural-candidate
+                                                   structural-target
+                                                   "Top-1 match"
+                                                   "summary content"
+                                                   0.92)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors []
+                                :rerank-fallback? false}}
+          node (mk-node "Test instruction" payload)]
+      (with-redefs [ontology/get-description
+                    (fn [_ctx granularity target-id]
+                      (swap! captured-calls conj [granularity target-id])
+                      ;; Return body when asked for :tree-class so the
+                      ;; happy-path rendering proceeds; nil for any other
+                      ;; granularity so the test fails loudly if the
+                      ;; helper falls back to :tree-fingerprint.
+                      (when (= granularity :tree-class)
+                        tree-class-body))]
+        (tp/apply-r05-classifier-context node {}))
+      (is (some (fn [[g _]] (= g :tree-class)) @captured-calls)
+          "fetch-tree-body should call get-description with :tree-class granularity")
+      (is (not-any? (fn [[g _]] (= g :tree-fingerprint)) @captured-calls)
+          "fetch-tree-body should NOT call get-description with :tree-fingerprint scope — Option C migrates the read path to :tree-class"))))

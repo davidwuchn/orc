@@ -37,6 +37,10 @@
 (def get-blackboard-for-sheet rm/get-blackboard-for-sheet)
 (def get-blackboard-by-key rm/get-blackboard-by-key)
 
+;; Judge functions (Gap-1: per-event evaluator runtime reads these)
+(def get-judges rm/get-judges)
+(def get-judge rm/get-judge)
+
 ;; Tick functions
 (def get-tick rm/get-tick)
 

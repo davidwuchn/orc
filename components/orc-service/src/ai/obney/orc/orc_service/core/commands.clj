@@ -882,7 +882,13 @@
 
 (defcommand :sheet set-node-judges
   {:authorized? authenticated?}
-  "Set which evaluation judges apply to a node."
+  "Set which evaluation judges apply to a node.
+
+   Gap-5: accepts both `:leaf` and `:repl-researcher` node types. The
+   judge runtime fires on `:sheet/node-execution-completed` events
+   regardless of executor kind; allowing repl-researcher attachment
+   lets consumers override the Gap-5 default-attachment behavior on
+   any repl-researcher node."
   [{{:keys [sheet-id node-id judges]} :command
     :as ctx}]
   (let [node (rm/get-node ctx sheet-id node-id)
@@ -893,9 +899,9 @@
       {::anom/category ::anom/not-found
        ::anom/message "Node not found"}
 
-      (not= :leaf (:type node))
+      (not (contains? #{:leaf :repl-researcher} (:type node)))
       {::anom/category ::anom/incorrect
-       ::anom/message "Only leaf nodes can have evaluation judges"}
+       ::anom/message "Only :leaf and :repl-researcher nodes can have evaluation judges"}
 
       (seq unknown-judges)
       {::anom/category ::anom/not-found
@@ -1024,9 +1030,22 @@
    atomically with the completion event to avoid race conditions.
 
    Optional :usage carries per-node token counts from LLM calls."
-  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs usage node-type]} :command
+  [{{:keys [sheet-id tick-id node-id status writes duration-ms error inputs usage
+            node-type completion-kind]} :command
     :as ctx}]
-  (let [completion-event (->event
+  (let [;; Gap-7: when the dispatch site didn't explicitly set
+        ;; :completion-kind but the node is a recursive repl-researcher,
+        ;; derive the kind from :status. :tree-generated marks an
+        ;; intermediate Phase 1 emit-tree iteration; :success/:failure
+        ;; marks the terminal (final!) call.
+        derived-kind (when (and (nil? completion-kind)
+                                (= :repl-researcher node-type))
+                       (cond
+                         (= :tree-generated status) :tree-iteration
+                         (contains? #{:success :failure :timeout} status) :terminal
+                         :else nil))
+        effective-completion-kind (or completion-kind derived-kind)
+        completion-event (->event
                            {:type :sheet/node-execution-completed
                             :tags #{[:sheet sheet-id]
                                     [:node node-id]
@@ -1043,7 +1062,13 @@
                                     ;; C-2a-2: propagate :node-type so the
                                     ;; per-node-type aggregator can partition
                                     ;; without looking up via the sheets RM.
-                                    (some? node-type) (assoc :node-type node-type))})
+                                    (some? node-type) (assoc :node-type node-type)
+                                    ;; Gap-7: distinguish intermediate vs
+                                    ;; terminal repl-researcher completions so
+                                    ;; judge routing can pick the right grader
+                                    ;; per kind.
+                                    (some? effective-completion-kind)
+                                    (assoc :completion-kind effective-completion-kind))})
         ;; For tick-scoped executions with successful writes, emit bb writes atomically
         ;; Also handle :tree-generated status (RLM two-phase execution)
         tick-scoped? (some? (rm/get-tick-execution-context ctx tick-id))

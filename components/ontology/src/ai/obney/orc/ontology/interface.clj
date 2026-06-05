@@ -157,6 +157,16 @@
   [ctx target-type]
   (rm/get-recent-consolidation-count ctx target-type))
 
+(defn get-living-description-enabled?
+  "Gap-1: return the system-level Living Description opt-in flag.
+   Default false when no `:ontology/set-living-description-enabled`
+   event has been emitted. When true, the writing side of the loop
+   activates (consolidator, threshold tracking, per-event evaluator
+   runtime). Read side (R-Inject's :auto-classify? in :rlm config)
+   is independent."
+  [ctx]
+  (rm/get-living-description-enabled? ctx))
+
 (defn get-reindex-config
   "C-2b-1: return the current ColBERT re-index configuration —
    {:reindex-threshold-events N :reindex-timer-minutes T}. Falls back

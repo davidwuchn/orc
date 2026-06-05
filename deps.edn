@@ -32,6 +32,7 @@
            :test {:extra-paths ["components/orc-service/test"
                                 "components/gepa/test"
                                 "components/colbert/test"
+                                "components/evaluation/test"
                                 "components/ontology/test"
                                 "components/mcp-sheet-builder/test"
                                 "components/predict-rlm-pdf/test"

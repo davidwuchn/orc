@@ -57,12 +57,22 @@
        "  A consistent + substantial recent shift (delta of >0.20 sustained, OR aggregate\n"
        "  evidence-count high but recent counter-evidence consistent) warrants larger changes.\n\n"
        "INPUTS PROVIDED:\n"
-       "- :target-type — the granularity: :node-type, :node-instance, or :tree-fingerprint\n"
+       "- :target-type — the granularity: :node-type, :node-instance, :tree-fingerprint, or :tree-class\n"
+       "  (:tree-class is the substrate the model's prompt-injection reads from —\n"
+       "  per-class descriptions evolve across runs of tasks assigned to the same class)\n"
        "- :target-id — the identity within that granularity (keyword, [sheet node] tuple, or string/UUID)\n"
        "- :current-description — the latest existing description body, or nil if this is the first consolidation\n"
-       "- :recent-events — the last W events involving this target (status, duration, etc.)\n"
-       "- :aggregate-metrics — accumulated rolling metrics across this target's lifetime\n"
+       "- :recent-events — the last W events involving this target (status, duration, etc.).\n"
+       "  Each observation MAY also carry :judge-scores, a vector of per-event evaluator outputs from "
+       "judges attached to the host node — each entry has :judge-name, :score (0.0-1.0), and :feedback.\n"
+       "- :aggregate-metrics — accumulated rolling metrics across this target's lifetime.\n"
+       "  May include :judge-averages — a map of {judge-name -> mean-score} computed across all "
+       "observations of this target's lifetime. This is the STABLE BASELINE for judge signal.\n"
        "- :recent-vs-historical-delta — {:recent-success-rate :historical-success-rate :delta}, or nil on first consolidation\n"
+       "  JUDGE WEIGHTING: when a recent observation's :judge-scores diverge from "
+       ":judge-averages, treat that the same way you treat success-rate deltas — a single bad "
+       "judge score against a long-stable :judge-averages baseline is NOT grounds to invert a "
+       "strength; consistent + substantial divergence across multiple recent observations IS.\n"
        "- :structural-context — for trees: the canonical tree-raw S-expression; "
        "for instances: the node config; for node-types: the keyword alone\n\n"
        "OUTPUT — :description-body is a single map with ALL of these top-level keys:\n"
@@ -117,7 +127,7 @@
    fields, not just `:map`."
   (orc/workflow "ontology-consolidator-reflection"
     (orc/blackboard
-      {:target-type [:enum :node-type :node-instance :tree-fingerprint]
+      {:target-type [:enum :node-type :node-instance :tree-fingerprint :tree-class]
        :target-id :any
        :current-description [:maybe :map]
        :recent-events [:vector :map]
@@ -156,7 +166,8 @@
   (case target-type
     :node-type        :sheet/node-execution-completed
     :node-instance    :sheet/node-execution-completed
-    :tree-fingerprint :sheet/rlm-tree-execution-completed))
+    :tree-fingerprint :sheet/rlm-tree-execution-completed
+    :tree-class       :ontology/task-classified))
 
 (defn- event-matches-target?
   "Filter predicate for an event against a (target-type, target-id) target."
@@ -165,7 +176,8 @@
     :node-type        (= target-id (:node-type event))
     :node-instance    (and (= (first target-id) (:sheet-id event))
                            (= (second target-id) (:node-id event)))
-    :tree-fingerprint (= target-id (:tree-fingerprint event))))
+    :tree-fingerprint (= target-id (:tree-fingerprint event))
+    :tree-class       (= target-id (:assigned-tree-id event))))
 
 (defn- clean-event-for-llm
   "Strip non-JSON-serializable fields (event-store metadata, timestamps,
@@ -178,20 +190,92 @@
     (some? (:event/timestamp event))
     (assoc :timestamp (str (:event/timestamp event)))))
 
+(defn- gather-recent-tree-class-events
+  "C-Loop-1 + Gap-3: for :tree-class targets, gather task-classified
+   observations JOINED to their matching
+   :sheet/rlm-tree-execution-completed events (by sheet-id) AND any
+   :judge/score-emitted events for the same sheet+tick (Gap-3). Each
+   output observation carries:
+     - classification metadata at top-level (assigned-tree-id, confidence, ...)
+     - :execution — submap with tree fingerprint, status, duration, usage,
+       compact trajectory summary
+     - :judge-scores — vector of per-judge {:judge-name :score :feedback ...}
+       entries, joined by (sheet-id, tick-id) from :judge/score-emitted events.
+
+   The judge-scores join lets the LLM weight judge-grounded signal
+   alongside raw execution evidence (Gap-3 C-3 wiring).
+
+   Per LIVING-DESCRIPTIONS.md's decoupled-threshold-and-window safeguard:
+   capped at recent-window-size so a single bad burst doesn't reshape
+   the description; aggregate metrics give the LLM the historical
+   baseline to compare against."
+  [ctx target-id]
+  (let [task-classifieds (->> (es/read (:event-store ctx)
+                                       {:types #{:ontology/task-classified}
+                                        :tenant-id (:tenant-id ctx)})
+                              (into [])
+                              (filter #(= target-id (:assigned-tree-id %))))
+        all-tree-executions (->> (es/read (:event-store ctx)
+                                          {:types #{:sheet/rlm-tree-execution-completed}
+                                           :tenant-id (:tenant-id ctx)})
+                                 (into []))
+        executions-by-sheet (into {}
+                                  (map (fn [e] [(:sheet-id e) e]))
+                                  all-tree-executions)
+        ;; Gap-3: pull all :judge/score-emitted events, group by
+        ;; [sheet-id tick-id] so we can attach per-observation.
+        all-judge-scores (->> (es/read (:event-store ctx)
+                                       {:types #{:judge/score-emitted}
+                                        :tenant-id (:tenant-id ctx)})
+                              (into []))
+        judge-scores-by-sheet-tick (group-by (juxt :sheet-id :tick-id) all-judge-scores)
+        joined (mapv (fn [tc]
+                       (let [sheet-id (:source-sheet-id tc)
+                             tick-id (:source-tick-id tc)
+                             exec (get executions-by-sheet sheet-id)
+                             judge-events (get judge-scores-by-sheet-tick [sheet-id tick-id])
+                             cleaned-tc (clean-event-for-llm tc)]
+                         (cond-> cleaned-tc
+                           exec (assoc :execution
+                                       (-> exec
+                                           clean-event-for-llm
+                                           (update :trajectory
+                                                   (fn [traj]
+                                                     (when (seq traj)
+                                                       (mapv (fn [t]
+                                                               (cond-> {:event-type (:event-type t)}
+                                                                 (:status t) (assoc :status (:status t))))
+                                                             traj))))))
+                           (seq judge-events)
+                           (assoc :judge-scores
+                                  (mapv (fn [j]
+                                          (select-keys j [:judge-name :judge-config
+                                                          :score :feedback :dimensions
+                                                          :emitted-at]))
+                                        judge-events)))))
+                     task-classifieds)]
+    (vec (take-last recent-window-size joined))))
+
 (defn- gather-recent-events
   "Pull the last W events for this target from the event store.
    Returns a vector of cleaned event maps (in event-store order, most
-   recent last). Capped at recent-window-size."
+   recent last). Capped at recent-window-size.
+
+   C-Loop-1: :tree-class targets use a join path that pairs
+   task-classified observations with their execution outcomes — see
+   gather-recent-tree-class-events."
   [ctx target-type target-id]
-  (let [event-type (source-event-type-for-target target-type)]
-    (->> (es/read (:event-store ctx)
-                  {:types #{event-type}
-                   :tenant-id (:tenant-id ctx)})
-         (into [])
-         (filter #(event-matches-target? target-type target-id %))
-         (map clean-event-for-llm)
-         (take-last recent-window-size)
-         vec)))
+  (if (= :tree-class target-type)
+    (gather-recent-tree-class-events ctx target-id)
+    (let [event-type (source-event-type-for-target target-type)]
+      (->> (es/read (:event-store ctx)
+                    {:types #{event-type}
+                     :tenant-id (:tenant-id ctx)})
+           (into [])
+           (filter #(event-matches-target? target-type target-id %))
+           (map clean-event-for-llm)
+           (take-last recent-window-size)
+           vec))))
 
 (defn- success-rate
   "Fraction of events with :status :success. nil for empty input."
@@ -218,6 +302,64 @@
            :historical-success-rate historical
            :delta (- recent historical)})))))
 
+(defn- tree-class-aggregate-metrics
+  "C-Loop-1: build the cross-observation baseline for a :tree-class
+   target. Scans the event store for all task-classified events
+   assigned to this class plus their joined execution outcomes.
+
+   Returns:
+     :total-assignments    — count of task-classified events
+     :success-count        — executions completed with :success status
+     :failure-count        — executions completed with :failure status
+     :distinct-tree-shapes — count of distinct tree-fingerprints across
+                              executions assigned to this class
+
+   The LLM compares the recent-window's success rate against this
+   baseline to grade whether a trend is consistent + substantial enough
+   to update the description, per LIVING-DESCRIPTIONS.md's aggregate-
+   plus-delta safeguard."
+  [ctx target-id]
+  (let [task-classifieds (->> (es/read (:event-store ctx)
+                                       {:types #{:ontology/task-classified}
+                                        :tenant-id (:tenant-id ctx)})
+                              (into [])
+                              (filter #(= target-id (:assigned-tree-id %))))
+        sheet-ids (into #{} (map :source-sheet-id) task-classifieds)
+        all-tree-executions (->> (es/read (:event-store ctx)
+                                          {:types #{:sheet/rlm-tree-execution-completed}
+                                           :tenant-id (:tenant-id ctx)})
+                                 (into []))
+        relevant-execs (filter #(contains? sheet-ids (:sheet-id %))
+                               all-tree-executions)
+        success-count (count (filter #(= :success (:status %)) relevant-execs))
+        failure-count (count (filter #(= :failure (:status %)) relevant-execs))
+        distinct-shapes (->> relevant-execs
+                             (keep :tree-fingerprint)
+                             distinct
+                             count)
+        ;; Gap-3: per-judge averages across observations for this
+        ;; tree-class. Pulls all :judge/score-emitted events tagged with
+        ;; sheets belonging to this class, groups by :judge-name, and
+        ;; reports the mean score so the LLM can compare a recent window
+        ;; against the stable baseline.
+        relevant-judge-scores (->> (es/read (:event-store ctx)
+                                            {:types #{:judge/score-emitted}
+                                             :tenant-id (:tenant-id ctx)})
+                                   (into [])
+                                   (filter #(contains? sheet-ids (:sheet-id %))))
+        judge-averages (when (seq relevant-judge-scores)
+                         (into {}
+                               (map (fn [[judge-name entries]]
+                                      [judge-name
+                                       (/ (reduce + 0.0 (map :score entries))
+                                          (double (count entries)))]))
+                               (group-by :judge-name relevant-judge-scores)))]
+    (cond-> {:total-assignments (count task-classifieds)
+             :success-count success-count
+             :failure-count failure-count
+             :distinct-tree-shapes distinct-shapes}
+      judge-averages (assoc :judge-averages judge-averages))))
+
 (defn- gather-aggregate-metrics
   "Pull accumulated metrics for this target from C-2a-2's cross-sheet
    rolling-metrics aggregators. Returns nil for granularities without
@@ -232,6 +374,10 @@
     ;; added in a follow-up — for now we pass nil and the LLM works
     ;; from recent-events + structural-context.
     :node-instance    nil
+    ;; C-Loop-1: :tree-class aggregator scans the event store for the
+    ;; class's task-classified events + their joined executions. See
+    ;; tree-class-aggregate-metrics.
+    :tree-class       (tree-class-aggregate-metrics ctx target-id)
     nil))
 
 (defn- gather-structural-context
@@ -271,7 +417,8 @@
   (let [cmd-name (case target-type
                    :node-type        :ontology/record-node-type-description
                    :node-instance    :ontology/record-node-instance-description
-                   :tree-fingerprint :ontology/record-tree-description)]
+                   :tree-fingerprint :ontology/record-tree-description
+                   :tree-class       :ontology/record-tree-class-description)]
     {:command/name cmd-name
      :command/id (random-uuid)
      :command/timestamp (time/now)
@@ -282,6 +429,125 @@
   (if current-description
     (inc (or (:version current-description) 0))
     1))
+
+;; =============================================================================
+;; Gap-6 — anti-recency runtime validator
+;; =============================================================================
+;;
+;; The reflection-instruction prompt asks the LLM to update confidences
+;; gradually + never erase strong principles on one bad burst. Gap-6
+;; backs that ask with runtime code. The validator runs post-LLM,
+;; pre-emission. For each strength/weakness entry in the PRIOR body
+;; that is "protected" (high confidence + high evidence-count), the
+;; validator:
+;;   - REJECTS the new body if the entry is missing entirely
+;;   - CLAMPS the new entry's confidence if it dropped > max-decrease
+;;
+;; All comparisons match by :trait field (the actionable handle).
+;; First consolidation (prior body nil) passes through untouched —
+;; nothing to protect yet.
+
+(def ^:private anti-recency-defaults
+  "Tunable thresholds with spec defaults. A future event-sourced config
+   slice will let operators override these via :ontology/set-anti-
+   recency-config; for Gap-6's tracer-bullet slices the defaults apply."
+  {:protected-confidence-threshold 0.7
+   :protected-evidence-count-threshold 5
+   :max-confidence-decrease-per-cycle 0.2})
+
+(defn- protected-entry?
+  "An entry from the prior body is PROTECTED when its confidence + evidence
+   passed the configured floors. Only protected entries trigger validator
+   reject/clamp behavior — low-evidence speculative entries are free to
+   churn."
+  [entry {:keys [protected-confidence-threshold
+                 protected-evidence-count-threshold]}]
+  (and (number? (:confidence entry))
+       (number? (:evidence-count entry))
+       (>= (:confidence entry) protected-confidence-threshold)
+       (>= (:evidence-count entry) protected-evidence-count-threshold)))
+
+(defn- find-by-trait
+  "Locate an entry in a vector of {:trait ...} maps. The :trait field is
+   the actionable handle the consolidator/LLM author against — we match
+   structurally on its string value, not on any positional/identity
+   relation."
+  [entries trait]
+  (first (filter #(= trait (:trait %)) entries)))
+
+(defn- clamp-entry-in-bucket
+  "Return the body with the entry whose :trait matches `trait` (in
+   bucket :strengths or :weaknesses) updated to carry `clamped-confidence`
+   instead of its current :confidence. Other fields untouched."
+  [body bucket trait clamped-confidence]
+  (update body bucket
+          (fn [entries]
+            (mapv (fn [e]
+                    (if (= trait (:trait e))
+                      (assoc e :confidence clamped-confidence)
+                      e))
+                  entries))))
+
+(defn- anti-recency-validate
+  "Validate that the new body doesn't regress protected entries from
+   the prior body. Returns {:decision <:ok | :reject | :clamp>
+   :body <body> :audit [<entry>...]}.
+
+   For every protected entry (high :confidence + high :evidence-count)
+   in the prior body:
+     - MISSING from new body → :reject the new body; do not emit.
+     - confidence decreased by more than max-confidence-decrease-per-cycle
+       → :clamp the new entry's confidence to prior - max-decrease, and
+         continue.
+   Otherwise pass through unchanged."
+  [prior-body new-body config]
+  (let [cfg (merge anti-recency-defaults config)
+        max-decrease (:max-confidence-decrease-per-cycle cfg)]
+    (if (nil? prior-body)
+      {:decision :ok :body new-body :audit []}
+      (let [audit (atom [])
+            body-atom (atom new-body)]
+        (doseq [bucket [:strengths :weaknesses]]
+          (doseq [prior-entry (get prior-body bucket)]
+            (when (protected-entry? prior-entry cfg)
+              (let [trait (:trait prior-entry)
+                    new-entry (find-by-trait (get @body-atom bucket) trait)]
+                (cond
+                  (nil? new-entry)
+                  (swap! audit conj
+                         {:event-kind :rejection
+                          :bucket bucket
+                          :entry-trait trait
+                          :prior-confidence (:confidence prior-entry)
+                          :prior-evidence-count (:evidence-count prior-entry)
+                          :reason :missing-protected-entry})
+
+                  (and (number? (:confidence new-entry))
+                       (> (- (:confidence prior-entry) (:confidence new-entry))
+                          max-decrease))
+                  (let [prior-conf (:confidence prior-entry)
+                        llm-conf (:confidence new-entry)
+                        clamped (- prior-conf max-decrease)]
+                    (swap! body-atom clamp-entry-in-bucket bucket trait clamped)
+                    (swap! audit conj
+                           {:event-kind :clamp
+                            :bucket bucket
+                            :entry-trait trait
+                            :prior-confidence prior-conf
+                            :llm-confidence llm-conf
+                            :clamped-confidence clamped
+                            :reason :confidence-decrease-exceeded-max})))))))
+        (let [audit-vec @audit
+              final-body @body-atom]
+          (cond
+            (some #(= :rejection (:event-kind %)) audit-vec)
+            {:decision :reject :body final-body :audit audit-vec}
+
+            (some #(= :clamp (:event-kind %)) audit-vec)
+            {:decision :clamp :body final-body :audit audit-vec}
+
+            :else
+            {:decision :ok :body final-body :audit audit-vec}))))))
 
 ;; =============================================================================
 ;; C-2d-2 — parent-tree-id hydration
@@ -546,16 +812,67 @@
              :explain (me/humanize (m/explain ontology-schemas/description-body body)))
 
       :else
-      (do
-        (command-processor/process-command
-          (assoc context :command (record-description-command target-type target-id body)))
-        ;; R05d: after the description-updated event lands, grow the
-        ;; behavior:composes-into graph for any newly-observed (behavior
-        ;; → shell) pairs. Sticky / idempotent — re-running on the same
-        ;; pair is a no-op.
-        (when (= :tree-fingerprint target-type)
-          (dispatch-observed-composes-into-edges!
-            context target-id (:behavioral-subtree-ids body)))))))
+      (let [;; Gap-6: post-LLM, pre-emission anti-recency validator.
+            ;; Compares this body against the prior body and rejects
+            ;; (or clamps) regressions of high-confidence + high-
+            ;; evidence-count entries. See `anti-recency-validate`.
+            validation (anti-recency-validate current-description body {})
+            decision (:decision validation)
+            final-body (:body validation)]
+        (cond
+          (= :reject decision)
+          (do
+            (doseq [audit-entry (:audit validation)]
+              (when (= :rejection (:event-kind audit-entry))
+                (command-processor/process-command
+                  (assoc context :command
+                         {:command/name :ontology/record-anti-recency-rejection
+                          :command/id (random-uuid)
+                          :command/timestamp (time/now)
+                          :target-type target-type
+                          :target-id target-id
+                          :bucket (:bucket audit-entry)
+                          :entry-trait (:entry-trait audit-entry)
+                          :prior-confidence (:prior-confidence audit-entry)
+                          :prior-evidence-count (:prior-evidence-count audit-entry)
+                          :reason (:reason audit-entry)
+                          :rejected-body body}))))
+            (u/log ::anti-recency-rejection
+                   :target-type target-type
+                   :target-id target-id
+                   :audit-entry-count (count (:audit validation))))
+
+          :else
+          (do
+            (when (= :clamp decision)
+              (doseq [audit-entry (:audit validation)]
+                (when (= :clamp (:event-kind audit-entry))
+                  (command-processor/process-command
+                    (assoc context :command
+                           {:command/name :ontology/record-anti-recency-clamp
+                            :command/id (random-uuid)
+                            :command/timestamp (time/now)
+                            :target-type target-type
+                            :target-id target-id
+                            :bucket (:bucket audit-entry)
+                            :entry-trait (:entry-trait audit-entry)
+                            :prior-confidence (:prior-confidence audit-entry)
+                            :llm-confidence (:llm-confidence audit-entry)
+                            :clamped-confidence (:clamped-confidence audit-entry)
+                            :reason (:reason audit-entry)}))))
+              (u/log ::anti-recency-clamp
+                     :target-type target-type
+                     :target-id target-id
+                     :clamp-entry-count (count (:audit validation))))
+            (command-processor/process-command
+              (assoc context :command (record-description-command target-type target-id final-body)))
+            ;; R05d: after the description-updated event lands, grow the
+            ;; behavior:composes-into graph for any newly-observed (behavior
+            ;; → shell) pairs. Sticky / idempotent — re-running on the same
+            ;; pair is a no-op.
+            (when (= :tree-fingerprint target-type)
+              (dispatch-observed-composes-into-edges!
+                context target-id (:behavioral-subtree-ids final-body)))))))))
 
 (defn consolidate!
   "Run the consolidation for a single (target-type, target-id) target.
