@@ -5,13 +5,20 @@
    This sub-slice ships ONLY the trigger plumbing — no LLM call, no
    :*-description-updated emission. The LLM reflection step lands in
    C-2a-3b; the anti-recency safeguards in C-2a-3c."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [clojure.test :refer [deftest testing is use-fixtures]]
+            [dscloj.core :as dscloj]
             [malli.core :as m]
             [ai.obney.orc.ontology.interface :as ontology]
             [ai.obney.orc.ontology.interface.schemas]
             [ai.obney.orc.ontology.core.commands]
             [ai.obney.orc.ontology.core.read-models]
             [ai.obney.orc.ontology.core.todo-processors]
+            ;; Required so the consolidator processor is registered when
+            ;; this NS's tests start their ctx. Without this, threshold-
+            ;; triggered consolidation-requested events get dispatched but
+            ;; the consolidator handler may not be present on the registry,
+            ;; producing different behavior depending on load order.
+            [ai.obney.orc.ontology.core.consolidator]
             [ai.obney.grain.schema-util.interface :as schema-util]
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.event-store-v3.interface :as es]
@@ -21,6 +28,39 @@
             [ai.obney.grain.kv-store.interface :as kv]
             [ai.obney.grain.kv-store-lmdb.interface :as lmdb]
             [ai.obney.grain.time.interface :as time]))
+
+;; QP-2 / Gap-test-isolation-bug: this NS's tests dispatch many events
+;; that fire the threshold processor → autonomous :ontology/consolidation-
+;; requested events → the consolidator handler launches an async workflow
+;; that calls dscloj/predict. Without a stub here, predict hits real
+;; OpenRouter (or fails fast), and the consolidator's retry budget keeps
+;; the async-thread alive for up to ~5s after the test's Thread/sleep
+;; returns. When the next deftest's with-redefs on dscloj/predict
+;; activates GLOBALLY (with-redefs modifies the var root, not thread-
+;; local), the leftover async-threads HIT the new redef and append to the
+;; new test's captured atom — corrupting LATER tests' assertions.
+;;
+;; Fix: stub dscloj/predict for the lifetime of EVERY deftest in this NS
+;; so autonomous consolidations complete fast (no retry-loop bleed).
+(defn- stub-predict-fixture [f]
+  (with-redefs [dscloj/predict
+                (fn [_provider _module _inputs _options]
+                  {:outputs {:capabilities ["x"]
+                             :strengths [{:trait "x" :good-when "x"
+                                          :recommended-pattern "x"
+                                          :confidence 1.0
+                                          :evidence-count 1
+                                          :first-observed-at "2026-06-08T00:00:00Z"
+                                          :last-reinforced-at "2026-06-08T00:00:00Z"}]
+                             :weaknesses []
+                             :representative-uses ["x"]
+                             :avoid-when []
+                             :summary "trigger-test stub"}
+                   :usage {:total-tokens 1}
+                   :model "stub"})]
+    (f)))
+
+(use-fixtures :each stub-predict-fixture)
 
 ;; =============================================================================
 ;; Test context helpers
