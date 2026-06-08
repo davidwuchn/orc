@@ -532,3 +532,79 @@
                 ":collection is a vector of document strings"))
           (is (= 0 (:events-since-last-rebuild (ontology/get-reindex-state ctx)))
               "Counter resets to 0 after the rebuild lands"))))))
+
+;; =============================================================================
+;; QP-3 — Behavioral-subtree mint triggers an IMMEDIATE re-index
+;;        (bypasses the threshold-10 gate)
+;; =============================================================================
+;;
+;; Mints are low-frequency, authoritative contributions: one mint per agent-
+;; recognized novel-task. The R-Inject prepend tells the agent its mint will
+;; be retrievable on subsequent classify-behaviors calls. The threshold-10
+;; gate breaks that promise — a single mint waits for 9 unrelated description
+;; events to accumulate before the corpus rebuilds. Fix: a separate processor
+;; subscribed to :ontology/behavioral-subtree-minted that forces a rebuild
+;; immediately, independent of events-since-last-rebuild.
+
+(defn- dispatch-mint!
+  "Dispatch :ontology/mint-behavioral-subtree (human-authored to keep the
+   command body simple — no sandbox provenance fields)."
+  [ctx behavior-name]
+  (cp/process-command
+    (assoc ctx :command
+           {:command/name :ontology/mint-behavioral-subtree
+            :command/id (random-uuid)
+            :command/timestamp (time/now)
+            :name behavior-name
+            :body {:capabilities ["x"]
+                   :strengths [{:trait "t" :good-when "ctx"
+                                :recommended-pattern "[:llm {...}]"
+                                :confidence 0.9 :evidence-count 1
+                                :first-observed-at "2026-06-08T00:00:00Z"
+                                :last-reinforced-at "2026-06-08T00:00:00Z"}]
+                   :weaknesses []
+                   :representative-uses ["x"]
+                   :avoid-when ["x"]
+                   :summary (str "Summary for " behavior-name)
+                   :version 1
+                   :consolidated-from-event-count 0}
+            :provenance :human-authored})))
+
+(deftest mint-triggers-immediate-rebuild-bypassing-threshold
+  (testing "QP-3: A single :ontology/behavioral-subtree-minted event triggers create-index! immediately even when events-since-last-rebuild is < threshold"
+    (with-test-ctx [ctx]
+      ;; Pre-seed the index so cold-start is satisfied — we want to verify
+      ;; the FORCED rebuild path, not the cold-start path that's already
+      ;; covered by reindex-processor-cold-start-on-first-event.
+      (inject-index-created! ctx)
+      (Thread/sleep 100)
+      (is (true? (:index-built? (ontology/get-reindex-state ctx)))
+          "Sanity: index is built before we test the forced rebuild")
+      (is (= 0 (:events-since-last-rebuild (ontology/get-reindex-state ctx)))
+          "Sanity: counter is 0 before the mint")
+      (let [[calls stub] (stub-create-index!)]
+        (with-redefs [colbert-ops/create-index! stub]
+          (dispatch-mint! ctx "qp3-test-behavior")
+          (Thread/sleep 500)
+          (is (pos? (count @calls))
+              (str "QP-3 unfixed: a single mint should trigger a rebuild even "
+                   "though only 1 description event accumulated (well under "
+                   "threshold 10). Without the fix, create-index! is never "
+                   "called and the minted behavior stays invisible to "
+                   "classify-behaviors until 9 more description events land."))
+          (let [opts (first @calls)
+                target-ids (->> (:document-metadatas opts) (map :target-id) set)]
+            (is (= "ontology-descriptions" (:index-name opts))
+                "Same index-name as the threshold-path rebuild")
+            (is (some? opts)
+                "rebuild opts captured")
+            ;; The minted target-id is derived from name + parent-behavior
+            ;; via nameUUIDFromBytes, so we know it deterministically and
+            ;; can assert the minted doc is IN the rebuilt corpus.
+            (let [expected-target-id (java.util.UUID/nameUUIDFromBytes
+                                       (.getBytes (str "mint:qp3-test-behavior:" nil)
+                                                  "UTF-8"))]
+              (is (contains? target-ids expected-target-id)
+                  (str "The minted behavior's target-id should be in the rebuilt "
+                       "corpus. Expected " expected-target-id
+                       " among " target-ids)))))))))

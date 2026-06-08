@@ -370,6 +370,41 @@
 
       :else false)))
 
+(defn- dispatch-create-index!
+  "Build the document collection and dispatch the :colbert/create-index
+   defcommand. Extracted so both the gated path (maybe-rebuild!) and the
+   forced path (force-rebuild!) share the same dispatch — keeps the
+   :split-documents? / :max-document-length / :model-name knobs in one
+   place."
+  [context descriptions reason-metadata]
+  (let [{:keys [collection document-ids document-metadatas]}
+        (build-document-collection descriptions)]
+    (u/log ::reindex-triggered
+           :document-count (count collection)
+           :reason-metadata reason-metadata)
+    (try
+      ;; NOTE: pass :split-documents? + :max-document-length explicitly.
+      ;; The :colbert/create-index defcommand forwards these to
+      ;; operations/create-index! unconditionally; operations' :or
+      ;; defaults only apply when the key is absent — passing nil
+      ;; overrides the default and produces a malformed
+      ;; :colbert/index-created event (config keys would be nil).
+      (command-processor/process-command
+        (assoc context :command
+               {:command/name :colbert/create-index
+                :command/id (random-uuid)
+                :command/timestamp (time/now)
+                :collection collection
+                :index-name ontology-descriptions-index-name
+                :document-ids document-ids
+                :document-metadatas document-metadatas
+                :model-name "colbert-ir/colbertv2.0"
+                :split-documents? true
+                :max-document-length 256}))
+      (catch Exception e
+        (u/log ::reindex-failed
+               :error (.getMessage e))))))
+
 (defn maybe-rebuild!
   "Read reindex-state + config; if the trigger conditions are met, build
    the document collection from the current descriptions read-model and
@@ -386,35 +421,25 @@
         reindex-config (rm/get-reindex-config context)
         descriptions (collect-current-descriptions context)]
     (when (should-rebuild? reindex-state reindex-config (count descriptions))
-      (let [{:keys [collection document-ids document-metadatas]}
-            (build-document-collection descriptions)]
-        (u/log ::reindex-triggered
-               :event-count (:events-since-last-rebuild reindex-state)
-               :threshold (:reindex-threshold-events reindex-config)
-               :document-count (count collection)
-               :cold-start? (not (:index-built? reindex-state)))
-        (try
-          ;; NOTE: pass :split-documents? + :max-document-length explicitly.
-          ;; The :colbert/create-index defcommand forwards these to
-          ;; operations/create-index! unconditionally; operations' :or
-          ;; defaults only apply when the key is absent — passing nil
-          ;; overrides the default and produces a malformed
-          ;; :colbert/index-created event (config keys would be nil).
-          (command-processor/process-command
-            (assoc context :command
-                   {:command/name :colbert/create-index
-                    :command/id (random-uuid)
-                    :command/timestamp (time/now)
-                    :collection collection
-                    :index-name ontology-descriptions-index-name
-                    :document-ids document-ids
-                    :document-metadatas document-metadatas
-                    :model-name "colbert-ir/colbertv2.0"
-                    :split-documents? true
-                    :max-document-length 256}))
-          (catch Exception e
-            (u/log ::reindex-failed
-                   :error (.getMessage e))))))))
+      (dispatch-create-index! context descriptions
+        {:event-count (:events-since-last-rebuild reindex-state)
+         :threshold (:reindex-threshold-events reindex-config)
+         :cold-start? (not (:index-built? reindex-state))}))))
+
+(defn force-rebuild!
+  "QP-3: dispatch :colbert/create-index unconditionally, bypassing the
+   should-rebuild? gate. Used by the mint-triggered re-index path so a
+   single behavioral mint surfaces on the next classify-behaviors call
+   instead of waiting for the threshold (default 10 events).
+
+   Safe to call even when no descriptions exist — the dispatch becomes
+   a no-op rebuild of an empty corpus (the defcommand handles it).
+   Mints are low-frequency, so per-mint rebuild cost is bounded."
+  [context]
+  (let [descriptions (collect-current-descriptions context)]
+    (dispatch-create-index! context descriptions
+      {:forced? true
+       :document-count (count descriptions)})))
 
 (defprocessor :ontology on-description-updated-maybe-reindex
   {:topics #{:ontology/node-type-description-updated
@@ -425,6 +450,24 @@
    rebuild the ColBERT ontology-descriptions index via create-index!."
   [context]
   (maybe-rebuild! context))
+
+(defprocessor :ontology on-behavioral-subtree-minted-force-rebuild
+  {:topics #{:ontology/behavioral-subtree-minted}}
+  "QP-3: agent (or hand-authored) mints are low-frequency, authoritative
+   contributions — they must surface on the very next classify-behaviors
+   call, not after 9 more unrelated description events accumulate to
+   cross the threshold-10 gate. This processor subscribes ONLY to the
+   audit-trail :ontology/behavioral-subtree-minted event and forces a
+   ColBERT rebuild unconditionally.
+
+   The companion :ontology/tree-description-updated event the mint
+   defcommand also emits fires the threshold-gated processor above;
+   that's fine — the index rebuild this processor dispatches sets
+   :index-built? true and resets events-since-last-rebuild to 0, so the
+   threshold-gated processor's call on the same event is a no-op (the
+   newly-rebuilt corpus already includes the mint)."
+  [context]
+  (force-rebuild! context))
 
 ;; =============================================================================
 ;; C-2d-1 — tree-class hierarchy projection processor
