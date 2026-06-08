@@ -595,21 +595,25 @@
 
 (defn- ontology-colbert-indexes*
   "Reducer for ontology-colbert-indexes read model.
-   Tracks which ColBERT index is associated with each ontology."
-  [state {:keys [type body]}]
-  (case type
+   Tracks which ColBERT index is associated with each ontology.
+
+   NB: events arrive with :event/type and their body flattened to the top level
+   (v3 event store), exactly like every other read model here — NOT as a nested
+   {:type :body}. Reading :type/:body meant this projection never fired."
+  [state event]
+  (case (:event/type event)
     :evolutionary/colbert-indexed
-    (assoc state (:ontology-id body)
-           {:colbert-index-id (:index-id body)
-            :index-name (:index-name body)
-            :colbert-fields (vec (:colbert-fields body))
-            :document-count (:document-count body)
-            :indexed-at (:indexed-at body)})
+    (assoc state (:ontology-id event)
+           {:colbert-index-id (:index-id event)
+            :index-name (:index-name event)
+            :colbert-fields (vec (:colbert-fields event))
+            :document-count (:document-count event)
+            :indexed-at (:indexed-at event)})
 
     :evolutionary/colbert-index-updated
-    (update state (:ontology-id body) merge
-            {:colbert-index-id (:index-id body)
-             :updated-at (:updated-at body)})
+    (update state (:ontology-id event) merge
+            {:colbert-index-id (:index-id event)
+             :updated-at (:updated-at event)})
 
     ;; Pass through unchanged
     state))
