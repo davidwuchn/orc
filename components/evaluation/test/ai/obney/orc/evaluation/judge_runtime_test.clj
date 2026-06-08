@@ -1200,3 +1200,154 @@
         (is (= {:fresh "completion inputs"} (:inputs trace-data))
             (str ":inputs must be the completion event's direct value, NOT the started event's. "
                  "Got: " (pr-str (:inputs trace-data))))))))
+
+;; =============================================================================
+;; Gap-7b RED#1 — :rlm/tree-generated triggers heuristic-structural
+;; =============================================================================
+;;
+;; Per Gap-7's LIVE finding: recursive RLM only fires ONE terminal
+;; :sheet/node-execution-completed per run. Intermediate Phase 1
+;; emit-tree! iterations surface on :rlm/tree-generated events instead.
+;; Gap-7b adds a SECOND processor in judge_runtime subscribed to that
+;; event type so heuristic-structural can grade each intermediate tree
+;; as it's emitted.
+;;
+;; The :rlm/tree-generated event body carries :execution-id (= tick-id)
+;; and :raw-dsl, but NOT sheet-id/node-id (those live in event tags).
+;; The processor must look them up from the matching
+;; :sheet/node-execution-started event for the same tick.
+
+(defn- emit-rlm-tree-generated!
+  "Helper: append a synthetic :rlm/tree-generated event with the given
+   raw-dsl tied to the (sheet, tick) tuple. The event itself doesn't
+   carry sheet-id/node-id in its body — the processor must lookup."
+  [ctx sheet-id tick-id raw-dsl]
+  (es/append (:event-store ctx)
+             {:tenant-id (:tenant-id ctx)
+              :events [(es/->event
+                         {:type :rlm/tree-generated
+                          :tags #{[:sheet sheet-id] [:tick tick-id]}
+                          :body {:tree-id (random-uuid)
+                                 :execution-id tick-id
+                                 :raw-dsl raw-dsl
+                                 :generated-at (str (java.time.Instant/now))}})]}))
+
+(defn- emit-node-execution-started!
+  "Helper: append a synthetic :sheet/node-execution-started event so
+   the Gap-7b processor can look up sheet-id/node-id from the tick-id."
+  [ctx sheet-id tick-id node-id inputs]
+  (es/append (:event-store ctx)
+             {:tenant-id (:tenant-id ctx)
+              :events [(es/->event
+                         {:type :sheet/node-execution-started
+                          :tags #{[:sheet sheet-id] [:node node-id] [:tick tick-id]}
+                          :body {:sheet-id sheet-id
+                                 :tick-id tick-id
+                                 :node-id node-id
+                                 :inputs (or inputs {})}})]}))
+
+(deftest gap7b-rlm-tree-generated-triggers-heuristic-structural
+  (testing "Gap-7b RED#1: a :rlm/tree-generated event with valid :raw-dsl triggers the new processor; heuristic-structural fires; exactly 1 :judge/score-emitted event lands tagged with the correct tick-id + node-id (looked up from the started event)"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      ;; Create a repl-researcher node (Gap-5 default attachment applies).
+      (let [sheet-id (create-bare-sheet! ctx)
+            node-id (create-repl-researcher-node! ctx sheet-id)
+            tick-id (random-uuid)
+            tree-dsl [:sequence
+                      [:chunk-document {:from :doc :into :chunks}]
+                      [:map-each {:from :chunks :as :chunk :into :results
+                                  :max-concurrency 3}
+                       [:llm {:reads [:chunk] :writes [:result]}]]
+                      [:aggregate {:from :results :writes [:items]}]
+                      [:final {:keys [:items]}]]]
+        ;; Started event so the processor can lookup sheet/node from tick.
+        (emit-node-execution-started! ctx sheet-id tick-id node-id {:doc "x"})
+        (Thread/sleep 100)
+        (let [before (count (into [] (es/read (:event-store ctx)
+                                               {:types #{:judge/score-emitted}
+                                                :tenant-id (:tenant-id ctx)})))]
+          (emit-rlm-tree-generated! ctx sheet-id tick-id tree-dsl)
+          (Thread/sleep 800) ;; allow async processor + judge to settle
+          (let [after-events (into [] (es/read (:event-store ctx)
+                                                {:types #{:judge/score-emitted}
+                                                 :tenant-id (:tenant-id ctx)}))
+                new-events (filter #(= tick-id (:tick-id %)) after-events)]
+            (is (= 1 (count new-events))
+                (str "Exactly 1 :judge/score-emitted event must land for this tick. "
+                     "Total before: " before
+                     ", after: " (count after-events)
+                     ", matching tick: " (count new-events)))
+            (when (seq new-events)
+              (let [event (first new-events)]
+                (is (= "heuristic-structural" (:judge-name event))
+                    "The judge that fires is heuristic-structural")
+                (is (= sheet-id (:sheet-id event))
+                    "Score event carries the looked-up sheet-id")
+                (is (= node-id (:node-id event))
+                    "Score event carries the looked-up node-id")
+                (is (number? (:score event))
+                    "Score is numeric")))))))))
+
+;; =============================================================================
+;; Gap-7b RED#2 — defensive: :rlm/tree-generated with no :raw-dsl no-ops
+;; =============================================================================
+;;
+;; The schema marks :raw-dsl as :any (it can technically be nil), and
+;; even legitimately-emitted events might carry an empty tree under
+;; degenerate Phase 1 conditions. The processor must not crash and
+;; must not emit a score event when there's nothing to grade.
+
+(deftest gap7b-rlm-tree-generated-with-no-tree-no-ops
+  (testing "Gap-7b RED#2: when :rlm/tree-generated arrives with :raw-dsl nil, processor returns no events and doesn't crash"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [sheet-id (create-bare-sheet! ctx)
+            node-id (create-repl-researcher-node! ctx sheet-id)
+            tick-id (random-uuid)]
+        (emit-node-execution-started! ctx sheet-id tick-id node-id {:doc "x"})
+        (Thread/sleep 100)
+        (let [before (count (into [] (es/read (:event-store ctx)
+                                               {:types #{:judge/score-emitted}
+                                                :tenant-id (:tenant-id ctx)})))]
+          ;; Emit a :rlm/tree-generated event with :raw-dsl nil.
+          (emit-rlm-tree-generated! ctx sheet-id tick-id nil)
+          (Thread/sleep 600)
+          (let [after (count (into [] (es/read (:event-store ctx)
+                                                {:types #{:judge/score-emitted}
+                                                 :tenant-id (:tenant-id ctx)})))]
+            (is (= before after)
+                (str "No new :judge/score-emitted events when :raw-dsl is nil. "
+                     "Before: " before ", After: " after))))))))
+
+;; =============================================================================
+;; Gap-7b RED#3 — opt-in flag gating (mirrors existing processor)
+;; =============================================================================
+;;
+;; The on-rlm-tree-generated processor must respect the same Living
+;; Description opt-in gate as on-node-execution-completed. With the
+;; flag OFF, valid :rlm/tree-generated events with valid trees and
+;; valid host nodes must NOT produce judge events.
+
+(deftest gap7b-rlm-tree-generated-gated-on-opt-in
+  (testing "Gap-7b RED#3: when Living Description opt-in is OFF, the rlm/tree-generated processor produces no judge events even for valid events"
+    (with-test-ctx [ctx]
+      ;; Opt-in EXPLICITLY OFF
+      (set-living-description-enabled! ctx false)
+      (let [sheet-id (create-bare-sheet! ctx)
+            node-id (create-repl-researcher-node! ctx sheet-id)
+            tick-id (random-uuid)
+            tree-dsl [:sequence [:llm {}] [:final {}]]]
+        (emit-node-execution-started! ctx sheet-id tick-id node-id {:doc "x"})
+        (Thread/sleep 100)
+        (let [before (count (into [] (es/read (:event-store ctx)
+                                               {:types #{:judge/score-emitted}
+                                                :tenant-id (:tenant-id ctx)})))]
+          (emit-rlm-tree-generated! ctx sheet-id tick-id tree-dsl)
+          (Thread/sleep 600)
+          (let [after (count (into [] (es/read (:event-store ctx)
+                                                {:types #{:judge/score-emitted}
+                                                 :tenant-id (:tenant-id ctx)})))]
+            (is (= before after)
+                (str "Opt-in OFF must produce ZERO new judge events. "
+                     "Before: " before ", After: " after))))))))

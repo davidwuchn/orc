@@ -1151,7 +1151,15 @@
     [:input-metadata {:optional true} [:map
                                        [:size :int]
                                        [:type :keyword]]]
-    [:generated-at :string]]
+    [:generated-at :string]
+    ;; Gap-7b: the repl-researcher node that emitted the tree. Without
+    ;; this, downstream evaluators (e.g. heuristic-structural via
+    ;; :rlm/tree-generated) must scan :sheet/node-execution-started
+    ;; events to find the host node, which is ambiguous when multiple
+    ;; nodes share the same tick (root + Phase 2 children). Optional
+    ;; for backwards compatibility with replayed events.
+    [:node-id {:optional true} :uuid]
+    [:sheet-id {:optional true} :uuid]]
 
    :rlm/tree-executed
    [:map

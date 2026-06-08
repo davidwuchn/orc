@@ -965,11 +965,18 @@
                             :events [(->event
                                       {:type :rlm/tree-generated
                                        :tags #{[:sheet sheet-id]
-                                               [:tick tick-id]}
+                                               [:tick tick-id]
+                                               [:node node-id]}
                                        :body {:tree-id (random-uuid)
                                               :execution-id tick-id
                                               :raw-dsl sanitized-tree-raw
-                                              :generated-at (str (java.time.Instant/now))}})]}))
+                                              :generated-at (str (java.time.Instant/now))
+                                              ;; Gap-7b: identify the host
+                                              ;; repl-researcher explicitly so
+                                              ;; downstream judges don't have to
+                                              ;; scan started events.
+                                              :sheet-id sheet-id
+                                              :node-id node-id}})]}))
               ;; U10: Emit :rlm/researcher-iterations event whenever the
               ;; researcher ran at least one Phase 1 iteration — even when
               ;; no tree was ultimately emitted (e.g. small-input direct

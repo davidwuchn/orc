@@ -48,6 +48,35 @@
                                   started-events))]
       (:inputs matching))))
 
+(defn- find-tick-repl-researcher-source
+  "Gap-7b: given an :rlm/tree-generated event's tick-id, locate the
+   matching :sheet/node-execution-started event for the host
+   repl-researcher node. Returns nil when no matching started event
+   exists or when none of the candidates is a repl-researcher.
+
+   The bench's recursive RLM emits multiple node-execution-started
+   events per tick (root + Phase 2 children + the repl-researcher).
+   Plain first-match returns the wrong node — we filter to the one
+   whose read-model entry is :repl-researcher.
+
+   Modern :rlm/tree-generated events carry :sheet-id + :node-id in
+   the body directly (the producer knows them); this helper is the
+   fallback path for legacy events that omit those fields."
+  [ctx tick-id]
+  (when (and (:event-store ctx) tick-id)
+    (let [started-events (into [] (es/read (:event-store ctx)
+                                            {:types #{:sheet/node-execution-started}
+                                             :tenant-id (:tenant-id ctx)}))
+          candidates (filter #(= tick-id (:tick-id %)) started-events)
+          matching (first (filter (fn [evt]
+                                    (= :repl-researcher
+                                       (:type (orc/get-node ctx (:sheet-id evt) (:node-id evt)))))
+                                  candidates))]
+      (when matching
+        {:sheet-id (:sheet-id matching)
+         :node-id (:node-id matching)
+         :inputs (or (:inputs matching) {})}))))
+
 (defn- build-trace-data
   "Build the `trace-data` map the evaluation judges expect:
    `{:inputs <host-input-values> :outputs <host-output-values>
@@ -394,6 +423,125 @@
                 nil)))))))
 
 ;; =============================================================================
+;; Gap-7b — per-Phase-1-iteration tree-shape grading
+;; =============================================================================
+;;
+;; Recursive RLM emits :rlm/tree-generated per Phase 1 emit-tree! call.
+;; The terminal :sheet/node-execution-completed only fires ONCE per run
+;; (when the executor's loop terminates via (final!)), so subscribing
+;; tree-shape judges only to that event means we grade just the last
+;; tree the model produced — losing N-1 intermediate tree designs.
+;;
+;; This processor subscribes to :rlm/tree-generated to grade each
+;; intermediate tree as it's emitted. It uses the SAME resolver +
+;; judge dispatch as the terminal processor, but filters to judges
+;; that grade tree SHAPE (not output content) via tree-shape-judge-
+;; types. LLM output judges (grounding/reasoning/etc.) don't run here
+;; because the intermediate event carries no synthesized output —
+;; only the tree DSL.
+;;
+;; Per Gap-7 retrospective: we deliberately do NOT use the
+;; :applies-to-completion-kinds infrastructure to gate which judges
+;; run here. That field was reverted to defaults-have-no-filter post-
+;; Gap-7. Instead, this processor's responsibility is "run the tree-
+;; shape judges on tree-generation events" — that's a processor-owned
+;; concern, not a judge-config concern.
+
+(def ^:private tree-shape-judge-types
+  "Set of judge types that grade tree SHAPE from a raw-dsl. The
+   :rlm/tree-generated processor only runs judges whose :type belongs
+   to this set. Other judges (grounding, reasoning, completeness,
+   instruction-following) grade OUTPUT content and run on terminal
+   completions where the synthesized output is available."
+  #{:heuristic-structural})
+
+(defn- on-rlm-tree-generated
+  "Handler for :rlm/tree-generated. Gated on the Living Description
+   opt-in flag.
+
+   The event body carries :execution-id (= tick-id) + :raw-dsl. As of
+   Gap-7b's producer-side change, it also carries :sheet-id + :node-id
+   directly — preferred. Legacy events (or non-bench producers) without
+   those fields fall back to looking up the host repl-researcher node
+   via the matching :sheet/node-execution-started event for the tick.
+
+   Filters the resolver's effective judge list to tree-shape graders
+   (currently heuristic-structural) and invokes them in parallel with
+   per-judge timeout — same discipline as on-node-execution-completed."
+  [{:keys [event] :as context}]
+  (when (ontology/get-living-description-enabled? context)
+    (let [tick-id (:execution-id event)
+          raw-dsl (:raw-dsl event)
+          direct-sheet-id (:sheet-id event)
+          direct-node-id (:node-id event)
+          source (cond
+                   ;; Preferred: producer included sheet/node in body.
+                   (and direct-sheet-id direct-node-id)
+                   {:sheet-id direct-sheet-id
+                    :node-id direct-node-id
+                    :inputs (or (find-started-inputs context direct-sheet-id
+                                                     tick-id direct-node-id) {})}
+                   ;; Fallback: scan started events for the host
+                   ;; repl-researcher.
+                   :else (find-tick-repl-researcher-source context tick-id))]
+      (when (and tick-id raw-dsl source)
+        (let [{:keys [sheet-id node-id inputs]} source
+              node (orc/get-node context sheet-id node-id)
+              effective (get-effective-judges-for-node context sheet-id node-id)
+              tree-shape-effective (filterv #(contains? tree-shape-judge-types
+                                                       (:type (:judge-config %)))
+                                            effective)]
+          (when (seq tree-shape-effective)
+            (let [trace-data {:inputs inputs
+                              :outputs {:generated-tree-raw raw-dsl}
+                              :instruction (or (:instruction node) "")}
+                  per-judge-timeout-ms 60000
+                  futures (mapv
+                            (fn [{:keys [judge-name judge-config]}]
+                              [judge-name judge-config
+                               (future
+                                 (try (invoke-judge judge-config trace-data)
+                                      (catch Throwable t
+                                        (u/log ::judge-invocation-failed
+                                               :judge-name judge-name
+                                               :error (.getMessage t)
+                                               :exception-class (.getName (class t)))
+                                        nil)))])
+                            tree-shape-effective)
+                  ;; Score events are tagged with the discovered (sheet,
+                  ;; node, tick) so consolidator's join keys match. The
+                  ;; ->score-emitted-event helper reads sheet-id/node-id/
+                  ;; tick-id from the source event; we synthesize the
+                  ;; required shape for it.
+                  synthetic-source {:sheet-id sheet-id
+                                    :node-id node-id
+                                    :tick-id tick-id}
+                  events (vec
+                           (keep
+                             (fn [[judge-name judge-config fut]]
+                               (let [result (try (deref fut per-judge-timeout-ms ::timeout)
+                                                 (catch Throwable t
+                                                   (u/log ::judge-deref-failed
+                                                          :judge-name judge-name
+                                                          :error (.getMessage t))
+                                                   nil))]
+                                 (cond
+                                   (= ::timeout result)
+                                   (do (u/log ::judge-invocation-timeout
+                                              :judge-name judge-name
+                                              :timeout-ms per-judge-timeout-ms)
+                                       nil)
+
+                                   result
+                                   (->score-emitted-event synthetic-source
+                                                          judge-name judge-config result)
+
+                                   :else nil)))
+                             futures))]
+              (when (seq events)
+                {:result/events events}))))))))
+
+;; =============================================================================
 ;; Read-model — judge scores history per (sheet, tick, node)
 ;; =============================================================================
 ;;
@@ -445,3 +593,16 @@
    enabled the loop."
   [context]
   (on-node-execution-completed context))
+
+(defprocessor :evaluation on-rlm-tree-generated
+  {:topics #{:rlm/tree-generated}}
+  "Gap-7b: per-Phase-1-iteration tree-shape grader. Recursive RLM
+   emits :rlm/tree-generated for each intermediate emit-tree! during
+   Phase 1; this processor grades the tree shape for each so the
+   consolidator sees multiple structural signals per run instead of
+   just the terminal sum-up. Only runs tree-shape judges (currently
+   heuristic-structural) — LLM output judges run on the terminal
+   :sheet/node-execution-completed event where final outputs are
+   available."
+  [context]
+  (on-rlm-tree-generated context))
