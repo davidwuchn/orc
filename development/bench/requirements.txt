@@ -1,0 +1,109 @@
+# ColBERT Python venv — pinned, verified-working dependencies.
+#
+# Captured from the .venv-colbert that LIVE-passed the QP-3 verify on
+# 2026-06-08 (Python 3.12), then trimmed to drop transitive deps that
+# ragatouille pulls in but the bridge doesn't use at runtime
+# (langgraph, llama-index, openai, etc.). The trimmed set is what
+# pip can resolve from scratch in one pass; the full freeze hit a
+# langgraph-vs-langchain-core conflict that only worked because the
+# original install was staged.
+#
+# Why the load-bearing pins are needed:
+#   - ragatouille 0.0.9 imports langchain.retrievers (the pre-0.3 API).
+#     Breaks on langchain >= 0.3.
+#   - colbert-ai 0.2.22 uses HF_ColBERT.all_tied_weights_keys which
+#     transformers 5.x removed. Needs transformers 4.x.
+#   - fast-pytorch-kmeans uses psutil without declaring it.
+#   - langchain 0.2.x needs numpy < 2.0.
+#
+# A bare `pip install ragatouille>=0.0.9 torch>=2.0` under today's pip
+# resolver picks newest-compatible-on-paper versions and hits all three
+# bugs above. This pin file gives pip the constraints it needs to land
+# on a working set.
+#
+# To use:
+#   bash scripts/setup-colbert.sh
+#
+# To regenerate after upgrading a dep, freeze ONLY the load-bearing set
+# (don't freeze the full env or langgraph/llama-index will re-enter):
+#   .venv-colbert/bin/pip freeze | grep -E '^(ragatouille|colbert-ai|transformers|tokenizers|huggingface_hub|langchain|langchain-community|langchain-core|psutil|numpy|tenacity|sentence-transformers|torch|faiss-cpu|fast_pytorch_kmeans|ninja|onnx)==' > /tmp/freeze.txt
+
+# Load-bearing pins (these versions are mutually compatible AND avoid
+# every failure mode debugged on 2026-06-08).
+ragatouille==0.0.9.post2
+colbert-ai==0.2.22
+
+# Transformers stack — must stay on 4.x for colbert-ai compat.
+transformers==4.55.4
+tokenizers==0.21.4
+huggingface_hub==0.36.2
+safetensors==0.7.0
+
+# LangChain stack — must stay on 0.2.x for ragatouille's
+# langchain.retrievers import path.
+langchain==0.2.17
+langchain-community==0.2.19
+langchain-core==0.2.43
+langchain-text-splitters==0.2.4
+langsmith==0.1.147
+
+# Numeric stack — numpy must be < 2.0 for langchain 0.2.
+numpy==1.26.4
+scipy==1.17.1
+scikit-learn==1.9.0
+pandas==3.0.3
+torch==2.12.0
+sentence-transformers==5.5.1
+
+# Vector / index storage.
+faiss-cpu==1.14.2
+
+# Undeclared transitive of fast-pytorch-kmeans.
+psutil==7.2.2
+
+# Other transitives that pip will pick anyway, pinned to specific
+# versions for reproducibility:
+fast_pytorch_kmeans==0.2.2
+tenacity==8.5.0
+packaging==24.2
+nltk==3.9.4
+regex==2026.5.9
+tqdm==4.68.1
+filelock==3.29.1
+joblib==1.5.3
+typing_extensions==4.15.0
+typing-inspect==0.9.0
+PyYAML==6.0.3
+ninja==1.13.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+requests==2.34.2
+pillow==12.2.0
+sympy==1.14.0
+networkx==3.6.1
+ml_dtypes==0.5.4
+onnx==1.21.0
+threadpoolctl==3.6.0
+mpmath==1.3.0
+fsspec==2026.4.0
+ujson==5.12.1
+voyager==2.1.0
+dataclasses-json==0.6.7
+SQLAlchemy==2.0.50
+marshmallow==3.26.2
+mypy_extensions==1.1.0
+aiohttp==3.14.1
+attrs==26.1.0
+aiosignal==1.4.0
+frozenlist==1.8.0
+multidict==6.7.1
+yarl==1.24.2
+charset-normalizer==3.4.7
+idna==3.18
+urllib3==2.7.0
+certifi==2026.5.20
+greenlet==3.5.1
+six==1.17.0
+python-dateutil==2.9.0.post0
+pytz==2026.2
+tzdata==2026.1

@@ -101,9 +101,17 @@
         :as opts}]
   (let [index-id (random-uuid)
         alias (str index-id)
-        ;; Generate document IDs if not provided
+        ;; Generate document IDs if not provided. The previous form was
+        ;;   (mapv #(str (random-uuid)) (range (count collection)))
+        ;; which compiled to a 0-arg fn called by mapv with 1 arg — an
+        ;; arity error any time :document-ids was nil. In production the
+        ;; colbert defcommand always supplied :document-ids so the
+        ;; default branch was dead code; standalone callers (like
+        ;; colbert/health-check) hit the bug. repeatedly with a 0-arg fn
+        ;; matches mapv's intent without the throwaway arg.
         document-ids (or document-ids
-                         (mapv #(str (random-uuid)) (range (count collection))))
+                         (into [] (repeatedly (count collection)
+                                              #(str (random-uuid)))))
         start-time (System/currentTimeMillis)]
 
     (mu/log ::creating-index :index-id index-id :index-name index-name
