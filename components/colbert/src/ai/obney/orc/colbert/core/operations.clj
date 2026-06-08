@@ -101,6 +101,15 @@
         :as opts}]
   (let [index-id (random-uuid)
         alias (str index-id)
+        ;; Coalesce explicit nils. The :colbert/create-index command forwards
+        ;; omitted optional params as explicit nil, which bypasses the :or defaults
+        ;; above (:or only fires on an ABSENT key, not a present nil). Without this,
+        ;; the emitted :colbert/index-created event carries nil :model-name / :config
+        ;; values and fails its schema. (Preserve an explicit false for
+        ;; split-documents?.)
+        model-name (or model-name "colbert-ir/colbertv2.0")
+        split-documents? (if (nil? split-documents?) true split-documents?)
+        max-document-length (or max-document-length 256)
         ;; Generate document IDs if not provided
         document-ids (or document-ids
                          (mapv #(str (random-uuid)) (range (count collection))))
@@ -223,8 +232,11 @@
         normalized (if normalize?
                      (normalize-result-scores results)
                      results)]
-    (mapv (fn [{:keys [document-id score]}]
-            {:uri document-id
+    ;; The bridge keywordizes the Python response as-is (:key-fn keyword), so the
+    ;; per-result key is :document_id (underscore), NOT :document-id. Read either so
+    ;; the RRF :uri actually resolves back to the concept URI we indexed under.
+    (mapv (fn [{:keys [score] :as r}]
+            {:uri (or (:document_id r) (:document-id r))
              :score (* weight (double score))})
           normalized)))
 
