@@ -313,15 +313,17 @@ A prompt template that defines evaluation criteria. Each rubric includes:
 > (deterministic, no LLM call). When the Living Description opt-in
 > flag is on, all 5 auto-attach to `:repl-researcher` nodes.
 >
-> **The weight percentages below are advisory.** No aggregator in
-> the current code reads them — each judge's score contributes
-> independently to the consolidator's per-judge averages map. A
-> follow-up issue (`Gap-8 — judge-weight aggregation`, local) plans
-> to add either even-weight default or honoring the configured
-> `:weight` for a composite "overall health" score. Until then,
-> downstream code treats all judges as equal independent signals.
+> **The weight percentages below are advisory** (35/25/20/20 isn't
+> applied as a code default). The runtime emits a
+> `:judge/composite-score-computed` event per tick when 2+ judges
+> fire on the same node, with a weighted composite. Default policy:
+> even-weight (1/N) when consumers don't set explicit weights;
+> consumer-set `:judge-config :weight` values normalize to sum to
+> 1.0. The per-judge `:judge-averages` in the consolidator's
+> reflection stays alongside the composite — consumers who want the
+> independent per-judge signal aren't disrupted.
 
-### 1. Grounding Judge (configured 35% weight — not currently aggregated)
+### 1. Grounding Judge (advisory 35% weight)
 
 Detects hallucinations by checking if claims are supported by input context.
 
@@ -347,7 +349,7 @@ Detects hallucinations by checking if claims are supported by input context.
 ;;      :feedback "Contains hallucinations: 24/7 and parking not in FAQ"}}
 ```
 
-### 2. Instruction Following Judge (configured 25% weight — not currently aggregated)
+### 2. Instruction Following Judge (advisory 25% weight)
 
 Evaluates whether the LLM followed its given instruction.
 
@@ -372,7 +374,7 @@ Evaluates whether the LLM followed its given instruction.
 ;;      :feedback "Response is prose, not JSON. Format as {...}"}}
 ```
 
-### 3. Reasoning Judge (configured 20% weight — not currently aggregated)
+### 3. Reasoning Judge (advisory 20% weight)
 
 Evaluates the coherence and quality of reasoning.
 
@@ -382,7 +384,7 @@ Evaluates the coherence and quality of reasoning.
 - `reasoning-weaknesses`: Logical gaps or unclear elements
 - `feedback`: Suggestions for clearer reasoning
 
-### 4. Completeness Judge (configured 20% weight — not currently aggregated)
+### 4. Completeness Judge (advisory 20% weight)
 
 ### 5. Heuristic Structural Judge (added 2026-06; deterministic, no LLM)
 

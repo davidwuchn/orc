@@ -741,7 +741,7 @@ When the host node's `:sheet/node-execution-completed` event fires, the runtime 
 
 ### Current limits
 
-- **No composite score across multiple judges.** When N judges attach to a node, each contributes its score independently. The `:judge-config :weight` field is preserved in the read-model but no aggregator consumes it. Multi-judge composite scoring is a planned follow-up; default will be even-weight when it lands.
+- **Multi-judge composite scoring is available.** When 2+ judges fire on a (sheet, node, tick), the runtime also emits a `:judge/composite-score-computed` event with the weighted composite. Default policy: even-weight (1/N) when consumers don't set explicit weights; consumer-set `:judge-config :weight` values normalize to sum to 1.0. The `:contributing-judges` field on the event shows the effective normalized weight each judge applied — useful for debugging "how did this composite get computed?"
 - **Recursion ceiling.** A `:custom` judge sheet whose internal nodes have their own `:judges` attached → those nested judges are SKIPPED (default `:judge-depth` ceiling = 1). Prevents runaway sub-tick chains.
 - **Per-judge timeout** defaults to 60 seconds. Override per-judge via `:judge-config.:timeout-ms`.
 - **`:code` node `:fn` must be a FQ-name STRING**, not a symbol literal. The runtime calls `requiring-resolve` on the string.

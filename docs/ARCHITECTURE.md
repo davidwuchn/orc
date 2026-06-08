@@ -486,7 +486,7 @@ Judges are defined at the workflow level (paralleling `sheet/blackboard`) and st
 | `:heuristic-structural` | n/a | (added 2026-06) Deterministic Clojure heuristic that grades the SHAPE of trees the model produces. No LLM call. |
 | `:custom` | n/a | (added 2026-06) References a consumer-built eval sheet via `:sheet-id`. Sub-executes the eval workflow against the host node's outputs. See [`RLM-GUIDE.md`](RLM-GUIDE.md#building-a-custom-judge). |
 
-> **Note on weights:** The `%` column is *advisory* and stored in `:judge-config`, but the current code path does NOT compute a weighted composite across attached judges. Each judge's score contributes independently to the consolidator's `:judge-averages` per-judge map. Composite scoring (default even-weight + opt-in weighted) is tracked as `Gap-8` (local working notes).
+> **Note on weights:** The `%` column is *advisory* — those specific numbers aren't applied as defaults. When multiple judges attach to a node, a `:judge/composite-score-computed` event is emitted per tick with a weighted composite. Default policy: even-weight (1/N) when no explicit weights; consumer-set `:weight` values normalize to sum to 1.0. The per-judge `:judge-averages` in the consolidator's reflection input stays alongside the composite — both signals are available.
 
 ### Events
 

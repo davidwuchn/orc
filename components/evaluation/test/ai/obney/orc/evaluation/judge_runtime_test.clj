@@ -2123,3 +2123,112 @@
               "Both judge names present in the read-model")
           (is (every? #(number? (:score %)) scores)
               "Every entry has a numeric :score field"))))))
+
+;; =============================================================================
+;; Gap-8 RED#1 (tracer) — compute-composite-score weighted math
+;; =============================================================================
+;;
+;; Pure function: takes a sequence of {:judge-name :score :weight} entries
+;; and returns a weighted composite score in [0.0, 1.0]. Locks the
+;; arithmetic before any processor wiring touches it.
+;;
+;; Default policy (per spec Decision 1 — Option A): when no weights are
+;; set, each judge gets 1/N. When explicit weights exist, they're
+;; normalized to sum to 1.0 across the set.
+
+(deftest gap8-composite-score-three-weighted-judges
+  (testing "Gap-8 RED#1: 3 judges with explicit weights [0.5 0.3 0.2] + scores [0.9 0.6 0.4] → composite = 0.5*0.9 + 0.3*0.6 + 0.2*0.4 = 0.71"
+    (let [compute @#'ai.obney.orc.evaluation.core.judge-runtime/compute-composite-score
+          entries [{:judge-name "a" :score 0.9 :weight 0.5}
+                   {:judge-name "b" :score 0.6 :weight 0.3}
+                   {:judge-name "c" :score 0.4 :weight 0.2}]
+          composite (compute entries)]
+      (is (some? composite)
+          "compute-composite-score returns a non-nil result for valid input")
+      ;; Expected: 0.5*0.9 + 0.3*0.6 + 0.2*0.4 = 0.45 + 0.18 + 0.08 = 0.71
+      (is (= 0.71 composite)
+          (str "Composite must be the weighted sum exactly (no floating-point fuzz "
+               "expected at this precision). Got: " composite)))))
+
+(deftest gap8-composite-score-even-weight-default
+  (testing "Gap-8 RED#2: when no judges have :weight set, each gets 1/N and composite = mean of scores"
+    (let [compute @#'ai.obney.orc.evaluation.core.judge-runtime/compute-composite-score]
+      ;; 2 judges, no weights → mean
+      (is (= 0.7 (compute [{:judge-name "a" :score 0.8}
+                            {:judge-name "b" :score 0.6}]))
+          "2 judges no weights → (0.8 + 0.6) / 2 = 0.7")
+      ;; 4 judges, no weights → mean
+      (is (= 0.5 (compute [{:judge-name "a" :score 0.8}
+                            {:judge-name "b" :score 0.6}
+                            {:judge-name "c" :score 0.4}
+                            {:judge-name "d" :score 0.2}]))
+          "4 judges no weights → mean = 0.5"))))
+
+(deftest gap8-composite-score-single-judge
+  (testing "Gap-8 RED#3: single judge no surprises — composite equals the judge's score regardless of whether weight is set"
+    (let [compute @#'ai.obney.orc.evaluation.core.judge-runtime/compute-composite-score]
+      (is (= 0.85 (compute [{:judge-name "only" :score 0.85}]))
+          "Single judge no weight → composite = its score")
+      (is (= 0.85 (compute [{:judge-name "only" :score 0.85 :weight 0.42}]))
+          "Single judge with weight (any positive) → composite = its score (weight normalizes to 1.0)")
+      (is (= 1.0 (compute [{:judge-name "only" :score 1.0 :weight 100}]))
+          "Single judge with absurd weight → still its score after normalization"))))
+
+;; =============================================================================
+;; Gap-8 RED#5 — processor emits :judge/composite-score-computed alongside scores
+;; =============================================================================
+;;
+;; When multiple judges fire on a (sheet, node, tick), the processor
+;; that already waits for all parallel futures to complete (Gap-7
+;; parallel-judges fix) ALSO computes the weighted composite from the
+;; collected results and appends a single
+;; :judge/composite-score-computed event to its :result/events vector.
+;; Atomic emission per tick, no separate processor.
+
+(deftest gap8-processor-emits-composite-event
+  (testing "Gap-8 RED#5: when 2 judges fire on a tick, the processor emits exactly 1 :judge/composite-score-computed event tagged with the same (sheet, node, tick) and a composite score derived from the judges' scores"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (with-redefs [judges/*use-mock-llm* true]
+        (let [{:keys [sheet-id node-id]}
+              (setup-sheet-with-multiple-judges!
+                ctx
+                [["g" {:type :grounding}]
+                 ["r" {:type :reasoning}]])
+              tick-id (random-uuid)]
+          (emit-node-execution-completed! ctx sheet-id tick-id node-id)
+          ;; Poll for both score events AND the composite event
+          (loop [waited 0]
+            (let [scores (filter #(= tick-id (:tick-id %))
+                                 (into [] (es/read (:event-store ctx)
+                                                    {:types #{:judge/score-emitted}
+                                                     :tenant-id (:tenant-id ctx)})))
+                  composites (filter #(= tick-id (:tick-id %))
+                                     (into [] (es/read (:event-store ctx)
+                                                        {:types #{:judge/composite-score-computed}
+                                                         :tenant-id (:tenant-id ctx)})))]
+              (cond
+                (and (= 2 (count scores)) (= 1 (count composites))) :done
+                (>= waited 10000) :timeout
+                :else (do (Thread/sleep 300) (recur (+ waited 300))))))
+          (let [composites (filter #(= tick-id (:tick-id %))
+                                   (into [] (es/read (:event-store ctx)
+                                                      {:types #{:judge/composite-score-computed}
+                                                       :tenant-id (:tenant-id ctx)})))]
+            (is (= 1 (count composites))
+                (str "Exactly 1 composite event must land for this tick. Got: " (count composites)))
+            (when (seq composites)
+              (let [evt (first composites)]
+                (is (= sheet-id (:sheet-id evt))
+                    "Composite event carries the host sheet-id")
+                (is (= node-id (:node-id evt))
+                    "Composite event carries the host node-id")
+                (is (number? (:composite-score evt))
+                    ":composite-score is numeric")
+                (is (and (>= (:composite-score evt) 0.0)
+                         (<= (:composite-score evt) 1.0))
+                    ":composite-score is in [0.0, 1.0]")
+                (is (vector? (:contributing-judges evt))
+                    ":contributing-judges lists which judges fed the composite")
+                (is (= #{"g" "r"} (set (map :judge-name (:contributing-judges evt))))
+                    "Both fired judges are listed as contributors")))))))))

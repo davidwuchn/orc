@@ -280,6 +280,103 @@
             :emitted-at (str (java.time.Instant/now))}}))
 
 ;; =============================================================================
+;; Gap-8 — multi-judge weight aggregation
+;; =============================================================================
+;;
+;; When multiple judges fire on the same (sheet, node, tick) tuple,
+;; produce a single weighted composite score in [0.0, 1.0]. Default
+;; policy (per spec): even-weight when no weights are specified;
+;; explicit weights normalized to sum to 1.0. A single judge always
+;; composites to its own score (weight = 1.0 after normalization),
+;; matching consumer intuition for the common case.
+
+(defn- normalize-judge-weights
+  "Pure: given a seq of `{:judge-name :score :weight}` entries (where
+   :score is numeric and :weight is optional), return a vector with
+   :weight set to the EFFECTIVE normalized weight each entry contributes
+   to the composite.
+
+   - When NO entry has a `:weight` set, each entry gets `1/N`.
+   - When ANY entry has a `:weight`, all weights honor; nil treated as
+     0 before normalization. Total normalized to sum to 1.0.
+   - Returns nil if no entries are scorable or total weight is zero."
+  [entries]
+  (let [scorable (filter #(number? (:score %)) entries)]
+    (when (seq scorable)
+      (let [any-weight? (some #(number? (:weight %)) scorable)
+            with-weights (if any-weight?
+                           (mapv #(update % :weight (fn [w] (if (number? w) w 0.0))) scorable)
+                           (let [n (count scorable)
+                                 w (/ 1.0 n)]
+                             (mapv #(assoc % :weight w) scorable)))
+            total-weight (reduce + 0.0 (map :weight with-weights))]
+        (when (pos? total-weight)
+          (mapv #(assoc % :weight (/ (:weight %) total-weight))
+                with-weights))))))
+
+(defn- compute-composite-score
+  "Pure: takes a seq of `{:judge-name :score :weight}` entries and
+   returns the weighted composite score, or nil if the entries are
+   empty. See `normalize-judge-weights` for the weight policy.
+
+   Returns a double rounded to 4 decimal places to keep schema-level
+   equality predictable (avoids floating-point noise in test diffs).
+
+   Entries with non-numeric :score are skipped; if NO entries have a
+   numeric score, returns nil."
+  [entries]
+  (when-let [normalized (normalize-judge-weights entries)]
+    (let [composite (reduce + 0.0 (map (fn [{:keys [score weight]}]
+                                          (* score weight))
+                                        normalized))]
+      (-> composite
+          (* 10000)
+          Math/round
+          (/ 10000.0)))))
+
+(defn- ->composite-score-event
+  "Gap-8: build a `:judge/composite-score-computed` event from the
+   judge results collected during a single processor cycle. Returns
+   nil when fewer than 2 judges have valid scores — single-judge ticks
+   don't need a composite distinct from the score itself, and zero-
+   judge ticks have nothing to composite.
+
+   `judge-results` is a seq of `{:judge-name :judge-config :result}`
+   where :result is the canonical `{:score :feedback :dimensions}`
+   shape (or nil for failed judges).
+
+   The `:contributing-judges` field on the emitted event shows the
+   EFFECTIVE normalized weight each judge contributed (e.g., `1/N`
+   when consumers didn't set explicit weights), not the raw
+   :judge-config value. This is what consumers want for debugging
+   the composite: 'how did this number get computed?'"
+  [event judge-results]
+  (let [raw-entries (keep (fn [{:keys [judge-name judge-config result]}]
+                            (when (and result (number? (:score result)))
+                              {:judge-name judge-name
+                               :score (:score result)
+                               :weight (:weight judge-config)}))
+                          judge-results)]
+    (when (>= (count raw-entries) 2)
+      (when-let [normalized (normalize-judge-weights raw-entries)]
+        (when-let [composite (compute-composite-score raw-entries)]
+          (es/->event
+            {:type :judge/composite-score-computed
+             :tags #{[:sheet (:sheet-id event)]
+                     [:node (:node-id event)]
+                     [:tick (:tick-id event)]}
+             :body {:sheet-id (:sheet-id event)
+                    :tick-id (:tick-id event)
+                    :node-id (:node-id event)
+                    :composite-score composite
+                    :contributing-judges (mapv (fn [{:keys [judge-name score weight]}]
+                                                  {:judge-name judge-name
+                                                   :score (double score)
+                                                   :weight (double weight)})
+                                                normalized)
+                    :emitted-at (str (java.time.Instant/now))}}))))))
+
+;; =============================================================================
 ;; Gap-5 — Default judge attachment for repl-researcher nodes
 ;; =============================================================================
 ;;
@@ -485,27 +582,36 @@
                                            :exception-class (.getName (class t)))
                                     nil)))])
                         effective)
-              events (vec
-                       (keep
-                         (fn [[judge-name judge-config fut]]
-                           (let [result (try (deref fut per-judge-timeout-ms ::timeout)
-                                             (catch Throwable t
-                                               (u/log ::judge-deref-failed
-                                                      :judge-name judge-name
-                                                      :error (.getMessage t))
-                                               nil))]
-                             (cond
-                               (= ::timeout result)
-                               (do (u/log ::judge-invocation-timeout
-                                          :judge-name judge-name
-                                          :timeout-ms per-judge-timeout-ms)
-                                   nil)
-
-                               result
-                               (->score-emitted-event event judge-name judge-config result)
-
-                               :else nil)))
-                         futures))]
+              ;; Collect both score-events AND the raw judge results so
+              ;; Gap-8 can compute a weighted composite from the results
+              ;; without re-deriving them.
+              judge-results (mapv
+                              (fn [[judge-name judge-config fut]]
+                                (let [result (try (deref fut per-judge-timeout-ms ::timeout)
+                                                  (catch Throwable t
+                                                    (u/log ::judge-deref-failed
+                                                           :judge-name judge-name
+                                                           :error (.getMessage t))
+                                                    nil))]
+                                  {:judge-name judge-name
+                                   :judge-config judge-config
+                                   :result (cond
+                                             (= ::timeout result)
+                                             (do (u/log ::judge-invocation-timeout
+                                                        :judge-name judge-name
+                                                        :timeout-ms per-judge-timeout-ms)
+                                                 nil)
+                                             :else result)}))
+                              futures)
+              score-events (vec
+                             (keep (fn [{:keys [judge-name judge-config result]}]
+                                     (when result
+                                       (->score-emitted-event event judge-name
+                                                              judge-config result)))
+                                   judge-results))
+              composite-event (->composite-score-event event judge-results)
+              events (cond-> score-events
+                       composite-event (conj composite-event))]
           (if (seq events)
             {:result/events events}
             ;; All effective judges returned nil. Surface this loudly —

@@ -123,7 +123,7 @@ Four LLM judges + one deterministic heuristic. See [`RLM-GUIDE.md` § Attaching 
 |---|---|---|
 | Heuristic Structural | Pure Clojure, no LLM | Grades the SHAPE of trees the model produces (`:generated-tree-raw`). Fires per `:rlm/tree-generated` AND on terminal completions. |
 
-> **Note on weights (2026-06):** The `% weight` column above is *advisory* — no aggregator currently combines judges into a single weighted composite score. Each judge's score contributes independently to the consolidator's per-judge averages map. The judge-level weight field is preserved in `:judge-config`, but consumed nowhere yet. Tracked as `Gap-8` (local notes); planned default = even-weight across attached judges, with consumer override.
+> **Note on weights (2026-06):** The `% weight` column above is *advisory* — these specific numbers (35/25/20/20) aren't used as defaults in code. When multiple judges attach to a node, a `:judge/composite-score-computed` event lands per tick alongside the per-judge `:judge/score-emitted` events. Default policy: even-weight (1/N) when consumers don't set explicit weights; explicit `:judge-config :weight` values normalize to sum to 1.0. Single-judge ticks don't emit a composite (score = composite by definition).
 
 ```clojure
 (require '[ai.obney.orc.evaluation.interface :as eval])

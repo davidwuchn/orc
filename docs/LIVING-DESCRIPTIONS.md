@@ -127,7 +127,7 @@ The consolidator's reflection input was extended to include judge scores alongsi
 - **Reflection instruction explains the data**: tells the LLM that `:judge-averages` is the stable baseline and to weight per-tick judge divergence with the same anti-recency discipline as success-rate deltas.
 - **Custom judges** plug into the same pipeline via `:type :custom` + `:sheet-id` referencing a consumer-built eval workflow. See [`RLM-GUIDE.md`](RLM-GUIDE.md#attaching-judges-to-your-behavior-trees).
 
-Open follow-up: judge-level `:weight` aggregation (multiple judges → composite score) is not yet implemented. Each judge contributes to `:judge-averages` independently. Tracked as `Gap-8` (local working notes).
+Composite scoring (shipped 2026-06): when 2+ judges fire on the same (sheet, node, tick), the runtime emits a `:judge/composite-score-computed` event with the weighted composite. Default policy: even-weight (1/N) when consumers don't set explicit weights; consumer-set `:judge-config :weight` values normalize to sum to 1.0. The per-judge `:judge-averages` map stays alongside in the consolidator's reflection input — consumers wanting the independent per-judge signal aren't disrupted.
 
 ### Slice status
 
