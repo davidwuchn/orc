@@ -20,3 +20,6 @@ development/bench/generalization-results/
 
 # Large binary test fixtures. Keep these local; share via external storage if needed.
 development/resources/
+
+# ColBERT Python venv (local dev env — rebuild via scripts/setup-colbert.sh)
+.venv-colbert/
