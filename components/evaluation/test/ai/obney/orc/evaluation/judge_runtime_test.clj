@@ -2175,6 +2175,64 @@
           "Single judge with absurd weight → still its score after normalization"))))
 
 ;; =============================================================================
+;; Gap-8 RED#4 — mixed weights: un-weighted judges share remaining mass evenly
+;; =============================================================================
+;;
+;; Policy (per user decision): when SOME judges have :weight set and others
+;; don't, the explicit weights are honored verbatim and the un-weighted
+;; judges share the REMAINING probability mass evenly. This matches the
+;; consumer mental model: "I weighted one judge specifically; the rest
+;; default normally." Adding :weight to one judge MUST NOT silently zero
+;; the others — that would be a footgun.
+;;
+;; Edge case: when explicit weights already sum to ≥ 1.0, the un-weighted
+;; judges get weight 0.0 (the consumer's explicit weights already used up
+;; the budget).
+
+(deftest gap8-mixed-weights-unweighted-share-remaining-mass
+  (testing "Gap-8 RED#4: explicit weights honored; un-weighted judges share what's left over evenly"
+    (let [normalize @#'ai.obney.orc.evaluation.core.judge-runtime/normalize-judge-weights
+          compute @#'ai.obney.orc.evaluation.core.judge-runtime/compute-composite-score]
+      ;; 3 judges, ONE weighted at 0.5; remaining 0.5 splits evenly between the other 2 → 0.25 each.
+      (let [entries [{:judge-name "explicit" :score 0.9 :weight 0.5}
+                     {:judge-name "default-a" :score 0.6}
+                     {:judge-name "default-b" :score 0.4}]
+            normalized (normalize entries)
+            weights (into {} (map (juxt :judge-name :weight) normalized))]
+        (is (= 0.5 (get weights "explicit"))
+            "Explicit-weight judge keeps its declared weight verbatim (already normalized in a 3-judge mixed scenario where remaining mass = 0.5)")
+        (is (= 0.25 (get weights "default-a"))
+            "Un-weighted judges share the REMAINING mass (1.0 - 0.5 = 0.5) evenly between the 2 un-weighted → 0.25 each")
+        (is (= 0.25 (get weights "default-b"))
+            "Symmetric — both un-weighted judges get the same share")
+        ;; Composite = 0.5*0.9 + 0.25*0.6 + 0.25*0.4 = 0.45 + 0.15 + 0.10 = 0.70
+        (is (= 0.7 (compute entries))
+            "Composite reflects the share-remaining policy"))))
+
+  (testing "Gap-8 RED#4: explicit weights summing to ≥ 1.0 → un-weighted judges get 0.0"
+    (let [normalize @#'ai.obney.orc.evaluation.core.judge-runtime/normalize-judge-weights
+          ;; 3 judges; two explicit summing to 1.0 already; the un-weighted has nothing left.
+          entries [{:judge-name "explicit-a" :score 0.9 :weight 0.6}
+                   {:judge-name "explicit-b" :score 0.5 :weight 0.4}
+                   {:judge-name "default" :score 0.3}]
+          normalized (normalize entries)
+          weights (into {} (map (juxt :judge-name :weight) normalized))]
+      (is (= 0.6 (get weights "explicit-a")) "Explicit weights preserved")
+      (is (= 0.4 (get weights "explicit-b")) "Explicit weights preserved")
+      (is (= 0.0 (get weights "default"))
+          "When explicit weights already sum to ≥ 1.0, the un-weighted judge gets 0.0 — consumer's explicit choice already exhausted the mass")))
+
+  (testing "Gap-8 RED#4: one explicit-weight judge + one un-weighted → un-weighted gets exactly the remaining mass"
+    (let [normalize @#'ai.obney.orc.evaluation.core.judge-runtime/normalize-judge-weights
+          entries [{:judge-name "explicit" :score 0.8 :weight 0.7}
+                   {:judge-name "default" :score 0.4}]
+          normalized (normalize entries)
+          weights (into {} (map (juxt :judge-name :weight) normalized))]
+      (is (= 0.7 (get weights "explicit")) "Explicit 0.7 preserved")
+      (is (= 0.3 (get weights "default"))
+          "Single un-weighted judge gets 1.0 - 0.7 = 0.3, no division required"))))
+
+;; =============================================================================
 ;; Gap-8 RED#5 — processor emits :judge/composite-score-computed alongside scores
 ;; =============================================================================
 ;;

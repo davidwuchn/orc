@@ -459,7 +459,12 @@
     [:judge-config [:map
                     [:type :keyword]  ;; :grounding, :completeness, :instruction-following, :reasoning, :custom
                     [:criteria {:optional true} :string]  ;; Custom criteria description
-                    [:weight {:optional true} :double]    ;; Weight for aggregation (0.0-1.0)
+                    ;; Weight for aggregation. The Gap-8 composite-score
+                    ;; normalizer accepts ANY non-negative number (integer
+                    ;; or double) — values are re-scaled per the share-
+                    ;; remaining-mass policy. Negative weights are rejected
+                    ;; because they're nonsensical for a probability mass.
+                    [:weight {:optional true} [:and number? [:>= 0.0]]]
                     [:sheet-id {:optional true} :uuid]]]] ;; For :custom type - reference to judge sheet
 
    :sheet/set-node-judges
@@ -899,7 +904,8 @@
     [:judge-config [:map
                     [:type :keyword]
                     [:criteria {:optional true} :string]
-                    [:weight {:optional true} :double]
+                    ;; Mirror of :sheet/declare-judge :weight constraint.
+                    [:weight {:optional true} [:and number? [:>= 0.0]]]
                     [:sheet-id {:optional true} :uuid]]]
     [:criteria-version {:optional true} :int]]
 

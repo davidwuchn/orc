@@ -294,25 +294,66 @@
   "Pure: given a seq of `{:judge-name :score :weight}` entries (where
    :score is numeric and :weight is optional), return a vector with
    :weight set to the EFFECTIVE normalized weight each entry contributes
-   to the composite.
+   to the composite. Result weights always sum to ≤ 1.0 (= 1.0 except
+   when all entries have :weight 0).
 
-   - When NO entry has a `:weight` set, each entry gets `1/N`.
-   - When ANY entry has a `:weight`, all weights honor; nil treated as
-     0 before normalization. Total normalized to sum to 1.0.
-   - Returns nil if no entries are scorable or total weight is zero."
+   Policy (Gap-8 RED#4 — share remaining mass):
+   - **No :weight on any entry** → each entry gets 1/N (even distribution).
+   - **All entries have :weight** → weights are re-normalized to sum to
+     1.0 (relative weighting; consumer's input is a ratio, not absolute).
+   - **Mixed (some :weight, some not)**:
+     - When the explicit weights sum to < 1.0: explicit values are kept
+       verbatim; un-weighted entries share the remaining mass evenly.
+     - When the explicit weights sum to ≥ 1.0: un-weighted entries get
+       0.0 (the explicit budget is already exhausted); explicit weights
+       are re-normalized to sum to 1.0.
+
+   Rationale: adding `:weight` to one judge must NOT silently zero the
+   others. Consumers say 'weight THIS judge specifically; defaults for
+   the rest'. The share-remaining policy preserves that intuition.
+
+   Returns nil if no entries are scorable or total mass is zero."
   [entries]
-  (let [scorable (filter #(number? (:score %)) entries)]
+  (let [scorable (filter #(number? (:score %)) entries)
+        ;; Round computed weights to 4 decimals to keep event bodies
+        ;; clean of float-subtraction noise (e.g. 1.0 - 0.7 yields
+        ;; 0.30000000000000004 in IEEE 754); consistent with the
+        ;; per-decimal rounding in compute-composite-score.
+        round4 (fn [w] (-> w (* 10000) Math/round (/ 10000.0)))]
     (when (seq scorable)
-      (let [any-weight? (some #(number? (:weight %)) scorable)
-            with-weights (if any-weight?
-                           (mapv #(update % :weight (fn [w] (if (number? w) w 0.0))) scorable)
-                           (let [n (count scorable)
-                                 w (/ 1.0 n)]
-                             (mapv #(assoc % :weight w) scorable)))
-            total-weight (reduce + 0.0 (map :weight with-weights))]
-        (when (pos? total-weight)
-          (mapv #(assoc % :weight (/ (:weight %) total-weight))
-                with-weights))))))
+      (let [weighted   (filter #(number? (:weight %)) scorable)
+            unweighted (remove #(number? (:weight %)) scorable)
+            explicit-sum (reduce + 0.0 (map :weight weighted))]
+        (cond
+          ;; No explicit weights anywhere → even 1/N distribution.
+          (empty? weighted)
+          (let [w (round4 (/ 1.0 (count scorable)))]
+            (mapv #(assoc % :weight w) scorable))
+
+          ;; All entries explicit → re-normalize to sum to 1.0
+          ;; (preserves the all-weighted-with-arbitrary-sum behavior).
+          (empty? unweighted)
+          (when (pos? explicit-sum)
+            (mapv #(assoc % :weight (round4 (/ (:weight %) explicit-sum))) weighted))
+
+          ;; Mixed + explicit-sum ≥ 1.0 → un-weighted get 0.0;
+          ;; explicit re-normalized to sum to 1.0.
+          (>= explicit-sum 1.0)
+          (when (pos? explicit-sum)
+            (into []
+                  (concat
+                    (mapv #(assoc % :weight (round4 (/ (:weight %) explicit-sum))) weighted)
+                    (mapv #(assoc % :weight 0.0) unweighted))))
+
+          ;; Mixed + explicit-sum < 1.0 → un-weighted share remaining
+          ;; mass (1.0 - explicit-sum) evenly.
+          :else
+          (let [remaining (- 1.0 explicit-sum)
+                share (round4 (/ remaining (count unweighted)))]
+            (into []
+                  (concat
+                    weighted
+                    (mapv #(assoc % :weight share) unweighted)))))))))
 
 (defn- compute-composite-score
   "Pure: takes a seq of `{:judge-name :score :weight}` entries and
