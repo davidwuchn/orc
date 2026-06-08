@@ -317,6 +317,141 @@
           "overflow marker shows the full original length so the model knows there's more"))))
 
 ;; =============================================================================
+;; C-Loop-4: detect-nil-writes — pure deep module
+;;
+;; A tree can return :status :success with declared writes that are nil or
+;; empty-collection (the risk-analysis case: a broken :code aggregator wrote
+;; :obligations nil + :penalties nil while still returning :success). The
+;; model on the next iteration needs to SEE this signal — but not have it
+;; enforced, because "empty" can be the correct answer for some tasks.
+;;
+;; "Empty" is: nil, "", [], (), {}, #{}.
+;; NOT empty: 0, false (could be real answers).
+;; =============================================================================
+
+(deftest detect-nil-writes-mixed-input
+  (testing "returns only the declared keys whose values are nil/empty"
+    (let [outputs {:issues [{:id 1}]                ; populated vector — NOT nil
+                   :ambiguities []                  ; empty vector — IS nil
+                   :missing nil                     ; nil — IS nil
+                   :recommendations "use X"         ; populated string — NOT nil
+                   :notes ""                        ; empty string — IS nil
+                   :metadata {}                     ; empty map — IS nil
+                   :tags #{}                        ; empty set — IS nil
+                   :history ()                      ; empty seq — IS nil
+                   :score 0                         ; numeric zero — NOT nil
+                   :flag? false}                    ; boolean false — NOT nil
+          writes-declared [:issues :ambiguities :missing :recommendations
+                           :notes :metadata :tags :history :score :flag?]
+          nil-writes (executor/detect-nil-writes
+                       {:outputs outputs
+                        :writes-declared writes-declared})]
+      (is (= #{:ambiguities :missing :notes :metadata :tags :history}
+             (set nil-writes))
+          "nil-writes contains keys with nil / empty-string / empty-vec / empty-map / empty-set / empty-seq values")
+      (is (not (some #{:issues :recommendations :score :flag?} nil-writes))
+          "populated values + numeric zero + boolean false are NOT considered nil/empty"))))
+
+(deftest detect-nil-writes-no-nil-returns-empty
+  (testing "all declared writes populated → returns empty"
+    (let [outputs {:summary "the answer"
+                   :items [1 2 3]
+                   :count 42}
+          writes-declared [:summary :items :count]
+          nil-writes (executor/detect-nil-writes
+                       {:outputs outputs
+                        :writes-declared writes-declared})]
+      (is (empty? nil-writes)
+          "no nil/empty writes → empty result; iteration-history prompt won't surface the signal"))))
+
+(deftest detect-nil-writes-only-checks-declared-keys
+  (testing "keys NOT in :writes-declared are ignored even if nil"
+    (let [outputs {:declared-and-empty []           ; declared, IS nil
+                   :undeclared-and-nil nil          ; undeclared, ignored
+                   :input-blackboard-key "doc text"}; undeclared, ignored
+          writes-declared [:declared-and-empty]
+          nil-writes (executor/detect-nil-writes
+                       {:outputs outputs
+                        :writes-declared writes-declared})]
+      (is (= [:declared-and-empty] nil-writes)
+          "only :declared-and-empty surfaces; :undeclared-and-nil is filtered out (it's not the model's declared contract)"))))
+
+(deftest detect-nil-writes-missing-key-counts-as-nil
+  (testing "declared key absent from :outputs map → counted as nil"
+    (let [outputs {:present "value"}
+          writes-declared [:present :absent]
+          nil-writes (executor/detect-nil-writes
+                       {:outputs outputs
+                        :writes-declared writes-declared})]
+      (is (= [:absent] nil-writes)
+          "declared but absent key is equivalent to nil — the model's contract said it would produce :absent and it didn't"))))
+
+;; =============================================================================
+;; C-Loop-4: compute-tree-result-summary surfaces :nil-writes
+;;
+;; The summary entry is what the model sees on its NEXT iteration via
+;; (get-var :tree-results). Adding :nil-writes here is the load-bearing
+;; surface — once it's in the summary, the model sees the signal verbatim
+;; without any prompt-template change. RED#3 then teaches the model what
+;; the signal MEANS via prompt text.
+;; =============================================================================
+
+(deftest summary-includes-nil-writes-on-status-success-with-nil-declared-writes
+  (testing "the risk-analysis-style case: :status :success but two declared writes came back nil/empty"
+    (let [phase2-result {:status :success
+                         :outputs {:issues [{:id 1}]
+                                   :ambiguities []
+                                   :missing nil
+                                   :recommendations "use X"}
+                         :duration-ms 1000
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 100}}
+          tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+          tree-raw [:sequence [:llm {}] [:final {}]]
+          writes [:issues :ambiguities :missing :recommendations]
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw tree-raw
+                     :writes writes})]
+      (is (= :success (:status summary))
+          "status is still :success — the model decides whether 'empty' is correct, the system doesn't force-fail")
+      (is (= #{:ambiguities :missing} (set (:nil-writes summary)))
+          "both empty-vec :ambiguities and nil :missing surface as nil-writes signals"))))
+
+(deftest summary-omits-nil-writes-when-empty
+  (testing "all declared writes populated → :nil-writes is absent or empty"
+    (let [phase2-result {:status :success
+                         :outputs {:summary "the answer" :items [1 2 3]}
+                         :duration-ms 100
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})]
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:summary :items]})]
+      (is (or (not (contains? summary :nil-writes))
+              (empty? (:nil-writes summary)))
+          "when every declared write is populated, :nil-writes should be absent or empty — no noise to surface to the model"))))
+
+(deftest summary-nil-writes-on-failure-status
+  (testing ":nil-writes is computed regardless of :status — :failure can also leave declared writes nil"
+    (let [phase2-result {:status :failure
+                         :outputs {:partial-data "got this far"}     ; :final-result never written
+                         :duration-ms 500
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 25}}
+          tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :failure})]
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:partial-data :final-result]})]
+      (is (= [:final-result] (:nil-writes summary))
+          ":final-result was declared but never written — surfaces alongside the failure information"))))
+
+;; =============================================================================
 ;; merge-tree-result-into-sandbox — pure deep module
 ;; =============================================================================
 
@@ -346,8 +481,13 @@
       (is (= "preserved" (:existing-var new-vars))
           "pre-existing sandbox-vars entries are preserved"))))
 
-(deftest merge-clears-generated-tree-keys
-  (testing ":generated-tree and :generated-tree-raw are cleared from sandbox-vars after merge"
+(deftest merge-clears-dispatch-marker-but-preserves-tree-raw
+  (testing ":generated-tree (dispatch marker) is cleared but :generated-tree-raw is preserved so the final! response + bench EDN capture can record what the model designed"
+    ;; The implementation deliberately preserves :generated-tree-raw — the
+    ;; final! return path and downstream consumers (notably the bench EDN
+    ;; capture) read this to record the tree the model actually produced.
+    ;; Bench EDNs like legal-issue-detection_2026-06-01_225737.edn confirm
+    ;; :generated-tree-raw is the load-bearing field that records the design.
     (let [sandbox-vars {:generated-tree :some-form
                         :generated-tree-raw [:sequence [:final {}]]
                         :unrelated "kept"}
@@ -356,11 +496,11 @@
           new-vars (executor/merge-tree-result-into-sandbox
                      sandbox-vars phase2-result [:result] {:status :success})]
       (is (not (contains? new-vars :generated-tree))
-          ":generated-tree must be cleared so the dispatch doesn't re-fire")
-      (is (not (contains? new-vars :generated-tree-raw))
-          ":generated-tree-raw must also be cleared")
+          ":generated-tree (canonical dispatch marker) must be cleared so the dispatch doesn't re-fire on the next iteration")
+      (is (= [:sequence [:final {}]] (:generated-tree-raw new-vars))
+          ":generated-tree-raw is PRESERVED — the bench EDN capture + final! response read this to record what the model designed")
       (is (= "kept" (:unrelated new-vars))
-          "other keys are preserved"))))
+          "other unrelated keys are preserved"))))
 
 (deftest merge-appends-to-tree-results-history
   (testing "first merge: :tree-results nil → [summary1]; second merge appends summary2"

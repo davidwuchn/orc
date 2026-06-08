@@ -694,6 +694,22 @@
       (is (re-find #"\(get-var" instructions)
           "Prompt mentions (get-var ...) as the inspection primitive"))))
 
+(deftest recursive-prompt-surfaces-nil-writes-recovery-signal
+  (testing "C-Loop-4: the R-Recover section mentions :nil-writes as a recovery trigger so the model sees the signal even when :status :success"
+    (let [build-fn (requiring-resolve 'ai.obney.orc.orc-service.core.executor/build-rlm-code-generation-module)
+          node {:rlm {:recursive? true}
+                :writes [:answer]
+                :instruction "Find facts."}
+          module (build-fn node {} [] {} {} {})
+          instructions (:instructions module)]
+      (is (string? instructions))
+      (is (re-find #"(?i):nil-writes" instructions)
+          "Recursive-mode prompt mentions the :nil-writes summary field so the model knows the signal exists")
+      (is (re-find #"(?i)nil.{0,40}empty|empty.{0,40}nil|nil/empty" instructions)
+          "Prompt explains the nil-OR-empty semantics so the model treats both as the same signal")
+      (is (re-find #"(?i)success.{0,300}nil-writes|nil-writes.{0,300}success" instructions)
+          "Prompt explicitly connects :nil-writes to :status :success cases (not just failure) — the load-bearing point the risk-analysis case exposed"))))
+
 (deftest recursive-prompt-leads-with-emit-tree-as-primary-work
   (testing "When :recursive? true, the system prompt frames emit-tree! as the primary work primitive"
     (let [build-fn (requiring-resolve 'ai.obney.orc.orc-service.core.executor/build-rlm-code-generation-module)

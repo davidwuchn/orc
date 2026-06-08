@@ -123,6 +123,31 @@
     :else
     (pr-str v)))
 
+(defn detect-nil-writes
+  "Return the subset of :writes-declared whose value in :outputs is nil or empty.
+
+   C-Loop-4 soft signal: a tree can return :status :success while some declared
+   writes are nil / empty-collection (the risk-analysis broken-aggregator case).
+   The model on the next iteration needs to SEE this so it can decide whether
+   to recover or whether 'empty' is the correct answer for the task. This
+   helper is a pure detector; it does NOT fail the run.
+
+   'Empty' means: nil, \"\", [], (), {}, #{}.
+   'Empty' does NOT mean: 0 (numeric zero), false (boolean) — both can be real
+   answers a task is asking for.
+
+   Declared keys absent from :outputs entirely are treated as nil — the model
+   contracted to produce them and didn't."
+  [{:keys [outputs writes-declared]}]
+  (vec
+    (for [k writes-declared
+          :let [v (get outputs k)]
+          :when (or (nil? v)
+                    (and (or (string? v)
+                             (coll? v))
+                         (empty? v)))]
+      k)))
+
 (defn compute-tree-result-summary
   "Build the lightweight :tree-results summary entry for a Phase 2 tree execution.
 
@@ -167,6 +192,14 @@
                                (map (fn [k] [k (compute-output-preview
                                                  (get (:outputs phase2-result) k))]))
                                outputs-keys)
+        ;; C-Loop-4: soft signal — declared writes whose values came back
+        ;; nil/empty. Surfaces broken-aggregator cases (e.g. risk-analysis
+        ;; :obligations nil / :penalties nil under :status :success) on the
+        ;; model's next iteration so it can choose to recover. The system
+        ;; does NOT force-fail; the model decides whether "empty" is the
+        ;; correct answer for its task.
+        nil-writes (detect-nil-writes {:outputs (:outputs phase2-result)
+                                       :writes-declared writes})
         status (:status phase2-result)
         ;; Combine failure-indices + failure-reasons across all partial-summary
         ;; events (typically only one map-each per tree, but support multiple).
@@ -191,6 +224,9 @@
              :nodes-failed failed
              :nodes-total total
              :usage (:usage phase2-result)}
+      (seq nil-writes)
+      (assoc :nil-writes nil-writes)
+
       (and (contains? #{:partial :failure} status) (seq partial-summaries))
       (assoc :failure-indices all-failure-indices
              :failure-reasons all-failure-reasons)
@@ -1682,9 +1718,33 @@
                              "DO NOT re-emit the same tree from scratch — that wastes every sub-LLM "
                              "call that already succeeded. Successful writes are preserved in your "
                              "sandbox variables across iterations. Use them.\n\n"
+                             ;; C-Loop-4 nil-writes signal.
+                             ;;
+                             ;; A tree can return :status :success while some declared writes
+                             ;; are nil or empty-collection (e.g. risk-analysis: an aggregator
+                             ;; that misread :map-each output shape produced :obligations nil
+                             ;; + :penalties nil; downstream synthesis honestly reported "no
+                             ;; obligations identified"). The system surfaces this as a SOFT
+                             ;; signal — :nil-writes [<keys>] on the summary entry — and the
+                             ;; model decides whether empty is the correct answer for its task.
+                             ;;
+                             ;; Sentinel: ':nil-writes' (pinned by unit test).
+                             "ALSO trigger recovery when `:status :success` but `:nil-writes` "
+                             "is non-empty on the most-recent `:tree-results` entry. `:nil-writes` "
+                             "lists declared writes that came back as `nil`, empty string, empty "
+                             "vector/map/seq/set — i.e. nil/empty values for keys the tree was "
+                             "contracted to produce. The run did not fail; the values are just "
+                             "missing or empty. Decide whether that is the CORRECT answer for "
+                             "your task (some tasks legitimately return empty results) or whether "
+                             "downstream nodes (often aggregator `:code` fns) silently produced "
+                             "nothing useful and you need to recover. If recovery is needed, the "
+                             "same flow below applies — investigate, inventory surviving vars, "
+                             "and design a smaller resume tree.\n\n"
                              "Recovery flow:\n"
                              "  1. **Investigate**: read `:failure-reasons` and `:failure-indices` on "
-                             "the failed entry. If those fields aren't specific enough, drill in with "
+                             "the failed entry, OR `:nil-writes` keys on a `:status :success` entry "
+                             "whose declared writes came back nil/empty. If those fields aren't "
+                             "specific enough, drill in with "
                              "`(tree-failures)` / `(tree-detail tick-id)` / `(node-output node-id)`.\n"
                              "  2. **Inventory surviving vars**: check `(list-vars)` or `:outputs-keys` "
                              "from the same `:tree-results` entry to see EXACTLY what data already "
