@@ -122,8 +122,18 @@
           "Structural :content (seed summary) verbatim"))
 
     (testing "behavioral section appears with 3 candidates and their reasoning verbatim"
-      (is (re-find #"(?i)Behavioral suggestion" instruction)
-          "Behavioral section uses the generic marker")
+      ;; When a seed-name resolves from the body's :summary (via the
+      ;; derive-seed-name helper — e.g., "Extraction turns raw text..."
+      ;; → "Extraction"), the header reads "Behavioral: <name>"; only
+      ;; the no-seed-name path falls back to "Behavioral suggestion".
+      ;; This test's stub summaries all resolve to a seed name, so we
+      ;; pin the seed-name path.
+      (is (re-find #"Behavioral: Extraction" instruction)
+          "Behavioral section labels the first candidate by its seed name")
+      (is (re-find #"Behavioral: Analysis" instruction)
+          "Behavioral section labels the second candidate by its seed name")
+      (is (re-find #"Behavioral: Synthesis" instruction)
+          "Behavioral section labels the third candidate by its seed name")
       (is (re-find #"0\.95" instruction))
       (is (re-find #"0\.85" instruction))
       (is (re-find #"0\.78" instruction))
@@ -209,7 +219,8 @@
         instruction (:instruction result)]
 
     (testing "behavioral section says no candidate above threshold + suggests mint-behavior! (principle-shaped)"
-      (is (re-find #"(?i)no behavioral candidate above threshold" instruction))
+      (is (re-find #"(?i)no candidate above threshold" instruction)
+          "Prepend explicitly signals the fresh-mint condition")
       (is (re-find #"mint-behavior!" instruction)
           "Explicitly references the minting affordance"))
 
@@ -261,18 +272,26 @@
 (deftest rerank-fallback-caution
   (let [structural-target (random-uuid)
         b1-id (random-uuid)
+        ;; Both confidences set ABOVE min-display-confidence (0.6) so the
+        ;; candidates surface in the prepend — only then does the per-
+        ;; candidate "reranker fell back" annotation render. Below the
+        ;; floor the candidate is filtered out and the section falls
+        ;; into the "no high-confidence match" branch which doesn't
+        ;; carry the fallback annotation.
         payload {:structural {:assigned-tree-id structural-target
-                              :confidence 0.5
+                              :confidence 0.7
                               :was-fresh-mint? false
                               :reasoning "Pure-ColBERT ordering; reranker fell back."
                               :top-candidates [(mk-structural-candidate
                                                  structural-target
                                                  "Pure-ColBERT ordering."
                                                  "ChunkedExtraction..."
-                                                 0.5
+                                                 0.7
                                                  :colbert-fallback)]
                               :rerank-fallback? true}
-                 :behavioral {:behaviors [(mk-behavioral-entry b1-id 0.6 "Analysis fits.")]
+                 :behavioral {:behaviors [(mk-behavioral-entry b1-id 0.7
+                                                               "Analysis fits."
+                                                               :colbert-fallback false)]
                               :rerank-fallback? true}}
         node (mk-node "Task: x" payload)
         stub-bodies {b1-id {:summary "Analysis reasons over extracted items..."
@@ -319,12 +338,19 @@
           "Identity when :context lacks :r05-classifier (manual-context path preserved)"))))
 
 ;; =============================================================================
-;; RED #6 — Behavioral over 3 candidates capped at 3
+;; RED #6 — Behavioral cap at 5: when more than 5 above-floor candidates are
+;;            returned, only the first 5 surface
 ;; =============================================================================
+;;
+;; The behavioral-cap was raised from 3 → 5 (aligns with classify-behaviors'
+;; :top-n 5). Test sends 7 above-floor candidates; expects 5 surface, 2 cut.
+;; Stub summaries are deliberately generic ("Generic summary.") so derive-
+;; seed-name returns nil and the header falls back to "Behavioral suggestion"
+;; — that's what the suggestion-count regex counts.
 
-(deftest behavioral-cap-at-3
+(deftest behavioral-cap-at-5
   (let [structural-target (random-uuid)
-        b-ids (vec (repeatedly 5 random-uuid))
+        b-ids (vec (repeatedly 7 random-uuid))
         payload {:structural {:assigned-tree-id structural-target
                               :confidence 0.92
                               :was-fresh-mint? false
@@ -346,23 +372,24 @@
                              (fn [_ _ id] (get stub-bodies id))]
                  (tp/apply-r05-classifier-context node {}))
         instruction (:instruction result)
-        ;; Count "Behavioral suggestion" markers — each candidate produces one.
+        ;; Count "Behavioral suggestion" markers — generic summaries don't
+        ;; resolve to a seed name so all entries get the generic header.
         suggestion-count (count (re-seq #"(?m)^\d+\. Behavioral suggestion" instruction))]
 
-    (testing "exactly 3 behavioral suggestions surface (caps at 3 even when 5 returned)"
-      (is (= 3 suggestion-count)
-          (str "Expected 3 capped suggestions; got " suggestion-count)))
+    (testing "exactly 5 behavioral suggestions surface (caps at 5 even when 7 returned)"
+      (is (= 5 suggestion-count)
+          (str "Expected 5 capped suggestions; got " suggestion-count)))
 
     (testing "section header reflects the cap"
-      (is (re-find #"Behavioral competencies \(top 3\)" instruction)))
+      (is (re-find #"Behavioral competencies \(top 5 from corpus" instruction)))
 
     (testing "the candidates that did NOT make the cut are absent"
-      (let [first-3-ids (take 3 b-ids)
-            cut-2-ids (drop 3 b-ids)]
-        (doseq [id first-3-ids]
+      (let [kept-ids (take 5 b-ids)
+            cut-ids (drop 5 b-ids)]
+        (doseq [id kept-ids]
           (is (str/includes? instruction (str id))
-              (str "Top-3 candidate " id " surfaced")))
-        (doseq [id cut-2-ids]
+              (str "Top-5 candidate " id " surfaced")))
+        (doseq [id cut-ids]
           (is (not (str/includes? instruction (str id)))
               (str "Cut candidate " id " NOT surfaced")))))))
 

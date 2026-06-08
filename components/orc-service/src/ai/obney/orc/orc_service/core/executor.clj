@@ -2091,7 +2091,18 @@
                              :sandbox-vars sandbox-vars
                              :recursive? recursive-mode?
                              :event-store (:event-store context)
-                             :tenant-id (:tenant-id context)})
+                             :tenant-id (:tenant-id context)
+                             ;; C-Loop-3: thread the command-context opts
+                             ;; through so mint-behavior! + get-description
+                             ;; SCI bindings can dispatch commands + read
+                             ;; the descriptions read-model. The outer
+                             ;; processor enriches context with sheet-id/
+                             ;; tick-id; command-registry + cache come from
+                             ;; the standard Grain context.
+                             :command-registry (:command-registry context)
+                             :cache (:cache context)
+                             :sheet-id (:sheet-id context)
+                             :tick-id (:tick-id context)})
                     exec-result (rlm-sandbox/execute-rlm-code rlm-ctx code)
                     ;; Track new variables created in this iteration
                     vars-after (set (keys @sandbox-vars))

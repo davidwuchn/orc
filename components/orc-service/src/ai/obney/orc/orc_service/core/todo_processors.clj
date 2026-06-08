@@ -505,24 +505,68 @@
   (let [{:keys [behavior-id confidence was-fresh-mint? reasoning
                 rerank-source]} behavior]
     (if was-fresh-mint?
-      ;; C-Loop-2 P2: explicit body-map signature + :parent kwarg + the
-      ;; persistence promise ("retrievable on subsequent classify-behaviors
-      ;; calls"). Without these specifics, the model writes malformed
-      ;; mints or doesn't trust the affordance.
+      ;; C-Loop-3: strengthened from C-Loop-2 P2 after observing the
+      ;; agent ignore the affordance on a behaviorally-OOD task. The
+      ;; original phrasing ("Consider whether...") was too soft —
+      ;; competed with the model's strong "design the simplest tree
+      ;; that works" prior and lost. The new phrasing:
+      ;;   1. Frames the fresh-mint marker as a CONCRETE SIGNAL the
+      ;;      task may be novel — not just a possibility.
+      ;;   2. Names the 12 existing behavioral categories so the model
+      ;;      can explicitly check the task against them.
+      ;;   3. Demands explicit :reasoning text stating WHICH category
+      ;;      fits OR WHY the task is novel — forces the consideration
+      ;;      rather than letting it get pattern-matched away.
+      ;;   4. Makes the cost of NOT minting concrete: novel patterns
+      ;;      are LOST without contribution.
+      ;;   5. Acknowledges that mint is not mandatory — preserves the
+      ;;      model's judgement when an existing category genuinely
+      ;;      fits.
       (str (inc idx) ". Behavioral suggestion (no candidate above threshold)\n"
-           "   No behavioral candidate above threshold was found in the "
-           "corpus. If none of the surfaced behaviors fit your task, you "
-           "can mint a new behavioral subtree via:\n\n"
-           "       (mint-behavior! \"<name>\"\n"
-           "                       {:capabilities [...]\n"
-           "                        :strengths [...]\n"
-           "                        :weaknesses [...]\n"
-           "                        :representative-uses [...]\n"
-           "                        :summary \"...\"}\n"
+           "   BEHAVIORALLY-NOVEL TASK SIGNAL: classify-behaviors returned no candidate "
+           "above threshold for this task — none of the existing corpus behaviors "
+           "matched the task semantics by retrieval+rerank score. This is a SIGNAL the "
+           "task may exercise a behavioral pattern the corpus does not yet capture.\n\n"
+           "   The existing behavioral categories in the corpus are: research, "
+           "extraction, analysis, synthesis, ideation, design, critique, validation, "
+           "code-building, transformation, classification, investigation.\n\n"
+           "   Before designing your tree, in your :reasoning output, state EITHER:\n"
+           "     (a) which existing category fits this task (e.g., \"this is a "
+           "design task — produces a single committed plan from constraints\"), OR\n"
+           "     (b) why the task is genuinely novel relative to all 12 (name the "
+           "behavioral pattern your tree will exercise that isn't captured above).\n\n"
+           "   If (b) — the task IS behaviorally novel AND your tree exercises a "
+           "generalizable pattern future tasks could reuse — contribute it via:\n\n"
+           "       (mint-behavior! \"<short-kebab-name>\"\n"
+           "                       {:capabilities [\"<concrete action verb + object — 1 per capability>\"\n"
+           "                                       \"<another concrete capability>\"]\n"
+           "                        :strengths [{:trait \"<what works AND why\"\n"
+           "                                     :good-when \"<context guard — when this trait fires>\"\n"
+           "                                     :recommended-pattern \"<concrete DSL snippet showing the shape>\"\n"
+           "                                     :confidence 0.7\n"
+           "                                     :evidence-count 1}]\n"
+           "                        :weaknesses [{:trait \"<what fails AND why>\"\n"
+           "                                      :avoid-when \"<context guard — when this trait fires>\"\n"
+           "                                      :recommended-alternative \"<concrete fix or alternative\"\n"
+           "                                      :confidence 0.7\n"
+           "                                      :evidence-count 1}]\n"
+           "                        :representative-uses [\"<concrete task this pattern shipped on>\"\n"
+           "                                              \"<another concrete task>\"]\n"
+           "                        :avoid-when [\"<concrete anti-context>\"]\n"
+           "                        :summary \"<2-3 sentences naming the domain + the load-bearing trait + when to prefer this over existing categories>\"\n"
+           "                        :version 1\n"
+           "                        :consolidated-from-event-count 0}\n"
            "                       :parent nil)\n\n"
-           "   The minted behavior will be retrievable on subsequent "
-           "classify-behaviors calls — your contribution persists in the "
-           "corpus for future tasks.\n")
+           "   CRITICAL: :strengths and :weaknesses are VECTORS OF MAPS, not vectors of "
+           "strings. Each entry is principle-shaped — :trait + context-guard + concrete "
+           "recommended action + confidence + evidence-count. A vector of bare strings "
+           "fails schema validation and the mint is dropped silently. Look at any "
+           "existing seed body in the corpus retrieval above to see the expected shape.\n\n"
+           "   The minted behavior will be retrievable on subsequent classify-behaviors "
+           "calls — your contribution persists in the corpus for future tasks. Without "
+           "minting, a genuinely novel pattern is LOST when this task completes.\n\n"
+           "   If (a) — the task fits an existing category by your judgement — no mint "
+           "is needed; designing the tree using known patterns is the right call.\n")
       (let [body (fetch-tree-body ctx behavior-id)
             summary (:summary body)
             rich (format-seed-body body traits-per-seed-cap)
@@ -943,8 +987,18 @@
             exec-context (extract-execution-context event-inputs)]
         (future
           (try
-            (let [result (if provider
-                           (executor/execute-repl-researcher node blackboard provider context)
+            ;; C-Loop-3: thread sheet-id / tick-id / cache through to
+            ;; execute-repl-researcher so the recursive RLM sandbox's
+            ;; mint-behavior! + get-description SCI bindings have the
+            ;; command context they need to dispatch + read the
+            ;; descriptions read-model. Without these, mint-behavior!
+            ;; throws "requires a command context" and the agent's
+            ;; mint call is lost.
+            (let [enriched-context (assoc context
+                                          :sheet-id sheet-id
+                                          :tick-id tick-id)
+                  result (if provider
+                           (executor/execute-repl-researcher node blackboard provider enriched-context)
                            {:status :failure :error "No DSCloj provider configured"})
                   {:keys [status outputs error duration-ms generated-tree-raw iteration-reasonings usage iterations]} result
                   ;; Track usage for this tick (RLM mode aggregates all LLM calls)
