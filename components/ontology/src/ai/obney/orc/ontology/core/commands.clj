@@ -421,6 +421,7 @@
         :tags #{[:concept concept-id]}  ;; Only UUID-based tags allowed
         :body {:concept-id concept-id
                :uri uri
+               :ontology-id (:ontology-id concept)
                :scope (:scope concept)
                :text-embedded text
                :field-source (name (first fields-set))
@@ -466,6 +467,7 @@
                                :tags #{[:concept concept-id]}  ;; Only UUID-based tags allowed
                                :body {:concept-id concept-id
                                       :uri (:uri concept)
+                                      :ontology-id (:ontology-id concept)
                                       :scope (:scope concept)
                                       :text-embedded text
                                       :field-source (name (first fields-set))
