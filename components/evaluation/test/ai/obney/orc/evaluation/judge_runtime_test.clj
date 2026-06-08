@@ -2,6 +2,7 @@
   "Gap-1 — per-event evaluator runtime. Tests progress in RED→GREEN cycles
    per `docs/issues/c2d-followups/Gap-1-per-event-evaluator-runtime.md`."
   (:require [clojure.test :refer [deftest testing is]]
+            [clojure.string :as str]
             [malli.core :as m]
             [ai.obney.orc.evaluation.interface.schemas]
             [ai.obney.orc.evaluation.core.judge-runtime]
@@ -11,6 +12,7 @@
             [ai.obney.orc.ontology.core.commands]
             [ai.obney.orc.ontology.core.read-models]
             [ai.obney.orc.ontology.core.todo-processors]
+            [ai.obney.orc.orc-service.interface :as orc]
             [ai.obney.orc.orc-service.interface.schemas]
             [ai.obney.orc.orc-service.core.commands]
             [ai.obney.orc.orc-service.core.read-models]
@@ -22,7 +24,59 @@
             [ai.obney.grain.todo-processor-v2.interface :as tp]
             [ai.obney.grain.kv-store.interface :as kv]
             [ai.obney.grain.kv-store-lmdb.interface :as lmdb]
-            [ai.obney.grain.time.interface :as time]))
+            [ai.obney.grain.time.interface :as time]
+            [litellm.router :as litellm-router]))
+
+;; Gap-4: register a placeholder litellm config so orc/execute on a
+;; :code-only eval sheet doesn't fail with "Configuration not found"
+;; during the runtime's provider validation. Real consumers register
+;; the actual config at app boot; for unit tests that only exercise
+;; :code-node eval sheets this is a no-op stub.
+(litellm-router/register! :openrouter
+                          {:provider :openrouter
+                           :model "test-noop"
+                           :config {:api-base "http://localhost:0"
+                                    :api-key "test"}})
+
+;; =============================================================================
+;; Gap-4 test fixtures — synthetic custom-judge eval functions
+;; =============================================================================
+;;
+;; A custom judge is a consumer-built ORC workflow. The runtime sub-
+;; executes that workflow with the host node's inputs/outputs/instruction
+;; as inputs. The sheet's outputs MUST yield :score (double 0-1) and
+;; :feedback (string). These test fns implement the consumer side.
+
+(defn custom-judge-by-output-length
+  "Test eval fn: score = length of (str host-outputs) / 200, clamped to 1.0."
+  [{:keys [inputs] :as _executor-ctx}]
+  (let [host-outputs (:host-outputs inputs)
+        s (str host-outputs)
+        raw (/ (count s) 200.0)
+        score (min 1.0 raw)]
+    {:score score
+     :feedback (str "Output is " (count s) " chars (raw " raw " clamped " score ")")}))
+
+(defn custom-judge-schema-compliance
+  "Test eval fn: score = 1.0 if host-outputs has :answer key, 0.0 otherwise."
+  [{:keys [inputs] :as _executor-ctx}]
+  (let [host-outputs (:host-outputs inputs)
+        has-answer? (contains? host-outputs :answer)]
+    {:score (if has-answer? 1.0 0.0)
+     :feedback (if has-answer?
+                 "host outputs contains :answer field"
+                 "host outputs missing :answer field")}))
+
+(defn custom-judge-broken-no-score
+  "Test eval fn: returns outputs WITHOUT :score — exercises the
+   missing-score graceful path."
+  [_ctx]
+  {:feedback "broken-judge missing-score-on-purpose"})
+
+(defn custom-judge-throws
+  "Test eval fn: deliberately throws — exercises error graceful path."
+  [_ctx]
+  (throw (ex-info "intentional-test-error" {:test :gap-4})))
 
 ;; =============================================================================
 ;; Test context helpers (mirror the pattern from consolidation_trigger_test)
@@ -1351,3 +1405,721 @@
             (is (= before after)
                 (str "Opt-in OFF must produce ZERO new judge events. "
                      "Before: " before ", After: " after))))))))
+
+;; =============================================================================
+;; Gap-4 RED#1 (tracer) — :custom judge sub-executes a consumer eval sheet
+;; =============================================================================
+;;
+;; This is the "consumer brings their own judge" affordance. The
+;; consumer builds an ORC workflow (any code/llm/composite structure
+;; that ultimately writes :score + :feedback to its blackboard).
+;; They `declare-judge` with :type :custom + :sheet-id, then attach
+;; the judge to host nodes. When the host node's completion event
+;; arrives, the runtime sub-executes the eval sheet with :host-inputs/
+;; :host-outputs/:host-instruction as inputs.
+
+(defn- build-eval-workflow!
+  "Helper: build a tiny eval workflow that runs a single :code node
+   reading :host-outputs (the host node's writes) and writing :score
+   + :feedback. Returns the materialized sheet-id."
+  [ctx workflow-name fn-symbol]
+  (let [workflow (orc/workflow workflow-name
+                   (orc/blackboard
+                     {:host-inputs :any
+                      :host-outputs :any
+                      :host-instruction :any
+                      :host-trace :any
+                      :score :double
+                      :feedback :string})
+                   (orc/code "eval"
+                     :fn fn-symbol
+                     :reads [:host-outputs]
+                     :writes [:score :feedback]))]
+    (orc/build-workflow! ctx workflow)))
+
+(deftest gap4-custom-judge-sub-executes-eval-sheet
+  (testing "Gap-4 RED#1: a :custom judge with :sheet-id pointing at a consumer-built eval workflow sub-executes that workflow when the host node completes; :judge/score-emitted lands with the score the eval sheet produced"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [eval-sheet-id (build-eval-workflow!
+                            ctx
+                            (str "gap4-length-judge-" (random-uuid))
+                            "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-by-output-length")
+            ;; Declare the custom judge on a host sheet with the eval-sheet-id.
+            host-sheet-result (cp/process-command
+                                (assoc ctx :command
+                                       {:command/name :sheet/create-sheet
+                                        :command/id (random-uuid)
+                                        :command/timestamp (time/now)
+                                        :name (str "host-sheet-" (random-uuid))}))
+            host-sheet-id (-> host-sheet-result :command-result/events first :sheet-id)
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "output-length"
+                        :judge-config {:type :custom :sheet-id eval-sheet-id}}))
+            host-node-result (cp/process-command
+                               (assoc ctx :command
+                                      {:command/name :sheet/create-node
+                                       :command/id (random-uuid)
+                                       :command/timestamp (time/now)
+                                       :sheet-id host-sheet-id
+                                       :type :leaf}))
+            host-node-id (-> host-node-result :command-result/events first :node-id)
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["output-length"]}))
+            tick-id (random-uuid)
+            host-output-payload {:answer "A response from the model with some characters"}]
+        (Thread/sleep 200)
+        ;; Trigger the host node completion event — the runtime should
+        ;; sub-execute the eval sheet and emit a score event.
+        (cp/process-command
+          (assoc ctx :command
+                 {:command/name :sheet/complete-node-execution
+                  :command/id (random-uuid)
+                  :command/timestamp (time/now)
+                  :sheet-id host-sheet-id
+                  :tick-id tick-id
+                  :node-id host-node-id
+                  :node-type :leaf
+                  :status :success
+                  :writes host-output-payload}))
+        ;; Sub-execution is synchronous via orc/execute but the
+        ;; processor itself is async; poll for the score event.
+        (loop [waited 0]
+          (let [n (count (into [] (es/read (:event-store ctx)
+                                            {:types #{:judge/score-emitted}
+                                             :tenant-id (:tenant-id ctx)})))]
+            (cond
+              (>= n 1) :done
+              (>= waited 15000) :timeout
+              :else (do (Thread/sleep 500) (recur (+ waited 500))))))
+        (let [events (into [] (es/read (:event-store ctx)
+                                        {:types #{:judge/score-emitted}
+                                         :tenant-id (:tenant-id ctx)}))
+              matching (filter #(= tick-id (:tick-id %)) events)]
+          (is (= 1 (count matching))
+              (str "Exactly 1 :judge/score-emitted event must land for this tick. "
+                   "Got: " (count matching) " matching of " (count events) " total."))
+          (when (seq matching)
+            (let [event (first matching)
+                  expected-len (count (str host-output-payload))
+                  expected-score (min 1.0 (/ expected-len 200.0))]
+              (is (= "output-length" (:judge-name event))
+                  "Score event names the custom judge")
+              (is (= host-sheet-id (:sheet-id event)))
+              (is (= host-node-id (:node-id event)))
+              (is (= expected-score (:score event))
+                  (str "Score matches the eval fn's computation. Expected "
+                       expected-score " from " expected-len " chars; got "
+                       (:score event)))
+              (is (str/includes? (:feedback event) (str expected-len))
+                  (str ":feedback flows through from eval sheet output. Got: "
+                       (pr-str (:feedback event)))))))))))
+
+;; =============================================================================
+;; Gap-4 RED#1.5 — custom LLM judge with structured outputs
+;; =============================================================================
+;;
+;; Custom judges aren't limited to deterministic :code workflows. The
+;; consumer's eval sheet can include `:llm` nodes — the same way the
+;; default grounding/reasoning/completeness/instruction-following judges
+;; do. This test confirms generalization: a custom judge defined as an
+;; LLM-graded workflow harvests structured outputs (:score, :feedback,
+;; :dimensions) from the LLM's response and emits a `:judge/score-
+;; emitted` event of the same shape as deterministic judges.
+;;
+;; Unit test uses with-redefs on dscloj/predict to return synthetic
+;; structured outputs. LIVE verify (RED-LIVE) hits real OpenRouter.
+
+(require '[dscloj.core :as dscloj])
+
+(defn- with-faked-llm
+  "Run body with dscloj/predict stubbed to return synthetic structured
+   outputs. Mirrors the consolidator-test helper of the same name."
+  [outputs f]
+  (with-redefs [dscloj/predict (fn [_provider _module _inputs _options]
+                                  {:outputs outputs
+                                   :usage {:total-tokens 100}
+                                   :model "fake-llm-judge"})]
+    (f)))
+
+(defn- build-llm-eval-workflow!
+  "Helper: build an eval workflow that uses an :llm node to grade the
+   host's output. The LLM reads :host-outputs + :host-instruction and
+   writes :score + :feedback + :dimensions. Returns the materialized
+   sheet-id."
+  [ctx workflow-name]
+  (let [workflow (orc/workflow workflow-name
+                   (orc/blackboard
+                     {:host-inputs :any
+                      :host-outputs :any
+                      :host-instruction :any
+                      :host-trace :any
+                      :score :double
+                      :feedback :string
+                      :dimensions [:vector :any]})
+                   (orc/llm "grade"
+                     :model "google/gemini-3-flash-preview"
+                     :instruction (str "You are an evaluation judge. Given the host node's "
+                                       ":host-outputs and the original :host-instruction, "
+                                       "score how well the output addresses the instruction. "
+                                       "Return :score (0.0-1.0), :feedback (string explaining "
+                                       "the score), and :dimensions (vector of "
+                                       "{:name :score :feedback} maps for sub-criteria).")
+                     :reads [:host-outputs :host-instruction]
+                     :writes [:score :feedback :dimensions]))]
+    (orc/build-workflow! ctx workflow)))
+
+(deftest gap4-custom-llm-judge-emits-structured-score
+  (testing "Gap-4 RED#1.5: a custom judge with an :llm node grades the host's output, harvests :score + :feedback + :dimensions from the LLM's structured response, and emits a properly-shaped :judge/score-emitted event"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [eval-sheet-id (build-llm-eval-workflow!
+                            ctx
+                            (str "gap4-llm-judge-" (random-uuid)))
+            host-sheet-id (let [r (cp/process-command
+                                    (assoc ctx :command
+                                           {:command/name :sheet/create-sheet
+                                            :command/id (random-uuid)
+                                            :command/timestamp (time/now)
+                                            :name (str "host-llm-" (random-uuid))}))]
+                            (-> r :command-result/events first :sheet-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "task-completion"
+                        :judge-config {:type :custom :sheet-id eval-sheet-id}}))
+            host-node-id (let [r (cp/process-command
+                                   (assoc ctx :command
+                                          {:command/name :sheet/create-node
+                                           :command/id (random-uuid)
+                                           :command/timestamp (time/now)
+                                           :sheet-id host-sheet-id
+                                           :type :leaf}))]
+                           (-> r :command-result/events first :node-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["task-completion"]}))
+            tick-id (random-uuid)
+            ;; Synthetic LLM response — what a grading LLM would
+            ;; produce when reading the host's output through the
+            ;; rubric instruction.
+            fake-llm-outputs {:score 0.85
+                              :feedback (str "The host's output is well-formed and addresses "
+                                             "the instruction. Minor gap: did not include a "
+                                             "rationale for the chosen approach.")
+                              :dimensions [{:name "completeness"
+                                            :score 0.9
+                                            :feedback "Covered the main requirements"}
+                                           {:name "clarity"
+                                            :score 0.8
+                                            :feedback "Mostly clear; some technical jargon"}]}
+            host-writes {:answer "A response that addresses the task."}]
+        (Thread/sleep 200)
+        ;; Fake the LLM call inside the eval sheet's :llm node.
+        (with-faked-llm fake-llm-outputs
+          (fn []
+            (cp/process-command
+              (assoc ctx :command
+                     {:command/name :sheet/complete-node-execution
+                      :command/id (random-uuid)
+                      :command/timestamp (time/now)
+                      :sheet-id host-sheet-id
+                      :tick-id tick-id
+                      :node-id host-node-id
+                      :node-type :leaf
+                      :status :success
+                      :writes host-writes}))
+            ;; Poll for the score event — orc/execute is sync but the
+            ;; processor is async via futures, so we poll briefly.
+            (loop [waited 0]
+              (let [n (count (filter #(= tick-id (:tick-id %))
+                                     (into [] (es/read (:event-store ctx)
+                                                        {:types #{:judge/score-emitted}
+                                                         :tenant-id (:tenant-id ctx)}))))]
+                (cond
+                  (>= n 1) :done
+                  (>= waited 15000) :timeout
+                  :else (do (Thread/sleep 500) (recur (+ waited 500))))))))
+        (let [events (into [] (es/read (:event-store ctx)
+                                        {:types #{:judge/score-emitted}
+                                         :tenant-id (:tenant-id ctx)}))
+              matching (filter #(= tick-id (:tick-id %)) events)]
+          (is (= 1 (count matching))
+              (str "1 :judge/score-emitted event must land for the LLM custom judge. "
+                   "Got: " (count matching)))
+          (when (seq matching)
+            (let [event (first matching)]
+              (is (= "task-completion" (:judge-name event)))
+              (is (= 0.85 (:score event))
+                  "Score harvested verbatim from the LLM's structured output")
+              (is (str/includes? (:feedback event) "well-formed")
+                  ":feedback string flows through unchanged from LLM response")
+              (is (= 2 (count (:dimensions event)))
+                  ":dimensions vector flows through")
+              (is (= #{"completeness" "clarity"}
+                     (set (map :name (:dimensions event))))
+                  "Each dimension carries the LLM's sub-criterion name"))))))))
+
+;; =============================================================================
+;; Gap-4 RED#2 — eval sheet outputs lack :score → graceful no-op
+;; =============================================================================
+;;
+;; If a consumer's eval sheet produces outputs WITHOUT a numeric
+;; :score (broken contract), the runtime must not emit a malformed
+;; :judge/score-emitted event. It logs the issue (via mulog
+;; ::custom-judge-output-missing-score) and returns nil. Sibling
+;; judges + other ticks continue unaffected.
+
+(defn- build-broken-eval-workflow!
+  "Helper: build an eval workflow that does NOT write :score (broken
+   contract). The :code node writes only :feedback."
+  [ctx workflow-name]
+  (let [workflow (orc/workflow workflow-name
+                   (orc/blackboard
+                     {:host-inputs :any
+                      :host-outputs :any
+                      :host-instruction :any
+                      :host-trace :any
+                      :feedback :string})
+                   (orc/code "eval"
+                     :fn "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-broken-no-score"
+                     :reads [:host-outputs]
+                     :writes [:feedback]))]
+    (orc/build-workflow! ctx workflow)))
+
+(deftest gap4-custom-judge-missing-score-no-ops
+  (testing "Gap-4 RED#2: eval sheet that doesn't write :score produces no :judge/score-emitted event (graceful contract violation)"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [eval-sheet-id (build-broken-eval-workflow!
+                            ctx (str "gap4-broken-" (random-uuid)))
+            host-sheet-id (let [r (cp/process-command
+                                    (assoc ctx :command
+                                           {:command/name :sheet/create-sheet
+                                            :command/id (random-uuid)
+                                            :command/timestamp (time/now)
+                                            :name (str "host-broken-" (random-uuid))}))]
+                            (-> r :command-result/events first :sheet-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "broken-judge"
+                        :judge-config {:type :custom :sheet-id eval-sheet-id}}))
+            host-node-id (let [r (cp/process-command
+                                   (assoc ctx :command
+                                          {:command/name :sheet/create-node
+                                           :command/id (random-uuid)
+                                           :command/timestamp (time/now)
+                                           :sheet-id host-sheet-id
+                                           :type :leaf}))]
+                           (-> r :command-result/events first :node-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["broken-judge"]}))
+            tick-id (random-uuid)]
+        (Thread/sleep 200)
+        (let [before (count (into [] (es/read (:event-store ctx)
+                                               {:types #{:judge/score-emitted}
+                                                :tenant-id (:tenant-id ctx)})))]
+          (cp/process-command
+            (assoc ctx :command
+                   {:command/name :sheet/complete-node-execution
+                    :command/id (random-uuid)
+                    :command/timestamp (time/now)
+                    :sheet-id host-sheet-id
+                    :tick-id tick-id
+                    :node-id host-node-id
+                    :node-type :leaf
+                    :status :success
+                    :writes {:answer "anything"}}))
+          (Thread/sleep 1500)
+          (let [after (count (into [] (es/read (:event-store ctx)
+                                                {:types #{:judge/score-emitted}
+                                                 :tenant-id (:tenant-id ctx)})))]
+            (is (= before after)
+                (str "No score event when eval sheet outputs lack :score. "
+                     "Before: " before ", After: " after))))))))
+
+;; =============================================================================
+;; Gap-4 RED#3 — multiple :custom judges on the same node fire independently
+;; =============================================================================
+;;
+;; The parallel-judges discipline (Gap-7 fix) handles this for default
+;; judges. Verify it generalizes to custom judges: two distinct eval
+;; sheets attached as judges to the same node each emit their own
+;; :judge/score-emitted event with their respective judge-name.
+
+(defn- build-schema-eval-workflow!
+  "Helper: eval workflow scoring schema compliance via custom-judge-schema-compliance."
+  [ctx workflow-name]
+  (orc/build-workflow! ctx
+                       (orc/workflow workflow-name
+                         (orc/blackboard
+                           {:host-inputs :any
+                            :host-outputs :any
+                            :host-instruction :any
+                            :host-trace :any
+                            :score :double
+                            :feedback :string})
+                         (orc/code "eval"
+                           :fn "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-schema-compliance"
+                           :reads [:host-outputs]
+                           :writes [:score :feedback]))))
+
+(deftest gap4-multiple-custom-judges-fire-independently
+  (testing "Gap-4 RED#3: two :custom judges with distinct eval sheets attached to the same node both fire and emit their own :judge/score-emitted events tagged with their respective judge-name"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [length-sheet-id (build-eval-workflow!
+                              ctx
+                              (str "gap4-length-" (random-uuid))
+                              "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-by-output-length")
+            schema-sheet-id (build-schema-eval-workflow!
+                              ctx
+                              (str "gap4-schema-" (random-uuid)))
+            host-sheet-id (let [r (cp/process-command
+                                    (assoc ctx :command
+                                           {:command/name :sheet/create-sheet
+                                            :command/id (random-uuid)
+                                            :command/timestamp (time/now)
+                                            :name (str "host-multi-" (random-uuid))}))]
+                            (-> r :command-result/events first :sheet-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "length-judge"
+                        :judge-config {:type :custom :sheet-id length-sheet-id}}))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "schema-judge"
+                        :judge-config {:type :custom :sheet-id schema-sheet-id}}))
+            host-node-id (let [r (cp/process-command
+                                   (assoc ctx :command
+                                          {:command/name :sheet/create-node
+                                           :command/id (random-uuid)
+                                           :command/timestamp (time/now)
+                                           :sheet-id host-sheet-id
+                                           :type :leaf}))]
+                           (-> r :command-result/events first :node-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["length-judge" "schema-judge"]}))
+            tick-id (random-uuid)
+            host-writes {:answer "Final response from host"}]
+        (Thread/sleep 200)
+        (cp/process-command
+          (assoc ctx :command
+                 {:command/name :sheet/complete-node-execution
+                  :command/id (random-uuid)
+                  :command/timestamp (time/now)
+                  :sheet-id host-sheet-id
+                  :tick-id tick-id
+                  :node-id host-node-id
+                  :node-type :leaf
+                  :status :success
+                  :writes host-writes}))
+        (loop [waited 0]
+          (let [matching (filter #(= tick-id (:tick-id %))
+                                 (into [] (es/read (:event-store ctx)
+                                                    {:types #{:judge/score-emitted}
+                                                     :tenant-id (:tenant-id ctx)})))]
+            (cond
+              (>= (count matching) 2) :done
+              (>= waited 15000) :timeout
+              :else (do (Thread/sleep 500) (recur (+ waited 500))))))
+        (let [matching (filter #(= tick-id (:tick-id %))
+                               (into [] (es/read (:event-store ctx)
+                                                  {:types #{:judge/score-emitted}
+                                                   :tenant-id (:tenant-id ctx)})))]
+          (is (= 2 (count matching))
+              (str "Both custom judges must fire. Got: " (count matching)))
+          (is (= #{"length-judge" "schema-judge"}
+                 (set (map :judge-name matching)))
+              "Each event names a distinct judge")
+          ;; Schema-judge scores 1.0 because :answer is present;
+          ;; length-judge scores (24 / 200) = 0.12.
+          (let [by-name (into {} (map (fn [e] [(:judge-name e) (:score e)])) matching)]
+            (is (= 1.0 (get by-name "schema-judge"))
+                "schema-judge scores 1.0 because :answer field is present")
+            (is (number? (get by-name "length-judge"))
+                "length-judge produces a numeric score independently")))))))
+
+;; =============================================================================
+;; Gap-4 RED#4 — invalid eval-sheet-id → graceful error, siblings still fire
+;; =============================================================================
+;;
+;; If a custom judge points at a non-existent sheet-id (consumer
+;; misconfigured, sheet deleted, etc), the runtime must NOT crash. It
+;; should log via mulog and skip — sibling judges (default or other
+;; custom) on the same node continue to fire normally.
+
+(deftest gap4-invalid-sheet-id-graceful-with-siblings
+  (testing "Gap-4 RED#4: a custom judge with :sheet-id pointing at a nonexistent sheet skips gracefully; another custom judge with a valid sheet-id on the same node still fires"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [valid-sheet-id (build-eval-workflow!
+                             ctx
+                             (str "gap4-valid-" (random-uuid))
+                             "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-by-output-length")
+            bogus-sheet-id (random-uuid)  ;; never built — doesn't exist
+            host-sheet-id (let [r (cp/process-command
+                                    (assoc ctx :command
+                                           {:command/name :sheet/create-sheet
+                                            :command/id (random-uuid)
+                                            :command/timestamp (time/now)
+                                            :name (str "host-mixed-" (random-uuid))}))]
+                            (-> r :command-result/events first :sheet-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "valid-judge"
+                        :judge-config {:type :custom :sheet-id valid-sheet-id}}))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "bogus-judge"
+                        :judge-config {:type :custom :sheet-id bogus-sheet-id}}))
+            host-node-id (let [r (cp/process-command
+                                   (assoc ctx :command
+                                          {:command/name :sheet/create-node
+                                           :command/id (random-uuid)
+                                           :command/timestamp (time/now)
+                                           :sheet-id host-sheet-id
+                                           :type :leaf}))]
+                           (-> r :command-result/events first :node-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["valid-judge" "bogus-judge"]}))
+            tick-id (random-uuid)]
+        (Thread/sleep 200)
+        (cp/process-command
+          (assoc ctx :command
+                 {:command/name :sheet/complete-node-execution
+                  :command/id (random-uuid)
+                  :command/timestamp (time/now)
+                  :sheet-id host-sheet-id
+                  :tick-id tick-id
+                  :node-id host-node-id
+                  :node-type :leaf
+                  :status :success
+                  :writes {:answer "x"}}))
+        ;; Wait for the valid judge to settle (5 sec budget).
+        (loop [waited 0]
+          (let [matching (filter #(= tick-id (:tick-id %))
+                                 (into [] (es/read (:event-store ctx)
+                                                    {:types #{:judge/score-emitted}
+                                                     :tenant-id (:tenant-id ctx)})))]
+            (cond
+              (>= (count matching) 1) :done
+              (>= waited 15000) :timeout
+              :else (do (Thread/sleep 500) (recur (+ waited 500))))))
+        (Thread/sleep 1500) ;; ensure bogus-judge has had its chance to fail/skip
+        (let [matching (filter #(= tick-id (:tick-id %))
+                               (into [] (es/read (:event-store ctx)
+                                                  {:types #{:judge/score-emitted}
+                                                   :tenant-id (:tenant-id ctx)})))]
+          (is (= 1 (count matching))
+              (str "Exactly 1 score event — only valid-judge produced it. Got: "
+                   (count matching)))
+          (when (seq matching)
+            (is (= "valid-judge" (:judge-name (first matching)))
+                "The score event is from the valid judge, not the bogus one")))))))
+
+;; =============================================================================
+;; Gap-4 RED#5 — recursion safeguard (depth-1 max)
+;; =============================================================================
+;;
+;; A maliciously-configured custom judge sheet could attach its OWN
+;; :custom judges to its internal nodes, potentially spawning a
+;; runaway chain of sub-ticks. The runtime tracks :judge-depth in
+;; context; default max-depth = 1 (a judge sheet's internal nodes'
+;; judges are SKIPPED).
+;;
+;; This test exercises invoke-custom-judge directly to verify the
+;; depth-1 guard fires before sub-executing. Verifies the safeguard's
+;; CONTRACT: at depth = max, invoke-custom-judge returns nil without
+;; calling orc/execute.
+
+(deftest gap4-recursion-safeguard-skips-at-max-depth
+  (testing "Gap-4 RED#5: when ctx ::judge-depth is already at max-depth, invoke-custom-judge returns nil WITHOUT calling orc/execute (preventing infinite recursion)"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [invoke-custom-judge @#'ai.obney.orc.evaluation.core.judge-runtime/invoke-custom-judge
+            ;; Build any eval sheet — recursion guard fires BEFORE
+            ;; orc/execute would be called.
+            eval-sheet-id (build-eval-workflow!
+                            ctx
+                            (str "gap4-recursion-" (random-uuid))
+                            "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-by-output-length")
+            judge-config {:type :custom :eval-sheet-id eval-sheet-id}
+            trace-data {:inputs {} :outputs {:answer "x"} :instruction ""}
+            ;; Track whether orc/execute would have been called by
+            ;; replacing the var temporarily.
+            execute-called? (atom false)]
+        (with-redefs [orc/execute (fn [& _]
+                                     (reset! execute-called? true)
+                                     {:status :success
+                                      :outputs {:score 1.0 :feedback ""}})]
+          ;; depth = max-depth (1 by default) → recursion guard fires
+          (let [result (invoke-custom-judge
+                         (assoc ctx
+                                :ai.obney.orc.evaluation.core.judge-runtime/judge-depth 1)
+                         judge-config trace-data)]
+            (is (nil? result)
+                "Recursion guard returns nil at max-depth")
+            (is (false? @execute-called?)
+                "orc/execute is NOT called when depth >= max-depth"))
+          ;; depth < max-depth → normal execution
+          (reset! execute-called? false)
+          (let [result (invoke-custom-judge
+                         (assoc ctx
+                                :ai.obney.orc.evaluation.core.judge-runtime/judge-depth 0)
+                         judge-config trace-data)]
+            (is (some? result)
+                "At depth < max-depth, judge runs normally")
+            (is (true? @execute-called?)
+                "orc/execute IS called when depth < max-depth")))))))
+
+;; =============================================================================
+;; Gap-4 RED#6 — custom-judge scores flow into get-judge-scores
+;; =============================================================================
+;;
+;; Custom judge scores must be queryable via the same get-judge-scores
+;; read-model the default judges use. Gap-3's consolidator integration
+;; then picks them up via :judge-averages in :aggregate-metrics. This
+;; test verifies the read-model integration; the consolidator
+;; aggregation is covered downstream by the existing consolidator
+;; tests once custom scores are in the store.
+
+(deftest gap4-custom-judge-scores-flow-into-read-model
+  (testing "Gap-4 RED#6: after a custom judge fires, its score appears in get-judge-scores for the (sheet, node, tick) tuple alongside any other judges"
+    (with-test-ctx [ctx]
+      (set-living-description-enabled! ctx true)
+      (let [length-sheet-id (build-eval-workflow!
+                              ctx
+                              (str "gap4-flow-length-" (random-uuid))
+                              "ai.obney.orc.evaluation.judge-runtime-test/custom-judge-by-output-length")
+            schema-sheet-id (build-schema-eval-workflow!
+                              ctx
+                              (str "gap4-flow-schema-" (random-uuid)))
+            host-sheet-id (let [r (cp/process-command
+                                    (assoc ctx :command
+                                           {:command/name :sheet/create-sheet
+                                            :command/id (random-uuid)
+                                            :command/timestamp (time/now)
+                                            :name (str "host-flow-" (random-uuid))}))]
+                            (-> r :command-result/events first :sheet-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "len"
+                        :judge-config {:type :custom :sheet-id length-sheet-id}}))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/declare-judge
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :judge-name "sch"
+                        :judge-config {:type :custom :sheet-id schema-sheet-id}}))
+            host-node-id (let [r (cp/process-command
+                                   (assoc ctx :command
+                                          {:command/name :sheet/create-node
+                                           :command/id (random-uuid)
+                                           :command/timestamp (time/now)
+                                           :sheet-id host-sheet-id
+                                           :type :leaf}))]
+                           (-> r :command-result/events first :node-id))
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :sheet/set-node-judges
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :sheet-id host-sheet-id
+                        :node-id host-node-id
+                        :judges ["len" "sch"]}))
+            tick-id (random-uuid)
+            get-judge-scores (requiring-resolve
+                               'ai.obney.orc.evaluation.interface/get-judge-scores)]
+        (Thread/sleep 200)
+        (cp/process-command
+          (assoc ctx :command
+                 {:command/name :sheet/complete-node-execution
+                  :command/id (random-uuid)
+                  :command/timestamp (time/now)
+                  :sheet-id host-sheet-id
+                  :tick-id tick-id
+                  :node-id host-node-id
+                  :node-type :leaf
+                  :status :success
+                  :writes {:answer "Hello world"}}))
+        ;; Wait for both judges to settle
+        (loop [waited 0]
+          (let [matching (filter #(= tick-id (:tick-id %))
+                                 (into [] (es/read (:event-store ctx)
+                                                    {:types #{:judge/score-emitted}
+                                                     :tenant-id (:tenant-id ctx)})))]
+            (cond
+              (>= (count matching) 2) :done
+              (>= waited 15000) :timeout
+              :else (do (Thread/sleep 500) (recur (+ waited 500))))))
+        (let [scores (get-judge-scores ctx host-sheet-id host-node-id tick-id)]
+          (is (= 2 (count scores))
+              (str "get-judge-scores returns both custom judge entries. Got: " (count scores)))
+          (is (= #{"len" "sch"} (set (map :judge-name scores)))
+              "Both judge names present in the read-model")
+          (is (every? #(number? (:score %)) scores)
+              "Every entry has a numeric :score field"))))))

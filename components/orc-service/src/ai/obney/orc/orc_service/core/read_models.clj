@@ -478,11 +478,21 @@
 
 (defmethod judges* :sheet/judge-declared
   [state event]
-  (assoc state (:judge-name event)
-         (merge (:judge-config event)
-                {:sheet-id (:sheet-id event)
-                 :judge-name (:judge-name event)
-                 :criteria-version (or (:criteria-version event) 1)})))
+  ;; Gap-4: judge-config may carry `:sheet-id` referring to the
+  ;; CONSUMER'S eval sheet (for `:type :custom`). The merge below
+  ;; sets `:sheet-id` to the host sheet (the framework needs
+  ;; `:sheet-id` in the judge map for partitioning + cache). To
+  ;; preserve the eval-sheet reference, we lift it to
+  ;; `:eval-sheet-id` BEFORE the merge — custom-judge sub-execution
+  ;; reads from there.
+  (let [jc (:judge-config event)
+        jc+eval (cond-> jc
+                  (:sheet-id jc) (assoc :eval-sheet-id (:sheet-id jc)))]
+    (assoc state (:judge-name event)
+           (merge jc+eval
+                  {:sheet-id (:sheet-id event)
+                   :judge-name (:judge-name event)
+                   :criteria-version (or (:criteria-version event) 1)}))))
 
 (defmethod judges* :default [state _] state)
 

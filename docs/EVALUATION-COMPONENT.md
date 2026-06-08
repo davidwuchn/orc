@@ -46,16 +46,34 @@ The evaluation component provides **reference-free LLM-as-judge evaluation** for
 4. **ORC-integrated**: Evaluation workflows run as sheets with full observability
 5. **Flexible execution**: Mock mode for testing, real LLM for production
 
-### Important: Evaluation is Retrospective
+### Two evaluation modes
 
-Evaluation runs **after** sheet execution, not during. You evaluate traces by:
+The component supports BOTH retrospective and inline evaluation:
+
+**Retrospective (original design):**
+Evaluation runs **after** sheet execution as a batch. You evaluate traces by:
 1. Extracting historical execution data from the event store
 2. Running evaluation judges on the extracted traces
 3. Analyzing results to identify quality issues
 
-There is no built-in way to attach judges to production nodes for inline evaluation during execution. This design keeps production latency low (no extra LLM calls per node) while enabling comprehensive batch evaluation of historical data.
+**Inline (added 2026-06 via the per-event evaluator runtime):**
+When the Living Description opt-in flag is on, the
+`:evaluation/on-node-execution-completed` processor subscribes to
+`:sheet/node-execution-completed` events and fires any attached judges
+in parallel via futures. Score events land as `:judge/score-emitted`
+in the event store, and the consolidator integrates them on the next
+reflection cycle. See
+[`RLM-GUIDE.md` § Attaching judges to your behavior trees](RLM-GUIDE.md#attaching-judges-to-your-behavior-trees)
+for the full attach-and-fire flow.
 
-For inline validation during execution, see the sheet service's `condition` and `llm-condition` nodes, which provide pass/fail checks (but not scoring).
+Inline evaluation costs N extra LLM calls per qualifying node tick
+(N = number of attached judges; 4 LLM judges by default for
+`:repl-researcher`). Consumers opt out by leaving the flag off — when
+off, the processor returns immediately with zero overhead.
+
+For instant pass/fail validation INSIDE a workflow (different from
+post-hoc scoring), see the sheet service's `condition` and
+`llm-condition` nodes.
 
 ---
 
@@ -285,9 +303,25 @@ A prompt template that defines evaluation criteria. Each rubric includes:
 
 ---
 
-## The Four Judges
+## The Default Judges
 
-### 1. Grounding Judge (35% weight)
+> **Note (2026-06):** The component originally shipped with four LLM
+> judges (grounding, instruction-following, reasoning, completeness)
+> and assigned weight percentages to each. A fifth judge,
+> `heuristic-structural`, was added when the per-event evaluator
+> runtime landed — it grades the shape of trees the model produces
+> (deterministic, no LLM call). When the Living Description opt-in
+> flag is on, all 5 auto-attach to `:repl-researcher` nodes.
+>
+> **The weight percentages below are advisory.** No aggregator in
+> the current code reads them — each judge's score contributes
+> independently to the consolidator's per-judge averages map. A
+> follow-up issue (`Gap-8 — judge-weight aggregation`, local) plans
+> to add either even-weight default or honoring the configured
+> `:weight` for a composite "overall health" score. Until then,
+> downstream code treats all judges as equal independent signals.
+
+### 1. Grounding Judge (configured 35% weight — not currently aggregated)
 
 Detects hallucinations by checking if claims are supported by input context.
 
@@ -313,7 +347,7 @@ Detects hallucinations by checking if claims are supported by input context.
 ;;      :feedback "Contains hallucinations: 24/7 and parking not in FAQ"}}
 ```
 
-### 2. Instruction Following Judge (25% weight)
+### 2. Instruction Following Judge (configured 25% weight — not currently aggregated)
 
 Evaluates whether the LLM followed its given instruction.
 
@@ -338,7 +372,7 @@ Evaluates whether the LLM followed its given instruction.
 ;;      :feedback "Response is prose, not JSON. Format as {...}"}}
 ```
 
-### 3. Reasoning Judge (20% weight)
+### 3. Reasoning Judge (configured 20% weight — not currently aggregated)
 
 Evaluates the coherence and quality of reasoning.
 
@@ -348,7 +382,15 @@ Evaluates the coherence and quality of reasoning.
 - `reasoning-weaknesses`: Logical gaps or unclear elements
 - `feedback`: Suggestions for clearer reasoning
 
-### 4. Completeness Judge (20% weight)
+### 4. Completeness Judge (configured 20% weight — not currently aggregated)
+
+### 5. Heuristic Structural Judge (added 2026-06; deterministic, no LLM)
+
+Pure-Clojure heuristic that grades the SHAPE of a tree the model produced (via `:generated-tree-raw` in the host's writes). Looks for patterns like declared `:output-schemas`, presence of `:aggregate` for deterministic merges, `:max-concurrency` on `:map-each`, etc. Returns a score reflecting "how well-formed is this tree as a behavior tree?"
+
+Fires alongside the 4 LLM judges when Living Description is on. No LLM cost. Also fires per `:rlm/tree-generated` event (each intermediate Phase-1 emit-tree iteration), not just on terminal completion.
+
+**Source:** `components/evaluation/src/.../core/heuristic_structural.clj`
 
 Evaluates whether all aspects of the task were addressed.
 

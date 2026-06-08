@@ -137,12 +137,114 @@
   (when-let [tree (get-in trace-data [:outputs :generated-tree-raw])]
     (heuristic-structural/evaluate-tree-structure tree)))
 
+(def ^:private default-custom-judge-timeout-ms
+  "How long a custom judge's sub-execution is allowed to run. Spec
+   default is 60s; consumers may override per-judge via
+   :judge-config.:timeout-ms."
+  60000)
+
+(defn- invoke-custom-judge
+  "Gap-4: sub-execute a consumer-defined eval sheet against the host
+   node's trace-data and harvest a score.
+
+   The consumer's judge sheet must be a previously-built ORC workflow
+   whose blackboard reads `:host-inputs`, `:host-outputs`,
+   `:host-instruction`, `:host-trace` and writes `:score` (numeric 0-1)
+   + `:feedback` (string) + optional `:dimensions` (vector).
+
+   Returns the canonical {:score :feedback :dimensions} shape, or nil
+   on any failure: missing sheet-id, sheet not found, sheet execution
+   failure, missing :score in outputs. All failures are mulog'd loudly
+   — silent skipping is the failure mode the unification arc fought
+   the whole way through.
+
+   Recursion safeguard (Gap-4 RED#5): when the host event is itself
+   produced by a custom-judge sub-execution, the runtime increments
+   :judge-depth in context. If depth exceeds max-depth (default 1),
+   this fn returns nil before sub-executing. Without this, a
+   maliciously-configured custom judge can spawn unbounded sub-ticks."
+  [ctx judge-config trace-data]
+  (let [;; Gap-4: read :eval-sheet-id (the consumer's eval workflow).
+        ;; The judges read-model lifts judge-config's :sheet-id to
+        ;; :eval-sheet-id so it isn't overwritten by the host sheet's
+        ;; id during merge. Fall back to :sheet-id for legacy callers
+        ;; that bypass the read-model and pass the raw judge-config
+        ;; with :sheet-id directly.
+        eval-sheet-id (or (:eval-sheet-id judge-config)
+                          (:sheet-id judge-config))
+        timeout-ms (or (:timeout-ms judge-config) default-custom-judge-timeout-ms)
+        depth (or (::judge-depth ctx) 0)
+        max-depth (or (::max-judge-depth ctx) 1)]
+    (cond
+      (nil? eval-sheet-id)
+      (do (u/log ::custom-judge-missing-sheet-id
+                 :judge-config (select-keys judge-config [:type :timeout-ms]))
+          nil)
+
+      (>= depth max-depth)
+      (do (u/log ::custom-judge-recursion-skipped
+                 :depth depth
+                 :max-depth max-depth
+                 :sheet-id eval-sheet-id)
+          nil)
+
+      :else
+      (let [sub-ctx (assoc ctx ::judge-depth (inc depth))
+            result (try
+                     (orc/execute sub-ctx eval-sheet-id
+                                  {:host-inputs (or (:inputs trace-data) {})
+                                   :host-outputs (or (:outputs trace-data) {})
+                                   :host-instruction (or (:instruction trace-data) "")
+                                   :host-trace []}
+                                  :timeout-ms timeout-ms)
+                     (catch Throwable t
+                       (u/log ::custom-judge-execution-threw
+                              :sheet-id eval-sheet-id
+                              :error (.getMessage t)
+                              :exception-class (.getName (class t)))
+                       nil))
+            outputs (:outputs result)
+            score (:score outputs)]
+        (cond
+          (not= :success (:status result))
+          (do (u/log ::custom-judge-execution-not-success
+                     :sheet-id eval-sheet-id
+                     :status (:status result)
+                     :error (:error result))
+              nil)
+
+          (not (number? score))
+          (do (u/log ::custom-judge-output-missing-score
+                     :sheet-id eval-sheet-id
+                     :outputs-keys (vec (keys (or outputs {}))))
+              nil)
+
+          :else
+          (let [;; Normalize dimensions to the DimensionScore schema:
+                ;; consumers may produce {:name :score :feedback}
+                ;; without :weight (the LLM grading rubric won't always
+                ;; emit weights). Default :weight to 1.0 so the event
+                ;; passes Malli validation.
+                raw-dims (or (:dimensions outputs) [])
+                norm-dims (mapv (fn [d]
+                                  (cond-> (or d {})
+                                    (nil? (:weight d)) (assoc :weight 1.0)
+                                    (nil? (:score d)) (assoc :score 0.0)
+                                    (nil? (:name d)) (assoc :name "")
+                                    (nil? (:feedback d)) (assoc :feedback "")
+                                    true (update :weight double)
+                                    true (update :score double)))
+                                raw-dims)]
+            {:score (double score)
+             :feedback (or (:feedback outputs) "")
+             :dimensions norm-dims}))))))
+
 (defn- invoke-judge
   "Invoke a single attached judge against the host node's trace-data.
    Returns the {:score :feedback :dimensions} canonical shape, or nil
-   when the judge type is unrecognized or its dispatch is not yet
-   wired (e.g., :custom — Gap-4)."
-  [judge-config trace-data]
+   when the judge produced no valid result. The ctx arg is required
+   for `:custom` judges, which sub-execute via `orc/execute`."
+  [ctx judge-config trace-data]
   (let [judge-type (:type judge-config)]
     (cond
       (contains? llm-judge-types judge-type)
@@ -151,7 +253,9 @@
       (= :heuristic-structural judge-type)
       (invoke-heuristic-structural trace-data)
 
-      ;; :custom routes to Gap-4 sub-execution; for Gap-1 it's a no-op
+      (= :custom judge-type)
+      (invoke-custom-judge ctx judge-config trace-data)
+
       :else nil)))
 
 ;; =============================================================================
@@ -373,7 +477,7 @@
                         (fn [{:keys [judge-name judge-config]}]
                           [judge-name judge-config
                            (future
-                             (try (invoke-judge judge-config trace-data)
+                             (try (invoke-judge context judge-config trace-data)
                                   (catch Throwable t
                                     (u/log ::judge-invocation-failed
                                            :judge-name judge-name
@@ -500,7 +604,7 @@
                             (fn [{:keys [judge-name judge-config]}]
                               [judge-name judge-config
                                (future
-                                 (try (invoke-judge judge-config trace-data)
+                                 (try (invoke-judge context judge-config trace-data)
                                       (catch Throwable t
                                         (u/log ::judge-invocation-failed
                                                :judge-name judge-name

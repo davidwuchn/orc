@@ -64,7 +64,7 @@ Descriptions update through three signals:
 
 1. **Hand-authored seeds** — at the start, an initial catalog of ~18 descriptions captures known patterns (the 6 basic node types + the 5 benchmark task classes + 7 generic tree shapes). These are reviewed for quality and ground every claim in real benchmark evidence.
 2. **Cold-start LLM baseline** — when a brand-new entity appears (a new node instance, an unfamiliar tree shape), the system asks an LLM to write a low-confidence initial description based on the entity's structural shape. Marked at confidence 0.1 so it's invisible to retrieval until real evidence reinforces it.
-3. **Rolling consolidation** — as the system observes execution events (successes, failures, judge scores from future evaluation work), a periodic reflection step updates the description. Stable patterns climb in confidence; anomalies appear as low-confidence-but-actionable entries; outdated entries decay and eventually auto-archive.
+3. **Rolling consolidation** — as the system observes execution events (successes, failures, and judge scores from the per-event evaluator runtime — see "Judge integration" below), a periodic reflection step updates the description. Stable patterns climb in confidence; anomalies appear as low-confidence-but-actionable entries; outdated entries decay and eventually auto-archive.
 
 ### What protects descriptions from over-reacting to recent runs
 
@@ -117,6 +117,18 @@ SEMANTIC RETRIEVAL
   Model queries via natural language → ColBERT search → RRF rank-fusion across granularities.
 ```
 
+### Judge integration (added 2026-06)
+
+The consolidator's reflection input was extended to include judge scores alongside raw execution events. Verified live on `legal-issue-detection` multi-cycle:
+
+- **Per-event evaluator runtime** (`components/evaluation/src/.../core/judge_runtime.clj`) subscribes to `:sheet/node-execution-completed` and fires attached judges (default + custom) in parallel via futures with a 60s per-judge timeout. When the Living Description opt-in flag is on, repl-researcher nodes get 5 default judges auto-attached (heuristic-structural + grounding + reasoning + completeness + instruction-following).
+- **Score events** (`:judge/score-emitted`) land in the event store tagged with `[:sheet :tick :node]`.
+- **Consolidator joins them** via `gather-recent-tree-class-events`: per-observation `:judge-scores` from the recent window + `:judge-averages` per judge across the target's lifetime in `:aggregate-metrics`.
+- **Reflection instruction explains the data**: tells the LLM that `:judge-averages` is the stable baseline and to weight per-tick judge divergence with the same anti-recency discipline as success-rate deltas.
+- **Custom judges** plug into the same pipeline via `:type :custom` + `:sheet-id` referencing a consumer-built eval workflow. See [`RLM-GUIDE.md`](RLM-GUIDE.md#attaching-judges-to-your-behavior-trees).
+
+Open follow-up: judge-level `:weight` aggregation (multiple judges → composite score) is not yet implemented. Each judge contributes to `:judge-averages` independently. Tracked as `Gap-8` (local working notes).
+
 ### Slice status
 
 | Slice | Status | Notes |
@@ -130,6 +142,8 @@ SEMANTIC RETRIEVAL
 | **C-2c** | STUB (sub-grill required) | Automatic classifier API — the wrapper that assigns `:tree-id` automatically when `:context` unset. |
 | **C-3** | STUB (sub-grill required) | Judges + automated principle extraction. |
 | **C-4** | STUB (sub-grill required) | Cross-tree pattern reuse + node-type learning. |
+
+> **Note (2026-06):** Several C-2/C-3 facets above were superseded by the judge unification arc (Gaps 1/2/3/5/6/7/7b/4 shipped on `feature/core-orc-upgrades`). The status table preserves the original slicing for historical context; the actual implementation evolved through the gap-N slices, all local-only working notes under `docs/issues/c2d-followups/`.
 
 ### Cross-references
 

@@ -594,9 +594,71 @@ The DSL the model writes inside `(emit-tree! [...])` supports `:sequence`, `:par
 
 Opt in via `:context` on the node. The framework loads patterns recorded under the configured `:tree-id` and prepends a "Relevant Knowledge" block to the instruction. See [Ontology context injection](#ontology-context-injection-context) above for config, recording, and rendered output.
 
+## Judges on repl-researcher nodes (RLM-specific defaults + Living Description loop)
+
+The general judge system — declaring judges, attaching them to leaf or repl-researcher nodes, building custom judges with `:code` or `:llm` workflows — is covered in [`ORC-SERVICE-GUIDE.md` § Attaching Judges to Nodes](ORC-SERVICE-GUIDE.md#attaching-judges-to-nodes). The rest of this section is what's RLM-specific.
+
+### 5 default judges auto-attach to `:repl-researcher`
+
+When the Living Description opt-in flag is on, every `:repl-researcher` node that DOESN'T have an explicit `:judges` field set gets these 5 default judges automatically:
+
+| Judge | What it grades | Implementation |
+|---|---|---|
+| `heuristic-structural` | The shape of the tree the model emitted in Phase 1 | Pure heuristic over `:generated-tree-raw` |
+| `grounding` | Are the output claims supported by the original inputs? | LLM with structured-output rubric |
+| `reasoning` | Logical consistency of the model's chain of thought | LLM rubric |
+| `completeness` | Does the output cover what the instruction asked? | LLM rubric |
+| `instruction-following` | Did the model follow the explicit task requirements? | LLM rubric |
+
+Consumers can override defaults by explicitly calling `:sheet/set-node-judges` on a repl-researcher node — then ONLY their list applies. To turn the loop on:
+
+```clojure
+(cp/process-command
+  (assoc ctx :command
+         {:command/name :ontology/set-living-description-enabled
+          :command/id (random-uuid)
+          :command/timestamp (time/now)
+          :enabled? true}))
+```
+
+After that, every repl-researcher terminal `:sheet/node-execution-completed` event produces 5 `:judge/score-emitted` events (plus 1 per intermediate `:rlm/tree-generated` for `heuristic-structural`, which has its own processor for per-Phase-1-iteration grading).
+
+### The data flow back to the model's next run
+
+This is what makes judge signal RLM-specific (vs. retrospective batch evaluation). Judge scores feed the consolidator → consolidator updates the tree-class description body → R-Inject's prepend on the NEXT run reads the updated body:
+
+```
+host repl-researcher fires :sheet/node-execution-completed (terminal) +
+                            :rlm/tree-generated (per emit-tree iter)
+   ↓
+per-event evaluator processors (judge_runtime)
+   ↓ (for each attached judge, in parallel via futures)
+   - default LLM judges → invoke-llm-judge → dscloj/predict
+   - heuristic-structural → pure heuristic over generated-tree-raw
+   - :custom → orc/execute on consumer's eval sheet
+   ↓
+:judge/score-emitted events land
+   ↓
+consolidator's gather-recent-tree-class-events joins judges to observations
+   ↓
+:aggregate-metrics :judge-averages → consolidator's LLM reflection input
+   ↓
+:tree-description-updated body integrates judge-grounded principles
+   (e.g. "vulnerability to zero-score grounding when input context is missing")
+   ↓
+R-Inject's prepend on the NEXT run reads the updated body
+   ↓
+model designs a tree informed by what judges saw last time
+```
+
+A consumer who attaches a hallucination-risk LLM judge to their repl-researcher (via the general attach flow in `ORC-SERVICE-GUIDE.md`) will see the consolidator's body integrate "vulnerability to hallucinations when ..." weaknesses across cycles, feeding back into the model's tree design via R-Inject. This is the foundation for prebuilt-tree structural evolution via judge feedback — a stronger primitive than GEPA-on-prompts alone because the judge signal is per-execution and structured.
+
+The same mechanism applies to custom judges attached to repl-researcher nodes: their scores flow into `:judge-averages` and the consolidator's reflection input identically to defaults.
+
 ## Related guides
 
 - [`docs/ORC-SERVICE-GUIDE.md`](ORC-SERVICE-GUIDE.md) — Core execution engine and DSL reference
 - [`docs/dsl-tutorial.md`](dsl-tutorial.md) — Step-by-step DSL tutorial
 - [`docs/EVENT-STORE-PATTERNS.md`](EVENT-STORE-PATTERNS.md) — Grain event-sourcing patterns
+- [`docs/LIVING-DESCRIPTIONS.md`](LIVING-DESCRIPTIONS.md) — How judge scores feed the description-update loop
 - [`development/bench/RESULTS.md`](../development/bench/RESULTS.md) — Generalization benchmark headline report
