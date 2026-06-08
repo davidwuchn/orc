@@ -616,6 +616,25 @@
                                         :minted-by-sheet-id sheet-id
                                         :minted-by-tick-id tick-id}
                                  parent-as-uuid (assoc :parent-behavior parent-as-uuid))))
+                ;; QP-1: surface command-processor anomalies. Grain rejects
+                ;; the command (or its emitted events) by returning a
+                ;; cognitect anomaly — :cognitect.anomalies/category +
+                ;; :cognitect.anomalies/message + optional :error/explain.
+                ;; Without this check the agent silently treated the
+                ;; rejection as success because (:command-result/events
+                ;; <anomaly>) is nil and (str nil) is "". Throw so the
+                ;; sandbox surfaces the error on its next iteration.
+                _ (when (or (:cognitect.anomalies/category cmd-result)
+                            (nil? (:command-result/events cmd-result)))
+                    (throw (ex-info
+                             (str "mint-behavior! command rejected: "
+                                  (or (:cognitect.anomalies/message cmd-result)
+                                      "no events returned by command processor")
+                                  (when-let [explain (:error/explain cmd-result)]
+                                    (str " — explain: " (pr-str explain))))
+                             {:cmd-result cmd-result
+                              :mint-name name
+                              :mint-body body})))
                 ;; The mint defcommand emits both events; the audit-trail
                 ;; carries the freshly-generated target-id. The event body
                 ;; fields land at the top level of each event map (Grain

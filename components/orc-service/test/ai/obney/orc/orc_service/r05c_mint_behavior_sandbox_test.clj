@@ -190,6 +190,70 @@
           "Error message identifies the missing affordance"))))
 
 ;; =============================================================================
+;; QP-1 — Malformed body must surface as a sandbox error, NOT silent success
+;; =============================================================================
+;;
+;; Discovered during C-Loop-3 LIVE: when the model emitted (mint-behavior!
+;; ...) with :strengths as a VECTOR OF STRINGS (not vector of principle-
+;; entry maps), Grain's command processor returned an anomaly
+;; {::anom/category ::anom/incorrect ::anom/message "Invalid Command:
+;; Failed Schema Validation"} but the sandbox's mint-behavior!-fn ignored
+;; the anomaly and returned an empty string "" (because (:command-result/
+;; events <anomaly>) is nil). The model believed the mint succeeded and
+;; referenced the "minted behavior" in subsequent iterations — but no
+;; concept ever existed.
+;;
+;; Fix contract: when the dispatched command returns an anomaly, the
+;; sandbox primitive throws a clear error. The agent's next iteration sees
+;; the error in the iteration history and can reconsider the mint shape.
+
+(deftest sandbox-primitive-with-malformed-body-surfaces-error
+  (with-ctx [ctx]
+    (let [sheet-id (random-uuid)
+          tick-id (random-uuid)
+          rlm-ctx (rlm-sandbox/build-rlm-context
+                    {:provider :openrouter
+                     :blackboard {}
+                     :declared-writes [:result]
+                     :event-store (:event-store ctx)
+                     :tenant-id (:tenant-id ctx)
+                     :command-registry (:command-registry ctx)
+                     :sheet-id sheet-id
+                     :tick-id tick-id})
+          ;; :strengths is a vec of STRINGS — schema requires vec of
+          ;; principle-entry maps. Grain's command processor rejects.
+          malformed-body {:capabilities ["x"]
+                          :strengths ["this should be a map not a string"]
+                          :weaknesses []
+                          :representative-uses ["x"]
+                          :avoid-when ["x"]
+                          :summary "Malformed body to verify error surfaces."
+                          :version 1
+                          :consolidated-from-event-count 0}
+          code (str "(mint-behavior! \"malformed-body-test\" "
+                    (pr-str malformed-body)
+                    ")")
+          exec (rlm-sandbox/execute-rlm-code rlm-ctx code)]
+
+      (testing "sandbox surfaces an error (does NOT silently return empty string)"
+        (is (some? (:error exec))
+            (str "Expected mint-behavior! with malformed body to surface an error. "
+                 "Got :error nil — this is the silent-drop bug. exec: "
+                 (pr-str (select-keys exec [:error :raw-result])))))
+
+      (testing "error message identifies the validation failure clearly"
+        (is (re-find #"(?i)mint|schema|invalid|valid"
+                     (or (:error exec) ""))
+            "Error message should reference mint / schema / invalid so the agent knows what to fix"))
+
+      (testing "no mint event landed in the store"
+        (let [events (into [] (es/read (:event-store ctx)
+                                       {:tenant-id (:tenant-id ctx)
+                                        :types #{:ontology/behavioral-subtree-minted}}))]
+          (is (zero? (count events))
+              "No behavioral-subtree-minted event should land when the body fails schema validation"))))))
+
+;; =============================================================================
 ;; C-Loop-2 S5 — (get-description ...) SCI binding finds same-iteration mints
 ;; =============================================================================
 ;;
