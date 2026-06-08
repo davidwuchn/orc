@@ -605,25 +605,49 @@
           tick-id (random-uuid)
           _ (println "[DEBUG Tree] Starting tick:" tick-id)
           p (runtime/register-completion! tick-id)
-          _ (cp/process-command
-              (assoc context :command
-                     {:command/id (random-uuid)
-                      :command/timestamp (time/now)
-                      :command/name :sheet/tick-tree
-                      :sheet-id sheet-id
-                      :tick-id tick-id
-                      :inputs (merge blackboard sandbox-vars)
-                      :options {:timeout-ms timeout-ms}}))
+          ;; QP-1: capture the dispatch result so a command-processor anomaly
+          ;; (e.g. :sheet/tick-tree schema rejection, sheet-not-found) surfaces
+          ;; immediately. Without this check, the anomaly is dropped, no tick
+          ;; events ever fire, and (deref p timeout-ms) hangs for the full
+          ;; timeout budget before returning a misleading {:status :timeout}.
+          tick-cmd-result (cp/process-command
+                            (assoc context :command
+                                   {:command/id (random-uuid)
+                                    :command/timestamp (time/now)
+                                    :command/name :sheet/tick-tree
+                                    :sheet-id sheet-id
+                                    :tick-id tick-id
+                                    :inputs (merge blackboard sandbox-vars)
+                                    :options {:timeout-ms timeout-ms}}))
+          tick-anomaly (:cognitect.anomalies/category tick-cmd-result)
+          ;; If the command was rejected, short-circuit: deregister the pending
+          ;; completion so the caller doesn't deref a promise that will never
+          ;; settle, and return a synthetic :failure result whose :error names
+          ;; the anomaly. Surface this through the same downstream-result shape
+          ;; the deref branch produces so callers don't need a new branch.
 
           ;; Wait for completion. D-003: the timeout default includes :sheet-id
           ;; and :trace-id so the caller (execute-repl-researcher-rlm) can
           ;; dispatch :sheet cancel-tick on the child tick when Phase 2 exceeds
           ;; its budget.
-          _ (println "[DEBUG Tree] Waiting for tick completion (timeout:" timeout-ms "ms)...")
-          result (deref p timeout-ms {:status :timeout
-                                      :error "Tree execution timed out"
-                                      :sheet-id sheet-id
-                                      :trace-id tick-id})
+          _ (when-not tick-anomaly
+              (println "[DEBUG Tree] Waiting for tick completion (timeout:" timeout-ms "ms)..."))
+          result (if tick-anomaly
+                   (do
+                     (runtime/deregister-completion! tick-id)
+                     (println "[DEBUG Tree] tick-tree command rejected:"
+                              (:cognitect.anomalies/message tick-cmd-result))
+                     {:status :failure
+                      :error (str ":sheet/tick-tree command rejected: "
+                                  (:cognitect.anomalies/message tick-cmd-result)
+                                  (when-let [explain (:error/explain tick-cmd-result)]
+                                    (str " — explain: " (pr-str explain))))
+                      :sheet-id sheet-id
+                      :trace-id tick-id})
+                   (deref p timeout-ms {:status :timeout
+                                        :error "Tree execution timed out"
+                                        :sheet-id sheet-id
+                                        :trace-id tick-id}))
           duration-ms (- (System/currentTimeMillis) start-time)
           _ (println "[DEBUG Tree] Tick completed. Status:" (:status result))
           _ (when (:error result) (println "[DEBUG Tree] Error:" (:error result)))

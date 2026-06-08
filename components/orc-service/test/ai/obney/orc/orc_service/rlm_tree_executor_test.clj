@@ -1068,3 +1068,64 @@
         (is (some? node) "Leaf node exists in read-model")
         (is (nil? (:model node))
             "Model is nil when not specified on the sheet/llm form")))))
+
+;; =============================================================================
+;; QP-1 — :sheet/tick-tree anomaly must short-circuit, NOT hang on deref
+;; =============================================================================
+;;
+;; If cp/process-command rejects the :sheet/tick-tree command (e.g., schema
+;; failure, sheet-not-found), no tick events ever fire. The original code
+;; ignored the anomaly result and proceeded to (deref p timeout-ms) — which
+;; would hang for the full timeout budget before returning a misleading
+;; {:status :timeout}. Fix: check for the anomaly, deregister the completion
+;; promise, and return a synthetic :failure with the anomaly message so the
+;; caller knows the real reason.
+
+(deftest execute-tree-short-circuits-on-tick-tree-anomaly
+  (testing "When :sheet/tick-tree dispatch returns an anomaly, execute-tree returns :failure within milliseconds (not after the full timeout)"
+    (with-test-context [ctx]
+      (let [sheet-result (h/run-and-apply! ctx (h/make-create-sheet-command :name "qp1-anomaly-test"))
+            sheet-id (-> sheet-result :command-result/events first :sheet-id)
+            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :input :string))
+            _ (h/run-and-apply! ctx (h/make-declare-key-command sheet-id :output :string))
+            ;; The :sheet/tick-tree command would normally succeed; we
+            ;; with-redefs cp/process-command to return an anomaly for it,
+            ;; simulating the schema-rejection scenario the user actually
+            ;; can produce (e.g., when a defcommand's event body is
+            ;; malformed and event-store/append refuses to commit).
+            original-process-command @#'cp/process-command
+            anomaly-on-tick (fn [{:keys [command] :as ctx*}]
+                              (if (= :sheet/tick-tree (:command/name command))
+                                {:cognitect.anomalies/category :cognitect.anomalies/incorrect
+                                 :cognitect.anomalies/message "Invalid Event(s): Failed Schema Validation"
+                                 :error/explain {:body {:strengths ["..."]} :path [:body :strengths 0]}}
+                                (original-process-command ctx*)))
+            tree '(sheet/sequence
+                    (sheet/code :fn identity :reads [:input] :writes [:output]))
+            ;; Use a SHORT timeout — if the fix is missing this test will hang
+            ;; for the full timeout duration instead of failing quickly.
+            ;; 3000ms gives plenty of headroom for any real cleanup work
+            ;; without making the test painfully slow when the bug is live.
+            short-timeout 3000
+            start (System/currentTimeMillis)
+            result (with-redefs [cp/process-command anomaly-on-tick]
+                     (tree-executor/execute-tree
+                       tree
+                       (assoc ctx :sheet-id sheet-id)
+                       {:sandbox-vars {} :blackboard {:input "hi"} :timeout-ms short-timeout}))
+            elapsed (- (System/currentTimeMillis) start)]
+        (testing "result reports :failure (not :timeout)"
+          (is (= :failure (:status result))
+              (str "Expected :status :failure when the tick-tree command is rejected; got "
+                   (pr-str (:status result))
+                   " — this is the silent-hang-then-timeout bug")))
+        (testing "result :error names the anomaly cause"
+          (is (re-find #"(?i)tick-tree.{0,30}reject|Failed Schema|Invalid Event"
+                       (or (:error result) ""))
+              (str "Expected :error to identify the rejection; got: " (pr-str (:error result)))))
+        (testing "execute-tree returned promptly (no timeout-wait)"
+          (is (< elapsed (* 0.8 short-timeout))
+              (str "Execute-tree should short-circuit within ~"
+                   (long (* 0.8 short-timeout))
+                   " ms when the dispatch is rejected; took "
+                   elapsed " ms — likely deref'd the timeout, indicating the bug")))))))

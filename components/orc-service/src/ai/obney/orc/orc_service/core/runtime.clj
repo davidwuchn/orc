@@ -199,6 +199,14 @@
     (deliver p result)
     (swap! completion-registry dissoc tick-id)))
 
+(defn deregister-completion!
+  "Remove a tick-id's promise without delivering. Use when the upstream
+   command dispatch was rejected (anomaly) and no events will ever
+   resolve the promise — otherwise the caller hangs on (deref p timeout)
+   for the full budget."
+  [tick-id]
+  (swap! completion-registry dissoc tick-id))
+
 ;; =============================================================================
 ;; Public API
 ;; =============================================================================
