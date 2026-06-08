@@ -318,7 +318,7 @@
    - :tenant-id - Optional; passed through to the event-store read"
   [{:keys [provider blackboard declared-writes parent-trace-id
            call-tool-fn mcp-tools browser-tools sandbox-vars usage-tracker
-           recursive? event-store tenant-id
+           recursive? event-store tenant-id cache
            sheet-id tick-id command-registry]}]
   (let [;; Atom to capture final! output
         final-output (atom nil)
@@ -627,6 +627,41 @@
                 target-id (:target-id minted-event)]
             (str target-id)))
 
+        ;; C-Loop-2 S5 — get-description SCI binding.
+        ;;
+        ;; (get-description "<uuid-string>") → description body or nil
+        ;;   (defaults to :tree-fingerprint granularity — where behavioral-
+        ;;   subtree mints land)
+        ;; (get-description :tree-fingerprint "<uuid>")  → body or nil
+        ;; (get-description :node-type :llm)             → body or nil
+        ;; (get-description :node-instance [sheet node]) → body or nil
+        ;;
+        ;; Lets the agent verify its own mint, inspect existing seed bodies,
+        ;; and read descriptions for behaviors surfaced by classify-behaviors
+        ;; before deciding to reuse / adapt / mint. String UUIDs are coerced
+        ;; to java.util.UUID — the same string returned by mint-behavior!.
+        get-description-fn
+        (let [coerce-uuid (fn [v]
+                            (cond
+                              (uuid? v) v
+                              (string? v) (try (java.util.UUID/fromString v)
+                                               (catch Exception _ v))
+                              :else v))
+              ;; requiring-resolve at call time breaks the load cycle
+              ;; rlm-sandbox → ontology → orc-service → rlm-sandbox.
+              ctx (cond-> {:event-store event-store}
+                    tenant-id (assoc :tenant-id tenant-id)
+                    cache     (assoc :cache cache))]
+          (fn
+            ([target-id]
+             (when event-store
+               ((requiring-resolve 'ai.obney.orc.ontology.interface/get-description)
+                ctx :tree-fingerprint (coerce-uuid target-id))))
+            ([granularity target-id]
+             (when event-store
+               ((requiring-resolve 'ai.obney.orc.ontology.interface/get-description)
+                ctx granularity (coerce-uuid target-id))))))
+
         ;; ---------------------------------------------------------------
         ;; R-2: Drill-down primitives, exposed ONLY when :recursive? true.
         ;;
@@ -709,7 +744,11 @@
                              ;; researcher. Always exposed — agents can mint
                              ;; behaviors in terminal mode too (a final
                              ;; (mint-behavior! ...) before (final! ...)).
-                             'mint-behavior! mint-behavior!-fn}
+                             'mint-behavior! mint-behavior!-fn
+                             ;; C-Loop-2 S5: read the description body for a
+                             ;; minted/seeded target so the agent can verify
+                             ;; its own mints + inspect existing seeds.
+                             'get-description get-description-fn}
                             drill-bindings)
 
         ;; Combine all bindings

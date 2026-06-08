@@ -213,12 +213,46 @@
       (is (re-find #"mint-behavior!" instruction)
           "Explicitly references the minting affordance"))
 
-    (testing "no get-description lookup attempted for fresh-mint marker (avoids needless reads)"
-      (let [calls (atom 0)]
-        (with-redefs [ontology/get-description (fn [& _] (swap! calls inc) nil)]
+    (testing "no get-description lookup attempted for fresh-mint behavioral marker (avoids needless reads on a not-yet-minted concept)"
+      ;; The load-bearing invariant: we don't try to fetch a body for a
+      ;; behavioral fresh-mint marker because there IS no body yet. We
+      ;; DO fetch tree-class bodies for the structural candidate (always
+      ;; — that's the corpus-injection mechanism). Track per-call args
+      ;; to enforce the actual contract instead of total-call-count.
+      (let [behavioral-fetch-attempts (atom 0)]
+        (with-redefs [ontology/get-description
+                      (fn [_ctx _granularity target-id]
+                        (when (= target-id b-mint-id)
+                          (swap! behavioral-fetch-attempts inc))
+                        nil)]
           (tp/apply-r05-classifier-context node {}))
-        (is (zero? @calls)
-            "get-description not called for fresh-mint behavioral entries")))))
+        (is (zero? @behavioral-fetch-attempts)
+            "get-description not called with the fresh-mint behavioral marker's id — there's no body to fetch yet")))
+
+    ;; C-Loop-2 P2 — verbatim prepend phrasing per spec acceptance criterion.
+    ;; The fresh-mint branch must teach the model the body-map shape it
+    ;; should pass + the persistence guarantee (retrievable on subsequent
+    ;; classify-behaviors calls). Without these specifics, the model often
+    ;; emits malformed mint calls or doesn't trust the affordance.
+    (testing "C-Loop-2 P2: prepend includes the body-map signature so the model knows what to pass"
+      (is (re-find #":capabilities" instruction)
+          "Prepend tells the model the body needs :capabilities")
+      (is (re-find #":strengths" instruction)
+          "Prepend tells the model the body needs :strengths")
+      (is (re-find #":weaknesses" instruction)
+          "Prepend tells the model the body needs :weaknesses")
+      (is (re-find #":representative-uses" instruction)
+          "Prepend tells the model the body needs :representative-uses")
+      (is (re-find #":summary" instruction)
+          "Prepend tells the model the body needs :summary"))
+
+    (testing "C-Loop-2 P2: prepend mentions the :parent option for the affordance"
+      (is (re-find #":parent" instruction)
+          "Prepend mentions :parent kwarg so the model knows top-level vs child mints"))
+
+    (testing "C-Loop-2 P2: prepend explains the persistence promise — retrievable next time"
+      (is (re-find #"(?i)retriev.{0,40}classify-behaviors|subsequent.{0,40}classify-behaviors|next.{0,40}classify-behaviors" instruction)
+          "Prepend explicitly tells the model the minted behavior will surface on subsequent classify-behaviors calls — that's the load-bearing persistence guarantee"))))
 
 ;; =============================================================================
 ;; RED #4 — Rerank-fallback caution annotation

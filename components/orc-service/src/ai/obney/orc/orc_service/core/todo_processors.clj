@@ -505,10 +505,24 @@
   (let [{:keys [behavior-id confidence was-fresh-mint? reasoning
                 rerank-source]} behavior]
     (if was-fresh-mint?
+      ;; C-Loop-2 P2: explicit body-map signature + :parent kwarg + the
+      ;; persistence promise ("retrievable on subsequent classify-behaviors
+      ;; calls"). Without these specifics, the model writes malformed
+      ;; mints or doesn't trust the affordance.
       (str (inc idx) ". Behavioral suggestion (no candidate above threshold)\n"
            "   No behavioral candidate above threshold was found in the "
-           "corpus. Consider whether your tree introduces a new behavioral "
-           "abstraction worth contributing via `(mint-behavior! ...)`.\n")
+           "corpus. If none of the surfaced behaviors fit your task, you "
+           "can mint a new behavioral subtree via:\n\n"
+           "       (mint-behavior! \"<name>\"\n"
+           "                       {:capabilities [...]\n"
+           "                        :strengths [...]\n"
+           "                        :weaknesses [...]\n"
+           "                        :representative-uses [...]\n"
+           "                        :summary \"...\"}\n"
+           "                       :parent nil)\n\n"
+           "   The minted behavior will be retrievable on subsequent "
+           "classify-behaviors calls — your contribution persists in the "
+           "corpus for future tasks.\n")
       (let [body (fetch-tree-body ctx behavior-id)
             summary (:summary body)
             rich (format-seed-body body traits-per-seed-cap)

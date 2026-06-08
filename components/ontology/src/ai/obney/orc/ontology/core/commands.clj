@@ -982,7 +982,14 @@
                     "; mint affordance only routes to :behavioral-subtree.")
                {::anom/category ::anom/incorrect
                 :body-scope body-scope}))))
-  (let [target-id (random-uuid)
+  ;; C-Loop-2 D4: derive the target-id from (name, parent-behavior) so the
+  ;; same logical mint always lands at the same identity. If the agent
+  ;; accidentally calls (mint-behavior! "name" ...) twice, both calls
+  ;; resolve to the same concept rather than polluting the graph with
+  ;; duplicates. Audit events still emit per call — provenance trail is
+  ;; preserved.
+  (let [identity-bytes (.getBytes (str "mint:" name ":" parent-behavior) "UTF-8")
+        target-id (java.util.UUID/nameUUIDFromBytes identity-bytes)
         minted-at (now-str)
         stamped-body (cond-> (assoc body :scope :behavioral-subtree)
                        parent-behavior (assoc :parent-behavior parent-behavior))]

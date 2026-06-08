@@ -369,3 +369,116 @@
             "No sandbox provenance fields on hand-authored mint")
         (is (not (contains? audit-event :minted-by-tick-id))
             "No sandbox provenance fields on hand-authored mint")))))
+
+;; =============================================================================
+;; C-Loop-2 D4 — Stable target-id derivation: same (name, parent-behavior) →
+;;                same target-id across calls (idempotent at the UUID layer)
+;; =============================================================================
+;;
+;; The mint defcommand previously generated a fresh random-uuid on every
+;; call. If the agent accidentally called (mint-behavior! "same-name" ...)
+;; twice within a session, that produced two distinct concepts polluting
+;; the graph. Per C-Loop-2 spec criterion D4, same name + same parent must
+;; map to the same target-id so duplicate mints become idempotent at the
+;; UUID layer. (Downstream events still log twice — the audit trail is
+;; preserved; what's idempotent is the IDENTITY of the minted concept.)
+
+(deftest c-loop-2-d4-same-name-and-parent-yield-same-target-id
+  (testing "C-Loop-2 D4: minting twice with the same (name, parent) produces the SAME target-id"
+    (with-test-ctx [ctx]
+      (let [_ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "idempotency-test-behavior"
+                        :body (valid-mint-body)
+                        :provenance :human-authored}))
+            first-events (into [] (es/read (:event-store ctx)
+                                            {:tenant-id (:tenant-id ctx)
+                                             :types #{:ontology/behavioral-subtree-minted}}))
+            first-target-id (:target-id (last first-events))
+
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "idempotency-test-behavior"
+                        :body (valid-mint-body)
+                        :provenance :human-authored}))
+            second-events (into [] (es/read (:event-store ctx)
+                                             {:tenant-id (:tenant-id ctx)
+                                              :types #{:ontology/behavioral-subtree-minted}}))
+            second-target-id (:target-id (last second-events))]
+        (is (= first-target-id second-target-id)
+            "Same name + same parent (nil here) must derive to the same target-id; current random-uuid impl violates this")))))
+
+(deftest c-loop-2-d4-same-name-different-parent-yields-different-target-id
+  (testing "C-Loop-2 D4: same name with DIFFERENT parent produces DIFFERENT target-ids (parent is part of identity)"
+    (with-test-ctx [ctx]
+      (let [parent-a (random-uuid)
+            parent-b (random-uuid)
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "shared-name"
+                        :body (valid-mint-body)
+                        :provenance :human-authored
+                        :parent-behavior parent-a}))
+            events-after-a (into [] (es/read (:event-store ctx)
+                                              {:tenant-id (:tenant-id ctx)
+                                               :types #{:ontology/behavioral-subtree-minted}}))
+            id-under-a (:target-id (last events-after-a))
+
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "shared-name"
+                        :body (valid-mint-body)
+                        :provenance :human-authored
+                        :parent-behavior parent-b}))
+            events-after-b (into [] (es/read (:event-store ctx)
+                                              {:tenant-id (:tenant-id ctx)
+                                               :types #{:ontology/behavioral-subtree-minted}}))
+            id-under-b (:target-id (last events-after-b))]
+        (is (not= id-under-a id-under-b)
+            "Same name UNDER different parents must produce different target-ids — parent is part of the identity")))))
+
+(deftest c-loop-2-d4-different-name-same-parent-yields-different-target-id
+  (testing "C-Loop-2 D4: different names with the same parent produce different target-ids"
+    (with-test-ctx [ctx]
+      (let [parent-id (random-uuid)
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "name-a"
+                        :body (valid-mint-body)
+                        :provenance :human-authored
+                        :parent-behavior parent-id}))
+            events-1 (into [] (es/read (:event-store ctx)
+                                        {:tenant-id (:tenant-id ctx)
+                                         :types #{:ontology/behavioral-subtree-minted}}))
+            id-a (:target-id (last events-1))
+
+            _ (cp/process-command
+                (assoc ctx :command
+                       {:command/name :ontology/mint-behavioral-subtree
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :name "name-b"
+                        :body (valid-mint-body)
+                        :provenance :human-authored
+                        :parent-behavior parent-id}))
+            events-2 (into [] (es/read (:event-store ctx)
+                                        {:tenant-id (:tenant-id ctx)
+                                         :types #{:ontology/behavioral-subtree-minted}}))
+            id-b (:target-id (last events-2))]
+        (is (not= id-a id-b)
+            "Different names under same parent must produce different target-ids")))))

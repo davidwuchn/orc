@@ -80,6 +80,7 @@
                      :declared-writes [:result]
                      :event-store (:event-store ctx)
                      :tenant-id (:tenant-id ctx)
+                     :cache (:cache ctx)
                      :command-registry (:command-registry ctx)
                      :sheet-id sheet-id
                      :tick-id tick-id})
@@ -120,6 +121,7 @@
                      :declared-writes [:result]
                      :event-store (:event-store ctx)
                      :tenant-id (:tenant-id ctx)
+                     :cache (:cache ctx)
                      :command-registry (:command-registry ctx)
                      :sheet-id (random-uuid)
                      :tick-id (random-uuid)})
@@ -149,6 +151,7 @@
                      :declared-writes [:result]
                      :event-store (:event-store ctx)
                      :tenant-id (:tenant-id ctx)
+                     :cache (:cache ctx)
                      :command-registry (:command-registry ctx)
                      :sheet-id (random-uuid)
                      :tick-id (random-uuid)})
@@ -185,3 +188,71 @@
       (is (re-find #"(?i)mint-behavior!|command.context|command-registry"
                    (or (:error exec) ""))
           "Error message identifies the missing affordance"))))
+
+;; =============================================================================
+;; C-Loop-2 S5 — (get-description ...) SCI binding finds same-iteration mints
+;; =============================================================================
+;;
+;; After (mint-behavior! ...) returns, the SAME iteration's code can call
+;; (get-description "<minted-uuid-string>") and receive the description
+;; body. Lets the agent verify a mint, inspect existing seeds, or read
+;; descriptions for behaviors surfaced by classify-behaviors before
+;; deciding to reuse / adapt / mint.
+;;
+;; Granularity defaults to :tree-fingerprint (where behavioral-subtree
+;; mints land); explicit 2-arity supports other granularities. Returns
+;; the description body map or nil.
+
+(deftest sandbox-get-description-finds-just-minted-behavior
+  (with-ctx [ctx]
+    (let [sheet-id (random-uuid)
+          tick-id (random-uuid)
+          rlm-ctx (rlm-sandbox/build-rlm-context
+                    {:provider :openrouter
+                     :blackboard {}
+                     :declared-writes [:result]
+                     :event-store (:event-store ctx)
+                     :tenant-id (:tenant-id ctx)
+                     :cache (:cache ctx)
+                     :command-registry (:command-registry ctx)
+                     :sheet-id sheet-id
+                     :tick-id tick-id})
+          code (str "(let [minted-id (mint-behavior! \"same-iter-lookup\" "
+                    (pr-str (mint-body-template)) ")]\n"
+                    "  {:minted-id minted-id\n"
+                    "   :description (get-description minted-id)})")
+          exec (rlm-sandbox/execute-rlm-code rlm-ctx code)
+          result (:raw-result exec)]
+      (testing "no sandbox error"
+        (is (nil? (:error exec))
+            (str "Expected no error; got: " (:error exec))))
+      (testing "(get-description ...) returns a non-nil body for the just-minted behavior"
+        (is (map? (:description result))
+            (str "Expected description body to be a map; got: " (pr-str result))))
+      (testing "the body has :scope :behavioral-subtree (stamped by the mint defcommand)"
+        (is (= :behavioral-subtree (:scope (:description result)))
+            "Mint defcommand stamps :scope :behavioral-subtree on the body — same-iteration lookup finds it"))
+      (testing "the body's :summary survives roundtrip"
+        (is (= "Minted from sandbox in a recursive RLM session."
+               (:summary (:description result)))
+            ":summary from the original mint body is readable via get-description")))))
+
+(deftest sandbox-get-description-returns-nil-for-unknown-target
+  (with-ctx [ctx]
+    (let [rlm-ctx (rlm-sandbox/build-rlm-context
+                    {:provider :openrouter
+                     :blackboard {}
+                     :declared-writes [:result]
+                     :event-store (:event-store ctx)
+                     :tenant-id (:tenant-id ctx)
+                     :cache (:cache ctx)
+                     :command-registry (:command-registry ctx)
+                     :sheet-id (random-uuid)
+                     :tick-id (random-uuid)})
+          code "(get-description \"00000000-0000-0000-0000-000000000000\")"
+          exec (rlm-sandbox/execute-rlm-code rlm-ctx code)]
+      (testing "unknown target → nil (not an error)"
+        (is (nil? (:error exec))
+            "Lookup of an unknown target-id should not throw")
+        (is (nil? (:raw-result exec))
+            "Lookup of an unknown target-id returns nil — agent can branch on this")))))
