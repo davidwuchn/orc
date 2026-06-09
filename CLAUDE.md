@@ -113,6 +113,8 @@ In recursive mode, after Phase 2 completes (any status), the tree's outputs are 
 
 ## Self-Improving Loop
 
+> **Alpha-stage.** The components below all work end-to-end. The aggregate behavior on workflows that align with the shipped seed corpus is reliable; the behavior on workflows far outside the corpus shows force-fit classifications (high-confidence shape-matches that miss domain semantics) and rare mint events. See `docs/SELF-IMPROVING-LOOP.md#current-capabilities-and-known-limitations` for an honest current-state breakdown grounded in a 21-task OOD evidence sweep. Active investigation in `development/bench/ood-stress-results/HANDOFF.md`.
+
 Workflows that opt into `:rlm {:auto-classify? true :recursive? true}` participate in a self-improving loop:
 
 - **Pattern injection at design time** — before the model designs its tree, the top-fitting pattern from the seed corpus (including capabilities, observed strengths with worked-example DSL snippets, weaknesses with recommended fixes) is prepended to the model's instruction.

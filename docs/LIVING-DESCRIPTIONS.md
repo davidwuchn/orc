@@ -3,6 +3,13 @@
 > **A running explainer.** This doc grows alongside the Category C work. It explains, in layered detail, how ORC builds up self-knowledge about the workflows it runs — what each tree and each node is good at, what it tends to fail at, and how those descriptions evolve over time as the system observes more events.
 >
 > Audiences: non-technical stakeholders (Part 1), developers using ORC (Part 2), implementers maintaining the system (Part 3).
+>
+> **⚠ Alpha-stage capability.** The Living Descriptions system is
+> functional end-to-end but the corpus + classifier interplay is still
+> being investigated for out-of-distribution behavior. See the
+> [Current capabilities and known limitations](SELF-IMPROVING-LOOP.md#current-capabilities-and-known-limitations)
+> section of the consumer guide for what's solid today and what's
+> rough.
 
 ## Part 1 — The 30-second story (for stakeholders)
 

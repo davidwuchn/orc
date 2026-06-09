@@ -4,6 +4,16 @@
 > explains how to write workflows that get better as they run — without
 > writing any extra learning code yourself.
 
+> **⚠ Alpha — read this before adopting in production.**
+> The self-improving loop ships as alpha-stage capability. It works
+> well for in-distribution workflows that align with the shipped seed
+> corpus, and it's worth using today for those. Workflows that fall
+> far outside the corpus's covered domains will see honest-but-thin
+> classifications and rare behavioral mints. See
+> [Current capabilities and known limitations](#current-capabilities-and-known-limitations)
+> below for what's solid, what's rough, and what's actively being
+> investigated.
+
 ## What ORC's self-improving loop gives you
 
 When you build a behavior-tree workflow in ORC, you can opt into a loop
@@ -400,6 +410,97 @@ Returns the current body. To see the full history of every version:
 Each version-bump corresponds to a consolidation cycle — the system
 read recent execution evidence, ran a reflection step, and emitted a
 new description. The history is append-only; nothing is overwritten.
+
+---
+
+## Current capabilities and known limitations
+
+The self-improving loop is **alpha-stage** as of this writing. The
+components that compose the loop work as documented — but the
+*aggregate behavior on workflows far outside the shipped seed corpus
+is honest-but-thin*, not what a "self-improving" label would imply
+at maturity. The framing in this section comes from a real 21-task
+OOD evidence-gathering sweep, not from marketing.
+
+### Solid (use without hesitation)
+
+- **In-distribution classification.** Tasks that resemble shipped seed
+  patterns (legal-issue-detection, contract-comparison, risk-analysis,
+  chunked-extraction, etc.) match at confidence 1.00 and the prepend
+  carries the seed's full worked-example DSL.
+- **Recursive RLM with drill-down primitives.** `(tree-detail)`,
+  `(tree-failures)`, `(node-output ...)` all work; the model uses
+  them to recover from mid-tree failures via smaller resume trees.
+- **Consolidator-driven body evolution for stable patterns.** When
+  the same pattern gets repeated traffic, the body version increments
+  with new strengths grounded in observed execution.
+- **`mint-behavior!` mechanics.** The defcommand path, persistence,
+  ColBERT re-index, and same-iteration lookup all work as documented.
+
+### Rough today
+
+- **Out-of-distribution classification.** Tasks whose semantics fall
+  outside the shipped 23 tree-class + 12 behavioral seeds tend to
+  force-fit to the structurally-closest pattern at confidence 0.85-0.95,
+  with mechanically-plausible reranker reasoning that ignores domain
+  specialization. The classifier isn't broken — it's matching on
+  structural shape because that's what the corpus exposes — but the
+  prepend the model receives doesn't tell it that the pattern is a
+  shape-approximation, not a domain match.
+
+- **Mint-behavior! firing rate in practice.** In the OOD evidence
+  sweep, the agent's mint-behavior! affordance fired on 1 of 21
+  deliberately-OOD tasks, and that 1 was triggered by a reranker
+  failure rather than a quality judgment. Today's classifier does
+  not surface "no candidate is a good semantic match" as a strong
+  signal to the model — it surfaces top-N matches with reasoning,
+  and the model treats those as coverage.
+
+- **Hierarchical specialization is missing from the behavioral seed
+  layer.** The 12 abstract behaviors (Research / Extraction / Analysis
+  / Synthesis / Ideation / Design / Critique / Validation /
+  Code-building / Transformation / Classification / Investigation)
+  describe shape but not domain. There's no "Analysis-of-source-code"
+  or "Validation-of-schedule-against-hard-constraints" child entries
+  yet. Whether adding them would solve the OOD force-fit pattern is
+  an open question being investigated (see HANDOFF below).
+
+### Active investigation
+
+The R04 OOD verification work in
+`development/bench/ood-stress-results/` is an evidence gathering
+arc that surfaced the above limits. Two paths forward are being
+considered:
+
+- **Hierarchical/specialized seeds:** author N specializations per
+  abstract behavior (Analysis-of-legal-documents,
+  Analysis-of-source-code, etc.) so the classifier can discriminate
+  on domain.
+- **Judge-grounded rerank discrimination:** add a meta-judge that
+  scores classification confidence against the matched seed's actual
+  domain coverage (high shape-fit + low domain-fit → DOWN-weight).
+
+The HANDOFF document at
+`development/bench/ood-stress-results/HANDOFF.md` is the entry point
+for a future agent picking up this investigation.
+
+### What this means for your workflow
+
+- If your workflow runs tasks that align with the shipped seed corpus,
+  expect the loop to feel useful from day one.
+- If your workflow runs tasks far outside the shipped corpus, expect
+  to author your own corpus seeds via `:ontology/record-tree-description`
+  (and possibly `:ontology/mint-behavioral-subtree` if your work needs
+  new behavioral categories). The mint affordance is real and works;
+  it just rarely fires from the agent side today without curator
+  involvement.
+- The loop is improving over time. New seeds, judge-grounded
+  classification refinements, and consolidator improvements are
+  expected to land additively without breaking the consumer API.
+
+If you hit a specific OOD failure mode that matters to your workflow,
+file it with a concrete reproduction case — your evidence is the
+highest-leverage input to the corpus and classifier roadmap.
 
 ---
 
