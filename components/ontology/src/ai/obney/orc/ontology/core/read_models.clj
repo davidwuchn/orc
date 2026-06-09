@@ -23,9 +23,13 @@
 
 (def concept-events
   "Events that affect the concept graph read model"
-  #{:ontology/concept-created
+  #{;; Domain events (from commands)
+    :ontology/concept-created
     :ontology/concept-updated
-    :ontology/relationship-created})
+    :ontology/relationship-created
+    ;; Evolutionary events (from builder)
+    :evolutionary/concepts-extracted
+    :evolutionary/relationships-extracted})
 
 (def tree-profile-events
   "Events that affect tree profile read model"
@@ -127,6 +131,62 @@
       (-> state
           (update-in [source-uri :related] (fnil conj #{}) target-uri)))))
 
+;; -----------------------------------------------------------------------------
+;; Evolutionary Event Handlers
+;; -----------------------------------------------------------------------------
+;; These handlers process events from the evolutionary ontology builder,
+;; allowing concepts extracted from JSON/CSV/SQL/text sources to be queryable
+;; through the same read model as domain-created concepts.
+
+(defmethod concepts* :evolutionary/concepts-extracted
+  [state event]
+  ;; event has :concepts vector, each with :uri :label :definition :entity-type etc
+  (let [ontology-id (:ontology-id event)]
+    (reduce (fn [acc concept]
+              (let [uri (:uri concept)]
+                (assoc acc uri
+                       {:uri uri
+                        :id nil  ;; No concept-id from evolutionary path
+                        :ontology-id ontology-id
+                        :label (:label concept)
+                        :description (or (:definition concept) "")
+                        :scope (keyword (or (:entity-type concept) "entity"))
+                        :broader #{}
+                        :narrower #{}
+                        :related #{}
+                        :indicators []
+                        :alt-labels (or (:alt-labels concept) [])
+                        :confidence (:confidence concept 1.0)
+                        :source-id (:source-id concept)
+                        :created-at (:extracted-at event)})))
+            state
+            (:concepts event))))
+
+(defmethod concepts* :evolutionary/relationships-extracted
+  [state event]
+  ;; event has :relationships vector, each with :subject :predicate :object
+  (reduce (fn [acc {:keys [subject predicate object]}]
+            (case predicate
+              "skos:broader"
+              (-> acc
+                  (update-in [subject :broader] (fnil conj #{}) object)
+                  (update-in [object :narrower] (fnil conj #{}) subject))
+
+              "skos:narrower"
+              (-> acc
+                  (update-in [subject :narrower] (fnil conj #{}) object)
+                  (update-in [object :broader] (fnil conj #{}) subject))
+
+              "skos:related"
+              (-> acc
+                  (update-in [subject :related] (fnil conj #{}) object)
+                  (update-in [object :related] (fnil conj #{}) subject))
+
+              ;; Other predicates - store as related by default
+              (update-in acc [subject :related] (fnil conj #{}) object)))
+          state
+          (:relationships event)))
+
 (defmethod concepts* :default [state _] state)
 
 (defn concepts
@@ -135,7 +195,7 @@
   (reduce concepts* initial-state events))
 
 (defreadmodel :ontology concepts
-  {:events concept-events, :version 1}
+  {:events concept-events, :version 2}  ;; v2: Added evolutionary event support
   [state event] (concepts* state event))
 
 ;; =============================================================================
@@ -741,12 +801,23 @@
 ;; =============================================================================
 
 (defn get-concepts
-  "Get all concepts, optionally filtered by scope."
-  [ctx & [{:keys [scope broader-uri]}]]
-  (let [all-concepts (vals (rmp/project ctx :ontology/concepts))]
+  "Get all concepts, optionally filtered by scope and/or ontology-id.
+
+   Options:
+     :scope       - Filter by concept scope
+     :broader-uri - Filter by concepts with this URI in their broader set
+     :ontology-id - Filter by single ontology-id
+     :ontology-ids - Filter by multiple ontology-ids (returns union)"
+  [ctx & [{:keys [scope broader-uri ontology-id ontology-ids]}]]
+  (let [all-concepts (vals (rmp/project ctx :ontology/concepts))
+        ont-id-set (cond
+                     ontology-ids (set ontology-ids)
+                     ontology-id #{ontology-id}
+                     :else nil)]
     (cond->> all-concepts
       scope (filter #(= scope (:scope %)))
-      broader-uri (filter #(contains? (:broader %) broader-uri)))))
+      broader-uri (filter #(contains? (:broader %) broader-uri))
+      ont-id-set (filter #(contains? ont-id-set (:ontology-id %))))))
 
 (defn get-concept-by-uri
   "Get a single concept by URI."
@@ -935,11 +1006,23 @@
   (get (rmp/project ctx :ontology/concept-embeddings {:tags #{[:uri uri]}}) uri))
 
 (defn get-all-concept-embeddings
-  "Get all concept embeddings, optionally filtered by scope."
-  [ctx & [{:keys [scope]}]]
-  (if scope
-    (rmp/project ctx :ontology/concept-embeddings {:tags #{[:scope scope]}})
-    (rmp/project ctx :ontology/concept-embeddings)))
+  "Get all concept embeddings, optionally filtered by scope and/or ontology-id.
+
+   Options:
+     :scope       - Filter by concept scope
+     :ontology-id - Filter by single ontology-id
+     :ontology-ids - Filter by multiple ontology-ids (returns union)"
+  [ctx & [{:keys [scope ontology-id ontology-ids]}]]
+  (let [all-embeddings (if scope
+                         (rmp/project ctx :ontology/concept-embeddings {:tags #{[:scope scope]}})
+                         (rmp/project ctx :ontology/concept-embeddings))
+        ont-id-set (cond
+                     ontology-ids (set ontology-ids)
+                     ontology-id #{ontology-id}
+                     :else nil)]
+    (if ont-id-set
+      (into {} (filter #(contains? ont-id-set (:ontology-id (val %))) all-embeddings))
+      all-embeddings)))
 
 (defn get-tree-profile-embedding
   "Get embedding for a specific tree profile."
@@ -978,21 +1061,25 @@
 
 (defn- ontology-colbert-indexes*
   "Reducer for ontology-colbert-indexes read model.
-   Tracks which ColBERT index is associated with each ontology."
-  [state {:keys [type body]}]
-  (case type
+   Tracks which ColBERT index is associated with each ontology.
+
+   NB: events arrive with :event/type and their body flattened to the top level
+   (v3 event store), exactly like every other read model here — NOT as a nested
+   {:type :body}. Reading :type/:body meant this projection never fired."
+  [state event]
+  (case (:event/type event)
     :evolutionary/colbert-indexed
-    (assoc state (:ontology-id body)
-           {:colbert-index-id (:index-id body)
-            :index-name (:index-name body)
-            :colbert-fields (vec (:colbert-fields body))
-            :document-count (:document-count body)
-            :indexed-at (:indexed-at body)})
+    (assoc state (:ontology-id event)
+           {:colbert-index-id (:index-id event)
+            :index-name (:index-name event)
+            :colbert-fields (vec (:colbert-fields event))
+            :document-count (:document-count event)
+            :indexed-at (:indexed-at event)})
 
     :evolutionary/colbert-index-updated
-    (update state (:ontology-id body) merge
-            {:colbert-index-id (:index-id body)
-             :updated-at (:updated-at body)})
+    (update state (:ontology-id event) merge
+            {:colbert-index-id (:index-id event)
+             :updated-at (:updated-at event)})
 
     ;; Pass through unchanged
     state))

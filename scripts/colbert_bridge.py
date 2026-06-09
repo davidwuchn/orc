@@ -134,6 +134,14 @@ class ColBERTBridge:
         Returns:
             {"status": "loaded", "alias": str}
         """
+        # Idempotent: the alias is the unique index-id, so if it's already loaded the
+        # right model/index is already in memory. Skip the (expensive) reload — callers
+        # invoke load_model before every search, and reloading the index from disk per
+        # search makes per-line retrieval (e.g. cleaning a transcript) pathologically
+        # slow (one full index load per query).
+        if alias in self.models:
+            return {"status": "cached", "alias": alias}
+
         RAGPretrainedModel, _ = get_ragatouille()
 
         with suppress_stdout():

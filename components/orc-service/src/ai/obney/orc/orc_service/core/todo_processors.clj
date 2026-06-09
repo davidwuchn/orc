@@ -14,7 +14,8 @@
             [ai.obney.grain.command-processor-v2.interface :as cp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.time.interface :as time]
-            [clojure.string :as str]))
+            [clojure.string :as str]
+            [com.brunobonacci.mulog :as u]))
 
 ;; =============================================================================
 ;; Output Key Normalization
@@ -881,9 +882,9 @@
           (do
             (when is-llm-call?
               (let [map-idx (::map-each-index exec-context)]
-                (println (format "[EVENT RECEIVED] map-idx=%s thread=%s"
-                                (or map-idx "n/a")
-                                (.getName (Thread/currentThread))))))
+                (u/log ::leaf-llm-event-received
+                       :map-idx map-idx
+                       :thread (.getName (Thread/currentThread)))))
             (future
             (try
               ;; Increment LLM count before making the call (if applicable)
@@ -893,11 +894,11 @@
                         (let [instr (or (:instruction node) "")
                               instr-preview (if (> (count instr) 80) (str (subs instr 0 80) "...") instr)
                               map-idx (::map-each-index exec-context)]
-                          (println (format "[SUBCALL START] node=%s%s thread=%s instr=%s"
-                                          (subs (str node-id) 0 (min 8 (count (str node-id))))
-                                          (if map-idx (str " map-idx=" map-idx) "")
-                                          (.getName (Thread/currentThread))
-                                          instr-preview))))
+                          (u/log ::leaf-llm-subcall-started
+                                 :node-id node-id
+                                 :map-idx map-idx
+                                 :thread (.getName (Thread/currentThread))
+                                 :instruction-preview instr-preview)))
                     result (cond
                              ;; Code executor doesn't need provider
                              (= :code executor-type)
@@ -912,11 +913,11 @@
                              (executor/execute-leaf-mock node blackboard))
                   {:keys [status outputs error duration-ms usage]} result
                   _ (when is-llm-call?
-                      (println (format "[SUBCALL DONE]  node=%s status=%s duration=%dms tokens=%s"
-                                      (subs (str node-id) 0 (min 8 (count (str node-id))))
-                                      (name status)
-                                      (or duration-ms (- (System/currentTimeMillis) start-ms))
-                                      (or (:total-tokens usage) "?"))))]
+                      (u/log ::leaf-llm-subcall-completed
+                             :node-id node-id
+                             :status status
+                             :duration-ms (or duration-ms (- (System/currentTimeMillis) start-ms))
+                             :total-tokens (:total-tokens usage)))]
               ;; Track usage for this tick (aggregates across all LLM calls)
               (when usage (add-usage! tick-id usage))
               ;; Use process-command to emit completion event
@@ -2428,6 +2429,17 @@
 ;; Trace Assembly (Post-hoc from events)
 ;; =============================================================================
 
+(defn trace-execution-context
+  "Return the execution-disambiguating context for trace correlation.
+   This distinguishes repeated executions of the same node under map-each."
+  [inputs]
+  (select-keys (or inputs {}) [::map-each-index ::map-each-parent]))
+
+(defn trace-execution-key
+  "Correlation key for matching started/completed events in trace assembly."
+  [event]
+  [(:node-id event) (trace-execution-context (:inputs event))])
+
 (defn assemble-execution-trace
   "After a tick completes, assemble an execution trace from events and store it.
    Only runs for tick-scoped executions (snapshot-based).
@@ -2461,14 +2473,20 @@
             ;; Correlate node-execution-started and completed events
             started-events (filter #(= :sheet/node-execution-started (:event/type %)) tick-events)
             completed-events (filter #(= :sheet/node-execution-completed (:event/type %)) tick-events)
-            ;; Build completed map: node-id -> completion event
-            completed-by-node (reduce (fn [acc e] (assoc acc (:node-id e) e)) {} completed-events)
+            ;; Build completed map by node plus execution context. Map-each runs
+            ;; the same child node-id once per item, so keying only by node-id
+            ;; collapses all child completions into whichever event was seen last.
+            completed-by-execution (reduce (fn [acc e]
+                                             (assoc acc (trace-execution-key e) e))
+                                           {}
+                                           completed-events)
             ;; Build node traces
             node-traces (vec
                           (for [started started-events
                                 :let [node-id (:node-id started)
                                       node (get nodes-by-id node-id)
-                                      completed (get completed-by-node node-id)]
+                                      completed (get completed-by-execution
+                                                     (trace-execution-key started))]
                                 :when node]
                             (cond-> {:node-id node-id
                                      :node-name (:name node)
@@ -2490,7 +2508,14 @@
                              (.toEpochMilli (java.time.Instant/parse (str started-at))))
                           0)
             trace-id tick-id
-            final-status (case root-status :success :success :failure :failure :failure)]
+            final-status (case root-status
+                           :success :success
+                           :failure :failure
+                           :partial :partial
+                           :timeout :timeout
+                           :running :running
+                           :tree-generated :tree-generated
+                           :failure)]
         ;; Store trace via command in a future (best-effort, non-blocking).
         ;; Must be async because cp/process-command -> es/append -> pubsub/pub
         ;; can deadlock if called synchronously within a todo processor thread.

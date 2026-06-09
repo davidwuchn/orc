@@ -102,10 +102,23 @@ echo "Upgrading pip..."
 echo "Installing pinned dependencies from $REQUIREMENTS_FILE..."
 "$VENV_DIR/bin/pip" install -r "$REQUIREMENTS_FILE"
 
-# Smoke-test the bridge so we don't ship a venv that fails at the first
-# real call. Use a here-doc to avoid quoting headaches.
+# Smoke-test so we don't ship a venv that fails at the first real call.
+# IMPORTANT: the bridge `ping` does NOT import ragatouille, so a ping alone can
+# pass against a venv where the install half-failed (e.g. a dependency-resolution
+# conflict left ragatouille uninstalled). Check the real import FIRST.
 echo ""
-echo "Smoke-testing the bridge..."
+echo "Smoke-testing: import ragatouille..."
+if ! "$VENV_DIR/bin/python" -c "import ragatouille" 2>/tmp/colbert-smoke-import.err; then
+    echo "  ✗ 'import ragatouille' FAILED — the venv is broken:"
+    sed 's/^/    /' /tmp/colbert-smoke-import.err | tail -n 8
+    echo ""
+    echo "A fresh 'pip install -r' may have hit a dependency-resolution conflict"
+    echo "and installed nothing. See development/bench/SETUP.md for troubleshooting."
+    exit 1
+fi
+echo "  ✓ ragatouille imports"
+
+echo "Smoke-testing the bridge ping..."
 SMOKE_RESULT=$(echo '{"id":1,"method":"ping","params":{}}' | \
                "$VENV_DIR/bin/python" "$PROJECT_ROOT/scripts/colbert_bridge.py" 2>&1 | \
                tail -n 1)
@@ -115,7 +128,6 @@ else
     echo "  ✗ Bridge ping failed:"
     echo "    $SMOKE_RESULT"
     echo ""
-    echo "The venv installed but the bridge can't import the dependencies."
     echo "See development/bench/SETUP.md for troubleshooting."
     exit 1
 fi

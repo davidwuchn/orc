@@ -856,6 +856,9 @@
    provider keyword. To work around this, when a model override is specified,
    we dynamically register a model-specific provider if it doesn't exist.
 
+   The litellm config structure must be:
+   {:provider :provider-name :model \"model-name\" :config {:api-key ... :base-url ...}}
+
    Returns the provider keyword to use (either original or model-specific)."
   [provider model-override]
   (if (and model-override (keyword? provider))
@@ -866,8 +869,18 @@
         ;; Register the model-specific provider
         (let [base-config (litellm-router/get-config provider)]
           (when base-config
-            (litellm-router/register! model-provider-name
-                                      (assoc base-config :model model-override)))))
+            ;; Build the correct config structure for litellm
+            ;; If base-config already has :provider/:model/:config structure, use it
+            ;; Otherwise, assume it's a flat config and wrap it
+            (let [structured-config
+                  (if (and (:provider base-config) (:config base-config))
+                    ;; Already structured, just update the model
+                    (assoc base-config :model model-override)
+                    ;; Flat config - wrap it in the correct structure
+                    {:provider provider
+                     :model model-override
+                     :config (dissoc base-config :provider :model)})]
+              (litellm-router/register! model-provider-name structured-config)))))
       model-provider-name)
     ;; No override needed, use provider as-is
     provider))

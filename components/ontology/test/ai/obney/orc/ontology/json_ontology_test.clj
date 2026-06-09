@@ -232,6 +232,60 @@
         (is (= "John Smith" (get-in instance [:properties "name"])))))))
 
 ;; =============================================================================
+;; Issue 003: A-Box Label Extraction Tests
+;; =============================================================================
+
+(deftest build-abox-includes-label-field
+  (testing "individuals include :label field (Grain schema compliance)"
+    (let [result (json-ont/build-abox-fn
+                   {:inputs {:json-data simple-people-json
+                             :concepts [{:entity-type "Person"}]
+                             :base-uri "http://test.org/"}})]
+      (doseq [instance (:abox result)]
+        (is (contains? instance :label)
+            "Each individual must have a :label field")
+        (is (string? (:label instance))
+            "Label must be a string")))))
+
+(deftest build-abox-uses-label-field-from-concepts
+  (testing "extracts label using LLM-specified label-field"
+    (let [result (json-ont/build-abox-fn
+                   {:inputs {:json-data [{"n" "John" "a" 30} {"n" "Jane" "a" 25}]
+                             :concepts [{:entity-type "Person"
+                                         :label-field "n"      ;; LLM told us 'n' is the name field
+                                         :source-fields ["n" "a"]}]
+                             :base-uri "http://test.org/"}})]
+      (is (= "John" (:label (first (:abox result))))
+          "Should use label-field value as label")
+      (is (= "Jane" (:label (second (:abox result))))
+          "Should use label-field value for all instances"))))
+
+(deftest build-abox-falls-back-to-source-field
+  (testing "falls back to first source-field when label-field is nil"
+    (let [result (json-ont/build-abox-fn
+                   {:inputs {:json-data [{"name" "Alice"} {"name" "Bob"}]
+                             :concepts [{:entity-type "Person"
+                                         :label-field nil     ;; No label-field specified
+                                         :source-fields ["name"]}]  ;; But we have source-fields
+                             :base-uri "http://test.org/"}})]
+      (is (= "Alice" (:label (first (:abox result))))
+          "Should fall back to first source-field")
+      (is (= "Bob" (:label (second (:abox result))))))))
+
+(deftest build-abox-falls-back-to-synthetic-label
+  (testing "falls back to synthetic label when no field extraction works"
+    (let [result (json-ont/build-abox-fn
+                   {:inputs {:json-data [{"x" 1} {"x" 2}]
+                             :concepts [{:entity-type "Thing"
+                                         :label-field nil
+                                         :source-fields []}]  ;; No source-fields either
+                             :base-uri "http://test.org/"}})]
+      (is (= "Thing-0" (:label (first (:abox result))))
+          "Should generate synthetic label")
+      (is (= "Thing-1" (:label (second (:abox result))))
+          "Should include index in synthetic label"))))
+
+;; =============================================================================
 ;; Slice 7: OWL Serialization
 ;; =============================================================================
 

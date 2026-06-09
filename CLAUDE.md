@@ -16,7 +16,7 @@ This is a **library** — no web layer, no auth, no database config. Consumers p
 | **gepa** | LLM instruction optimization with Pareto frontier selection |
 | **evaluation** | LLM-as-judge evaluation with grounding, reasoning, completeness judges |
 | **colbert** | Late-interaction retrieval via Python ColBERT bridge |
-| **ontology** | Three-layer concept graph with embeddings and pattern discovery |
+| **ontology** | Three-layer concept graph with embeddings and pattern discovery; also a general-purpose evolutionary ontology extractor for JSON / CSV / SQL sources |
 | **mcp-sheet-builder** | Dynamic workflow generation from MCP tool schemas |
 
 ## Architecture
