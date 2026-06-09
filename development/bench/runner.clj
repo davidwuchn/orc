@@ -38,7 +38,6 @@
             [ai.obney.grain.kv-store-lmdb.interface :as lmdb]
             [ai.obney.grain.time.interface :as time]
             [litellm.router :as litellm-router]
-            [seed-descriptions :as seeds]
             [clojure.string :as str]
             [clojure.java.io :as io]
             [clojure.edn :as edn]
@@ -305,7 +304,7 @@
   (println "Emitting synthetic padding (80 entries for FAISS clustering floor)...")
   (emit-synthetic-padding! ctx 80)
   (println "Seeding description corpus (45 hand-authored seeds)...")
-  (seeds/seed-all! ctx)
+  (ontology/seed-baseline-corpus! ctx)
   (Thread/sleep 1000)
   (println "Driving concept-graph projectors...")
   (drive-projectors! ctx)

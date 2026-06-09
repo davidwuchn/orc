@@ -31,6 +31,7 @@
             [ai.obney.orc.ontology.core.todo-processors :as todo-processors] ;; Register todo processors for auto-learning
             [ai.obney.orc.ontology.core.reranker :as reranker]
             [ai.obney.orc.ontology.core.task-classifier :as task-classifier]
+            [ai.obney.orc.ontology.core.seeds :as seeds]
             [ai.obney.orc.colbert.interface :as colbert]
             [ai.obney.grain.event-store-v3.interface :as event-store]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]
@@ -127,6 +128,38 @@
    {:body :recorded-at :event-id}. Empty vector if none recorded."
   [ctx granularity target-id]
   (rm/get-description-history ctx granularity target-id))
+
+(defn seed-baseline-corpus!
+  "C-Baseline: emit the baseline seed corpus that ships with the ontology
+   component (~45 hand-authored descriptions covering common node-types,
+   structural tree-classes, and behavioral subtrees).
+
+   Consumers using ORC via git deps call this on first start to bootstrap
+   the description corpus. Without it the R-Inject classifier path has
+   nothing to retrieve against and the Living Description loop has no
+   starting bodies for the consolidator to refine.
+
+   Returns a vec of command-results — one per dispatch. The 23 structural
+   tree-class seeds are dual-emitted (under :tree-fingerprint AND
+   :tree-class scopes) so the prepend assembler's body-fetch hits from
+   bootstrap onward; node-type and behavioral-subtree seeds are emitted
+   once each. Total dispatches: 68.
+
+   Idempotent: re-running appends new :tree-description-updated events
+   with the same body and the read-model projects the latest as `:current`
+   while preserving `:history` for audit."
+  [ctx]
+  (seeds/seed-baseline-corpus! ctx))
+
+(defn baseline-seeds
+  "Pure-data inspection: return the loaded baseline seed catalog as
+   `{:node-types <vec> :tree-classes <vec> :behavioral-subtrees <vec>}`.
+
+   For consumers and tests that want to walk the corpus without
+   dispatching commands (e.g., asserting invariants over seed bodies,
+   diffing against an app-specific extension)."
+  []
+  (seeds/baseline-seeds))
 
 (defn get-consolidation-threshold
   "C-2a-3a: return the configured consolidation threshold for a
