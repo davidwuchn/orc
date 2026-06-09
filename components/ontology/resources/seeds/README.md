@@ -116,18 +116,37 @@ for the architecture detail.
 
 ## Editing the EDN
 
-The source of truth for these files is the dev namespace
-`development/src/seed_descriptions.clj`. To regenerate the EDN after
-editing seed bodies:
+These files are now the source of truth for seed body content. The
+historical dev namespace `development/src/seed_descriptions.clj` is
+a thin shim that loads bodies from this directory and re-exports the
+named-var surface for in-tree tests.
 
-```bash
-clj -M:dev -e "(load-file \"components/ontology/scripts/regen-seeds.clj\")"
-```
+To edit a seed:
 
-The regen script verifies round-trip equality (loaded EDN equals source
-data) and prints per-file pass/fail.
+1. Edit the relevant `.edn` file directly. Each entry is
+   `{:target-id <id> :body {...}}`.
+2. Run the ontology test suite to verify round-trip + invariants:
+   ```bash
+   clj -M:dev:test -e "(require '[clojure.test :as t]) \
+     (require '[ai.obney.orc.ontology.description-events-test]) \
+     (require '[ai.obney.orc.ontology.seeds-test]) \
+     (t/run-tests 'ai.obney.orc.ontology.description-events-test \
+                  'ai.obney.orc.ontology.seeds-test)"
+   ```
+3. Live-verify by re-running a bench task that touches the seed.
 
-Editing the EDN files directly is supported but the dev namespace is
-the canonical source — direct EDN edits get overwritten next time the
-regen script runs unless they're also reflected back into the dev
-namespace.
+The `components/ontology/scripts/regen-seeds.clj` script remains
+available as a maintenance tool for regenerating the EDN from the dev
+shim's view of the catalog — useful if you ever restore the original
+3250-line Clojure form of `seed_descriptions.clj` (e.g., from `git
+show HEAD:.../seed_descriptions.clj`) and want to re-derive the EDN.
+For routine edits, modify the `.edn` directly.
+
+When changing a seed's `:recommended-pattern` or
+`:recommended-alternative` snippet, the
+`all-seed-recommended-patterns-validate-via-rlm-dsl` test ensures the
+snippet parses cleanly via `rlm-dsl/rlm-dsl->orc-dsl`. Common
+violations the test catches:
+- `:code (fn ...)` should be `:fn (fn ...)` inside a `:code` node
+- `:map-each` requires a child node (it's a composite, not a leaf)
+- `:options {:max-retries N}` on `:llm` should be `:retry {:max-attempts N}`

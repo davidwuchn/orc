@@ -708,7 +708,7 @@
      :good-when
      "input requires multiple distinct transformation passes AND each pass produces a named intermediate (normalized, enriched, formatted)",
      :recommended-pattern
-     "[:sequence [:llm {:reads [:raw-input] :writes [:normalized]}] [:llm {:reads [:normalized :reference-data] :writes [:enriched]}] [:code {:reads [:enriched] :writes [:emit-ready] :code (fn [{:keys [enriched]}] {:emit-ready (clojure.string/join \",\" enriched)})}] [:final {:keys [:emit-ready]}]]",
+     "[:sequence [:llm {:reads [:raw-input] :writes [:normalized]}] [:llm {:reads [:normalized :reference-data] :writes [:enriched]}] [:code {:reads [:enriched] :writes [:emit-ready] :fn (fn [{:keys [enriched]}] {:emit-ready (clojure.string/join \",\" enriched)})}] [:final {:keys [:emit-ready]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -718,7 +718,7 @@
      :good-when
      "the final stage is mechanical formatting (CSV row assembly, JSON envelope wrapping, fixed-width record padding)",
      :recommended-pattern
-     "[:code {:reads [:enriched] :writes [:row] :code (fn [{:keys [enriched]}] {:row (clojure.string/join \",\" (map :v enriched))})}]",
+     "[:code {:reads [:enriched] :writes [:row] :fn (fn [{:keys [enriched]}] {:row (clojure.string/join \",\" (map :v enriched))})}]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -830,7 +830,7 @@
      :good-when
      "the problem has both hard constraints (e.g., person X is on PTO from date Y to Z) AND soft preferences (e.g., prefer to balance load across the team)",
      :recommended-pattern
-     "[:sequence [:llm {:reads [:team :availability :rules] :writes [:hard-constraints :soft-prefs]}] [:llm {:reads [:hard-constraints :soft-prefs :history] :writes [:proposal]}] [:code {:reads [:proposal :hard-constraints] :writes [:conflicts] :code (fn [{:keys [proposal hard-constraints]}] {:conflicts []})}] [:llm {:reads [:proposal :conflicts] :writes [:final-schedule :justification]}] [:final {:keys [:final-schedule :justification]}]]",
+     "[:sequence [:llm {:reads [:team :availability :rules] :writes [:hard-constraints :soft-prefs]}] [:llm {:reads [:hard-constraints :soft-prefs :history] :writes [:proposal]}] [:code {:reads [:proposal :hard-constraints] :writes [:conflicts] :fn (fn [{:keys [proposal hard-constraints]}] {:conflicts []})}] [:llm {:reads [:proposal :conflicts] :writes [:final-schedule :justification]}] [:final {:keys [:final-schedule :justification]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -840,7 +840,7 @@
      :good-when
      "the conflict rules can be expressed as code (date overlap, capacity sums, role coverage)",
      :recommended-pattern
-     "[:code {:reads [:proposal :hard-constraints] :writes [:conflicts]}]",
+     "[:code {:reads [:proposal :hard-constraints] :writes [:conflicts] :fn (fn [{:keys [proposal hard-constraints]}] {:conflicts []})}]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -891,7 +891,7 @@
      :good-when
      "the validation rules are formal/syntactic AND can be expressed in code (schema validation, regex match, parse-and-check)",
      :recommended-pattern
-     "[:sequence [:llm {:reads [:prompt] :writes [:candidate] :options {:max-retries 3}}] [:code {:reads [:candidate] :writes [:valid? :issues] :code (fn [{:keys [candidate]}] (let [ok? (string? candidate)] {:valid? ok? :issues (if ok? [] [\"not a string\"])}))}] [:final {:keys [:candidate :valid? :issues]}]]",
+     "[:sequence [:llm {:reads [:prompt] :writes [:candidate] :options {:max-retries 3}}] [:code {:reads [:candidate] :writes [:valid? :issues] :fn (fn [{:keys [candidate]}] (let [ok? (string? candidate)] {:valid? ok? :issues (if ok? [] [\"not a string\"])}))}] [:final {:keys [:candidate :valid? :issues]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -1013,7 +1013,7 @@
      :good-when
      "the primary path is preferred (cheaper, more accurate, faster) but has a non-trivial failure rate AND a backup exists that's strictly less preferred but reliable",
      :recommended-pattern
-     "[:fallback [:llm {:reads [:input] :writes [:result] :options {:max-retries 2}}] [:code {:reads [:input] :writes [:result] :code (fn [{:keys [input]}] {:result (str \"backup: \" input)})}]]",
+     "[:fallback [:llm {:reads [:input] :writes [:result] :options {:max-retries 2}}] [:code {:reads [:input] :writes [:result] :fn (fn [{:keys [input]}] {:result (str \"backup: \" input)})}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -1134,7 +1134,7 @@
      :good-when
      "the per-chunk work is purely arithmetic (count tokens, sum field values, average a metric) AND the reduce is associative (sum, max, min)",
      :recommended-pattern
-     "[:sequence [:chunk-document {:from :document :size 1000 :into :chunks}] [:map-each {:from :chunks :as :chunk :into :counts :max-concurrency 8} [:code {:reads [:chunk] :writes [:count] :code (fn [{:keys [chunk]}] {:count (count (re-seq #\"\\w+\" chunk))})}]] [:code {:reads [:counts] :writes [:total] :code (fn [{:keys [counts]}] {:total (reduce + 0 (map :count counts))})}] [:final {:keys [:total]}]]",
+     "[:sequence [:chunk-document {:from :document :size 1000 :into :chunks}] [:map-each {:from :chunks :as :chunk :into :counts :max-concurrency 8} [:code {:reads [:chunk] :writes [:count] :fn (fn [{:keys [chunk]}] {:count (count (re-seq #\"\\w+\" chunk))})}]] [:code {:reads [:counts] :writes [:total] :fn (fn [{:keys [counts]}] {:total (reduce + 0 (map :count counts))})}] [:final {:keys [:total]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -1144,7 +1144,7 @@
      :good-when
      "every map step is :code (not :llm) AND the per-chunk compute is CPU-light",
      :recommended-pattern
-     "[:map-each {:max-concurrency 8 :from :chunks :as :chunk :into :results}]",
+     "[:map-each {:max-concurrency 8 :from :chunks :as :chunk :into :results} [:code {:reads [:chunk] :writes [:result] :fn (fn [{:keys [chunk]}] {:result (count chunk)})}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -1195,7 +1195,7 @@
      :good-when
      "each chunk's classification is independent AND the final analysis is a category distribution",
      :recommended-pattern
-     "[:sequence [:chunk-document {:from :document :size 1500 :into :chunks}] [:map-each {:from :chunks :as :chunk :into :classifications :max-concurrency 3} [:llm {:reads [:chunk] :writes [:category] :output-schemas {:category [:enum :positive :negative :neutral]}}]] [:code {:reads [:classifications] :writes [:distribution] :code (fn [{:keys [classifications]}] {:distribution (frequencies (map :category classifications))})}] [:final {:keys [:distribution]}]]",
+     "[:sequence [:chunk-document {:from :document :size 1500 :into :chunks}] [:map-each {:from :chunks :as :chunk :into :classifications :max-concurrency 3} [:llm {:reads [:chunk] :writes [:category] :output-schemas {:category [:enum :positive :negative :neutral]}}]] [:code {:reads [:classifications] :writes [:distribution] :fn (fn [{:keys [classifications]}] {:distribution (frequencies (map :category classifications))})}] [:final {:keys [:distribution]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
@@ -1316,7 +1316,7 @@
      :good-when
      "the sources are roughly comparable AND a structured comparison is the value (vs free-form narrative)",
      :recommended-pattern
-     "[:sequence [:parallel [:llm {:reads [:source-a] :writes [:extract-a]}] [:llm {:reads [:source-b] :writes [:extract-b]}]] [:code {:reads [:extract-a :extract-b] :writes [:by-source] :code (fn [{:keys [extract-a extract-b]}] {:by-source {:a extract-a :b extract-b}})}] [:llm {:reads [:by-source] :writes [:common :differences :recommendation]}] [:final {:keys [:common :differences :recommendation]}]]",
+     "[:sequence [:parallel [:llm {:reads [:source-a] :writes [:extract-a]}] [:llm {:reads [:source-b] :writes [:extract-b]}]] [:code {:reads [:extract-a :extract-b] :writes [:by-source] :fn (fn [{:keys [extract-a extract-b]}] {:by-source {:a extract-a :b extract-b}})}] [:llm {:reads [:by-source] :writes [:common :differences :recommendation]}] [:final {:keys [:common :differences :recommendation]}]]",
      :confidence 1.0,
      :evidence-count 1,
      :first-observed-at "2026-05-28T00:00:00Z",
