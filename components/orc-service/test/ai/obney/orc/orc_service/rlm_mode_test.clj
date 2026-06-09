@@ -734,6 +734,122 @@
 ;; Issue 003: Available Variables section in prompt
 ;; =============================================================================
 
+;; =============================================================================
+;; T2-Hardening-C: Generic "Common pitfalls" section in Phase-1 instructions
+;;
+;; Several recurring SCI/Clojure footguns hit model-authored code across the
+;; bench suite. Set literals with computed elements (#{(expr) (expr)}) fail
+;; SCI's reader. `frequencies` over collections that contain nil produces
+;; duplicate-`null` map keys which clash on downstream merges. Sandbox-vars
+;; that didn't write on a prior Phase-2 :failure are nil at the next
+;; iteration. Namespaced symbols (clojure.string/join etc.) aren't bound in
+;; the SCI sandbox. None of these are task-specific; all are preventable
+;; with one prompt-level "watch out for these" section authored UP-FRONT,
+;; before the model writes code — turning what was a backward retry signal
+;; (R-6 syntax-error history) into a forward-guidance pass.
+;;
+;; The section is APPENDED to the existing instructions text. Existing
+;; sections (Two-Space Architecture, Available Primitives, retry framing,
+;; Output Contract) stay intact — tests pin specific phrases from those
+;; sections so any regression surfaces immediately.
+;; =============================================================================
+
+(deftest rlm-prompt-includes-common-pitfalls-section-header
+  (testing "T2-Hardening-C: RLM Phase-1 instructions include the literal '## Common pitfalls' header"
+    (with-rlm-test-context [ctx]
+      (let [captured-module (atom nil)]
+        (with-redefs [dscloj/predict
+                      (fn [_provider module _inputs _opts]
+                        (reset! captured-module module)
+                        {:outputs {:code "(final! {:answer \"done\"})"}
+                         :usage {:prompt_tokens 50 :completion_tokens 20 :total_tokens 70}})]
+          (let [{:keys [sheet-id]} (setup-rlm-repl-researcher-sheet!
+                                     ctx
+                                     :instruction "Test task"
+                                     :reads [:question]
+                                     :rlm-config {:recursive? false})
+                {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:question "test"})
+                _ (wait-for-completion promise)
+                instructions (:instructions @captured-module)]
+            (is (str/includes? instructions "## Common pitfalls")
+                "Phase-1 instructions must include the '## Common pitfalls' section header for forward guidance")))))))
+
+(deftest rlm-prompt-includes-common-pitfalls-content
+  (testing "T2-Hardening-C: pitfalls section covers the specific footguns observed across the bench suite"
+    (with-rlm-test-context [ctx]
+      (let [captured-module (atom nil)]
+        (with-redefs [dscloj/predict
+                      (fn [_provider module _inputs _opts]
+                        (reset! captured-module module)
+                        {:outputs {:code "(final! {:answer \"done\"})"}
+                         :usage {:prompt_tokens 50 :completion_tokens 20 :total_tokens 70}})]
+          (let [{:keys [sheet-id]} (setup-rlm-repl-researcher-sheet!
+                                     ctx
+                                     :instruction "Test task"
+                                     :reads [:question]
+                                     :rlm-config {:recursive? false})
+                {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:question "test"})
+                _ (wait-for-completion promise)
+                instructions (:instructions @captured-module)]
+            (testing "set literal with computed elements pitfall + (set [...]) workaround"
+              (is (str/includes? instructions "#{")
+                  "Mentions the failing set-literal syntax verbatim so the model recognizes it")
+              (is (str/includes? instructions "(set ")
+                  "Mentions the (set [...]) workaround verbatim"))
+
+            (testing "frequencies on nil-bearing collections pitfall + filter-some workaround"
+              (is (str/includes? instructions "frequencies")
+                  "Mentions frequencies by name")
+              (is (str/includes? instructions "some?")
+                  "Mentions the (filter some? ...) workaround"))
+
+            (testing "sandbox-var existence after Phase-2 :failure"
+              (is (or (str/includes? instructions "(get-var ")
+                      (str/includes? instructions "get-var"))
+                  "References get-var so the warning is anchored to the actual primitive")
+              (is (or (str/includes? instructions "nil")
+                      (str/includes? instructions "when-let"))
+                  "Warns that values may be nil and shows nil-safe consumption"))
+
+            (testing "namespaced symbols not bound in the SCI sandbox"
+              (is (str/includes? instructions "clojure.string/")
+                  "Names the namespaced-symbol example most likely to be reached for"))))))))
+
+(deftest rlm-prompt-existing-sections-survive-pitfalls-addition
+  (testing "T2-Hardening-C: appending pitfalls does NOT regress existing instruction sections"
+    (with-rlm-test-context [ctx]
+      (let [captured-module (atom nil)]
+        (with-redefs [dscloj/predict
+                      (fn [_provider module _inputs _opts]
+                        (reset! captured-module module)
+                        {:outputs {:code "(final! {:answer \"done\"})"}
+                         :usage {:prompt_tokens 50 :completion_tokens 20 :total_tokens 70}})]
+          (let [{:keys [sheet-id]} (setup-rlm-repl-researcher-sheet!
+                                     ctx
+                                     :instruction "Test task"
+                                     :reads [:question]
+                                     :rlm-config {:recursive? false})
+                {:keys [promise]} (dispatch-async-execute! ctx sheet-id {:question "test"})
+                _ (wait-for-completion promise)
+                instructions (:instructions @captured-module)]
+            (is (str/includes? instructions "## Two-Space Architecture")
+                "Two-Space Architecture section preserved")
+            (is (str/includes? instructions "## Available Primitives")
+                "Available Primitives section preserved")
+            (is (str/includes? instructions "## Output Contract")
+                "Output Contract section preserved")
+            (is (str/includes? instructions "## Available Variables")
+                "Available Variables section preserved")
+            ;; The pitfalls section is forward guidance — it must appear
+            ;; BEFORE the Output Contract so the model reads the rule
+            ;; before being told how to format its response.
+            (let [pitfall-idx (.indexOf instructions "## Common pitfalls")
+                  contract-idx (.indexOf instructions "## Output Contract")]
+              (is (pos? pitfall-idx) "pitfalls section is present")
+              (is (pos? contract-idx) "output contract section is present")
+              (is (< pitfall-idx contract-idx)
+                  "pitfalls appears BEFORE Output Contract so it's forward guidance, not afterthought"))))))))
+
 (deftest rlm-prompt-includes-available-variables-test
   (testing "RLM prompt includes Available Variables section with blackboard keys"
     (with-rlm-test-context [ctx]

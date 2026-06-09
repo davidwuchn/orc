@@ -510,3 +510,126 @@
           "fetch-tree-body should call get-description with :tree-class granularity")
       (is (not-any? (fn [[g _]] (= g :tree-fingerprint)) @captured-calls)
           "fetch-tree-body should NOT call get-description with :tree-fingerprint scope — Option C migrates the read path to :tree-class"))))
+
+;; =============================================================================
+;; T2-Hardening-B — body fetch coerces string-form target-id to UUID
+;;
+;; The classifier's :top-candidates carry :document-metadata.:target-id as a
+;; STRING (ColBERT bridges metadata through JSON, so a UUID seed comes back
+;; as "5a08300e-10e3-305a-80c1-17eafea15ff7"). The descriptions read-model
+;; keys bodies under the literal java.util.UUID. Without coercion at the
+;; fetch site, every prepend silently degrades to summary-only because
+;; format-seed-body receives nil. The fix is a UUID coercion in
+;; fetch-tree-body. These tests pin the behavior across the matrix of
+;; input shapes the classifier actually produces.
+;; =============================================================================
+
+(def ^:private rich-body-with-strengths
+  "Body whose render exercises every section format-seed-body emits — most
+   importantly the 'Strengths (proven traits ...)' header that proves the
+   body fetch returned non-nil. Mirrors the shape of a real seed body."
+  {:summary "Test pattern fits scheduling-style staged pipelines."
+   :capabilities ["enumerate constraints → propose → conflict-check"]
+   :strengths [{:trait "separate constraint enumeration from proposal"
+                :good-when "the problem has hard constraints AND soft preferences"
+                :recommended-pattern "[:sequence [:llm {:writes [:hard]}] [:llm {:writes [:proposal]}] [:code {:writes [:conflicts]}] [:final {:keys [:proposal :conflicts]}]]"
+                :confidence 1.0
+                :evidence-count 1}]
+   :weaknesses [{:trait "single-pass llm scheduling silently violates constraints"
+                 :avoid-when "more than 3 hard constraints in one llm call"
+                 :recommended-alternative "always separate the constraint-check into its own :code stage"
+                 :confidence 1.0
+                 :evidence-count 1}]
+   :representative-uses ["weekly on-call rotation"]
+   :avoid-when ["only 1-2 hard constraints"]
+   :version 1
+   :consolidated-from-event-count 0})
+
+(deftest fetch-tree-body-coerces-string-form-target-id-to-uuid
+  (testing "T2-Hardening-B: candidate's :target-id may arrive as a stringified UUID (JSON roundtrip from ColBERT). The body fetch must coerce to UUID so the read-model lookup hits."
+    (let [seed-uuid (random-uuid)
+          ;; Classifier payload as the pipeline ACTUALLY receives it — the
+          ;; candidate's :document-metadata.:target-id is the stringified
+          ;; form ColBERT returns through its JSON bridge.
+          string-target-id (str seed-uuid)
+          payload {:structural {:assigned-tree-id seed-uuid
+                                :confidence 1.0
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 stringified-UUID match"
+                                :top-candidates [(mk-structural-candidate
+                                                   string-target-id
+                                                   "Top-1 stringified-UUID match"
+                                                   "Summary content"
+                                                   1.0)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors []
+                                :rerank-fallback? false}}
+          node (mk-node "Test instruction" payload)
+          ;; The read-model stub mirrors production semantics: bodies are
+          ;; keyed by UUID. A string-form target-id passed directly returns
+          ;; nil; only the UUID-form returns the body. After the coercion
+          ;; fix, the fetch site reaches the body even when classifier
+          ;; surfaces the stringified form.
+          result (with-redefs [ontology/get-description
+                               (fn [_ctx granularity target-id]
+                                 (when (and (= granularity :tree-class)
+                                            (uuid? target-id)
+                                            (= target-id seed-uuid))
+                                   rich-body-with-strengths))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+      (is (re-find #"(?m)^Strengths \(proven" instruction)
+          "After coercion, the prepend renders the seed's :strengths section so the model sees the worked-example DSL"))))
+
+(deftest fetch-tree-body-passes-uuid-input-through-unchanged
+  (testing "T2-Hardening-B: when classifier surfaces a UUID-typed target-id directly (e.g., in a unit test or future code path), coercion is idempotent and the body fetch still hits."
+    (let [seed-uuid (random-uuid)
+          payload {:structural {:assigned-tree-id seed-uuid
+                                :confidence 1.0
+                                :was-fresh-mint? false
+                                :reasoning "UUID-direct top-1"
+                                :top-candidates [(mk-structural-candidate
+                                                   seed-uuid
+                                                   "UUID-direct top-1"
+                                                   "Summary"
+                                                   1.0)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors []
+                                :rerank-fallback? false}}
+          node (mk-node "Test instruction" payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ctx granularity target-id]
+                                 (when (and (= granularity :tree-class)
+                                            (uuid? target-id)
+                                            (= target-id seed-uuid))
+                                   rich-body-with-strengths))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+      (is (re-find #"(?m)^Strengths \(proven" instruction)
+          "UUID input still reaches the body — coercion is idempotent"))))
+
+(deftest fetch-tree-body-handles-no-match-without-crash
+  (testing "T2-Hardening-B: when the classifier surfaces a target-id whose body is genuinely absent (fresh-mint or stale lookup), the prepend renders without the strengths header and without throwing."
+    (let [absent-target (str (random-uuid))
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.7
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 with no body in read-model"
+                                :top-candidates [(mk-structural-candidate
+                                                   absent-target
+                                                   "Top-1 with no body in read-model"
+                                                   "Summary content"
+                                                   0.7)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors []
+                                :rerank-fallback? false}}
+          node (mk-node "Test instruction" payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ctx _granularity _target-id]
+                                 nil)]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+      (is (not (re-find #"(?m)^Strengths \(proven" instruction))
+          "No body found → no strengths section rendered")
+      (is (re-find #"Pattern guidance" instruction)
+          "Summary-driven 'Pattern guidance' section still renders from the candidate's :content"))))

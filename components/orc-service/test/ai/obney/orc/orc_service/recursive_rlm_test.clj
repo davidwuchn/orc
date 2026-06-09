@@ -77,13 +77,14 @@
 
 (defn- mk-node-completion-event
   "Build a fixture :sheet/node-execution-completed event."
-  [{:keys [node-id status duration-ms partial-summary]
+  [{:keys [node-id status duration-ms partial-summary error]
     :or {duration-ms 100}}]
   (cond-> {:event/type :sheet/node-execution-completed
            :node-id node-id
            :status status
            :duration-ms duration-ms}
-    partial-summary (assoc :partial-summary partial-summary)))
+    partial-summary (assoc :partial-summary partial-summary)
+    error (assoc :error error)))
 
 (deftest summary-for-success-status
   (testing "all nodes succeeded → summary has no failure or timeout fields"
@@ -315,6 +316,153 @@
           "first 500 chars of the preview match the first 500 chars of the value verbatim")
       (is (re-find #"truncated.*full 2400 chars" preview)
           "overflow marker shows the full original length so the model knows there's more"))))
+
+;; =============================================================================
+;; T2-Hardening-A: per-leaf failure detail surfaces inline as :failed-leaves
+;;
+;; Today's summary surfaces map-each per-child failures via :failure-indices
+;; + :failure-reasons (sourced from D-008's :partial-summary on the map-each
+;; parent's completion event). But non-map-each direct-leaf failures — a
+;; :code or :llm leaf throwing or returning :status :failure — surface only
+;; as aggregate :nodes-failed N. The model on the next iteration sees the
+;; tree failed but not WHICH leaf failed with what error.
+;;
+;; Fix: reuse the existing rlm-drill-down/tree-failures-from-events function
+;; (which already filters direct-leaf failures from tick-events) and surface
+;; the result inline as :failed-leaves on the summary. Map-each path stays
+;; unchanged — :failed-leaves is the parallel surface for the other branch.
+;; Stays factual per the orc principle: descriptive, not prescriptive.
+;; =============================================================================
+
+(deftest summary-surfaces-failed-leaves-for-non-map-each-failure
+  (testing "T2-Hardening-A: when a non-map-each leaf throws, :failed-leaves carries the node-id + error string inline"
+    (let [tick-id #uuid "00000000-0000-0000-0000-000000000005"
+          good-leaf-id (random-uuid)
+          bad-leaf-id (random-uuid)
+          phase2-result {:status :failure
+                         :outputs {:proposed_schedule {:Monday {:AM "E1" :PM "E2"}}}
+                         :duration-ms 2500
+                         :trace-id tick-id
+                         :usage {:prompt-tokens 200 :completion-tokens 100 :total-tokens 300}}
+          tick-events [(mk-node-completion-event {:node-id good-leaf-id
+                                                  :status :success})
+                       (mk-node-completion-event {:node-id bad-leaf-id
+                                                  :status :failure
+                                                  :error "Duplicate key: null"})]
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw [:sequence
+                                [:llm {:writes [:proposed_schedule]}]
+                                [:code {:fn "<inline-fn>"
+                                        :writes [:schedule :violations :rationale]}]
+                                [:final {:keys [:schedule :violations :rationale]}]]
+                     :writes [:schedule :violations :rationale]})]
+      (is (= :failure (:status summary)))
+      (is (vector? (:failed-leaves summary))
+          ":failed-leaves is a vector inline on the summary")
+      (is (= 1 (count (:failed-leaves summary)))
+          "exactly one direct-leaf failure surfaces (the :code leaf)")
+      (let [entry (first (:failed-leaves summary))]
+        (is (= bad-leaf-id (:node-id entry))
+            ":node-id identifies which leaf failed so the model can correlate to its emitted tree")
+        (is (= "Duplicate key: null" (:error entry))
+            ":error carries the verbatim runtime error string from the executor")))))
+
+(deftest summary-omits-failed-leaves-on-success
+  (testing "T2-Hardening-A: successful trees produce no :failed-leaves field"
+    (let [phase2-result {:status :success
+                         :outputs {:summary "the answer"}
+                         :duration-ms 4500
+                         :trace-id (random-uuid)
+                         :usage {:total-tokens 50}}
+          tick-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})
+                       (mk-node-completion-event {:node-id (random-uuid) :status :success})]
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw [:sequence [:llm {}] [:final {}]]
+                     :writes [:summary]})]
+      (is (= :success (:status summary)))
+      (is (not (contains? summary :failed-leaves))
+          "no :failed-leaves field when nothing failed (cond-> conditional add)"))))
+
+(deftest summary-map-each-failures-stay-on-existing-channel
+  (testing "T2-Hardening-A: map-each per-child failures surface via :failure-indices/:failure-reasons; :failed-leaves stays absent (no double-reporting)"
+    (let [tick-id #uuid "00000000-0000-0000-0000-000000000006"
+          map-each-id (random-uuid)
+          phase2-result {:status :partial
+                         :outputs {:summary "from 22 chunks"}
+                         :duration-ms 5500
+                         :trace-id tick-id
+                         :usage {:total-tokens 1200}}
+          partial-sum {:total 3 :succeeded 1 :failed 2
+                       :failure-indices [1 2]
+                       :failure-reasons {1 "Rate limit" 2 "Schema validation"}}
+          leaf-events [(mk-node-completion-event {:node-id (random-uuid) :status :success})
+                       (mk-node-completion-event {:node-id (random-uuid) :status :failure})
+                       (mk-node-completion-event {:node-id (random-uuid) :status :failure})]
+          map-each-event (mk-node-completion-event {:node-id map-each-id
+                                                    :status :partial
+                                                    :partial-summary partial-sum})
+          tick-events (vec (concat leaf-events [map-each-event]))
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw [:sequence [:map-each {} [:llm {}]] [:final {}]]
+                     :writes [:summary]})]
+      (is (= :partial (:status summary)))
+      (is (= [1 2] (:failure-indices summary))
+          "map-each path stays on :failure-indices (existing channel)")
+      (is (= {1 "Rate limit" 2 "Schema validation"} (:failure-reasons summary)))
+      (is (vector? (:failed-leaves summary))
+          ":failed-leaves is still surfaced because the leaf failure events DO match the direct-leaf filter")
+      ;; Important nuance: the underlying drill-down function considers each
+      ;; leaf-completion event with :status :failure as a direct-leaf failure
+      ;; AS LONG AS it doesn't carry :partial-summary. The map-each parent
+      ;; carries :partial-summary so it's filtered out. The map-each CHILDREN's
+      ;; completion events DON'T carry :partial-summary themselves, so they
+      ;; ARE direct-leaf failures from the data's point of view. The existing
+      ;; :failure-indices coverage is a higher-level summary FROM the parent's
+      ;; :partial-summary block; :failed-leaves is the per-event view. They
+      ;; can coexist (one row per failed child) without inconsistency.
+      ;;
+      ;; If product-side decides one or the other should suppress, that's a
+      ;; downstream rendering concern, not a compute-tree-result-summary one.
+      (is (= 2 (count (:failed-leaves summary)))
+          "Two leaf-failure events produce two :failed-leaves entries"))))
+
+(deftest summary-failed-leaves-multiple-distinct-errors
+  (testing "T2-Hardening-A: when multiple non-map-each leaves fail with different errors, each gets its own entry"
+    (let [tick-id #uuid "00000000-0000-0000-0000-000000000007"
+          leaf-a (random-uuid)
+          leaf-b (random-uuid)
+          phase2-result {:status :failure
+                         :outputs {}
+                         :duration-ms 1200
+                         :trace-id tick-id
+                         :usage {:total-tokens 100}}
+          tick-events [(mk-node-completion-event {:node-id leaf-a
+                                                  :status :failure
+                                                  :error "Could not resolve symbol: foo"})
+                       (mk-node-completion-event {:node-id leaf-b
+                                                  :status :failure
+                                                  :error "Code executor result could not be reconciled with declared :writes"})]
+          summary (executor/compute-tree-result-summary
+                    {:phase2-result phase2-result
+                     :tick-events tick-events
+                     :tree-raw [:sequence [:code {:fn "<inline-fn>" :writes [:a]}]
+                                          [:code {:fn "<inline-fn>" :writes [:b]}]]
+                     :writes [:a :b]})]
+      (is (= :failure (:status summary)))
+      (is (= 2 (count (:failed-leaves summary))))
+      (is (= #{leaf-a leaf-b}
+             (set (map :node-id (:failed-leaves summary))))
+          "both failing leaves surface, identified by node-id")
+      (is (= #{"Could not resolve symbol: foo"
+               "Code executor result could not be reconciled with declared :writes"}
+             (set (map :error (:failed-leaves summary))))
+          "verbatim error strings preserve the executor's diagnostic"))))
 
 ;; =============================================================================
 ;; C-Loop-4: detect-nil-writes — pure deep module
@@ -741,3 +889,81 @@
                 "(tree-trajectory) result has a counted shape")
             (is (= 0 (:failure-count outs))
                 "(tree-failures) returned empty for a successful tree")))))))
+
+;; =============================================================================
+;; T2-Hardening-A: end-to-end — Phase 2 :code throw surfaces inline as
+;; :failed-leaves on the :tree-results entry the next Phase-1 iteration sees.
+;; =============================================================================
+
+(deftest recursive-mode-failed-leaves-surface-on-tree-results
+  (testing "T2-Hardening-A: when a Phase-2 :code leaf throws, the next iteration's :tree-results entry carries :failed-leaves with :node-id + :error"
+    (with-test-ctx [ctx]
+      (let [outer-call-count (atom 0)
+            phase1-module? (fn [module]
+                             (boolean (some #(= :code (:name %)) (:outputs module))))]
+        (with-redefs [dscloj/predict
+                      (fn [_provider module _inputs _opts]
+                        (cond
+                          (phase1-module? module)
+                          (let [n (swap! outer-call-count inc)]
+                            (if (= 1 n)
+                              ;; Iter 1: emit a tree with a :code :fn that
+                              ;; intentionally throws — exercises the same
+                              ;; runtime path a model-authored buggy
+                              ;; validator hits in production.
+                              {:outputs {:code "(emit-tree!
+                                                  [:sequence
+                                                    [:code {:fn (fn [_]
+                                                                  (throw (ex-info \"intentional fault\" {})))
+                                                            :reads []
+                                                            :writes [:produced]}]
+                                                    [:final {:keys [:produced]}]])"}
+                               :usage {:prompt_tokens 50 :completion_tokens 25 :total_tokens 75}}
+                              ;; Iter 2: read :tree-results, project its
+                              ;; failed-leaf shape into declared outputs so
+                              ;; the test can assert via (:outputs result).
+                              {:outputs {:code "(let [tr (get-var :tree-results)
+                                                       e (first tr)
+                                                       fl (:failed-leaves e)
+                                                       first-fl (first fl)]
+                                                   (final!
+                                                     {:tr-count (count tr)
+                                                      :tr-status (:status e)
+                                                      :tr-failed-leaf-count (count fl)
+                                                      :tr-failed-leaf-error (:error first-fl)
+                                                      :tr-failed-leaf-has-node-id?
+                                                      (some? (:node-id first-fl))}))"}
+                               :usage {:prompt_tokens 60 :completion_tokens 30 :total_tokens 90}}))
+
+                          :else
+                          ;; No Phase 2 sub-LLM in this test — the :code node
+                          ;; throws before any LLM child runs.
+                          {:outputs {} :usage {}}))]
+          (let [node {:type :repl-researcher
+                      :instruction "Intentional fault test"
+                      :reads []
+                      :writes [:tr-count :tr-status :tr-failed-leaf-count
+                               :tr-failed-leaf-error :tr-failed-leaf-has-node-id?]
+                      :rlm {:recursive? true}
+                      :max-iterations 5}
+                blackboard {}
+                result (executor/execute-repl-researcher-rlm
+                         node blackboard :openrouter ctx)
+                outs (:outputs result)]
+            (is (= :success (:status result))
+                (str "Expected :success after iter 2 final!, got: " (:status result)
+                     " error: " (:error result)))
+            (is (= 2 @outer-call-count)
+                "Two Phase 1 outer predict calls — first emits, second inspects after recur")
+            (is (>= (:tr-count outs) 1)
+                ":tree-results visible to iter 2 has at least one entry (the iter-1 failed tree)")
+            (is (= :failure (:tr-status outs))
+                "the iter-1 tree's summary records :status :failure (its :code leaf threw)")
+            (is (>= (:tr-failed-leaf-count outs) 1)
+                "T2-Hardening-A: at least one :failed-leaves entry inline on the summary")
+            (is (string? (:tr-failed-leaf-error outs))
+                ":error on the failed-leaf carries the runtime error string verbatim")
+            (is (re-find #"(?i)intentional fault" (or (:tr-failed-leaf-error outs) ""))
+                "the error string includes the model-authored throw's message")
+            (is (true? (:tr-failed-leaf-has-node-id? outs))
+                ":node-id is populated on the failed-leaf entry")))))))

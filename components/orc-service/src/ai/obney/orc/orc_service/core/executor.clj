@@ -29,7 +29,8 @@
             [ai.obney.orc.orc-service.core.observability :as obs]
             [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]
             [ai.obney.orc.orc-service.core.rlm-sandbox :as rlm-sandbox]
-            [ai.obney.orc.orc-service.core.rlm-tree-executor :as tree-executor]))
+            [ai.obney.orc.orc-service.core.rlm-tree-executor :as tree-executor]
+            [ai.obney.orc.orc-service.core.rlm-drill-down :as drill]))
 
 ;; Forward declarations
 (declare execute-repl-researcher-rlm)
@@ -204,7 +205,20 @@
         ;; Combine failure-indices + failure-reasons across all partial-summary
         ;; events (typically only one map-each per tree, but support multiple).
         all-failure-indices (vec (mapcat :failure-indices partial-summaries))
-        all-failure-reasons (apply merge {} (map :failure-reasons partial-summaries))]
+        all-failure-reasons (apply merge {} (map :failure-reasons partial-summaries))
+        ;; T2-Hardening-A: surface direct-leaf failure entries inline on the
+        ;; summary so the model sees WHICH leaf failed with WHAT error without
+        ;; needing an explicit `(tree-failures)` drill-down call. Reuses the
+        ;; same filtering logic the drill-down primitive uses — direct-leaf
+        ;; failure events are leaf-completion events with :status :failure
+        ;; that do NOT carry :partial-summary (those are map-each parents
+        ;; whose per-child failures already surface via :failure-indices /
+        ;; :failure-reasons above). Factual entries — {:node-id :status :error}
+        ;; — per the orc principle: descriptive, not prescriptive. Map-each
+        ;; per-index failures stay on the existing channel; direct-leaf
+        ;; failures get this new channel.
+        all-leaf-failures (drill/tree-failures-from-events tick-events)
+        direct-leaf-failures (vec (filter :node-id all-leaf-failures))]
     (cond-> {:tick-id (:trace-id phase2-result)
              ;; R-3: sanitize inline-fn SCI objects out of :tree-raw before
              ;; storing in :tree-results. The summary gets persisted across
@@ -230,6 +244,9 @@
       (and (contains? #{:partial :failure} status) (seq partial-summaries))
       (assoc :failure-indices all-failure-indices
              :failure-reasons all-failure-reasons)
+
+      (seq direct-leaf-failures)
+      (assoc :failed-leaves direct-leaf-failures)
 
       (= :timeout status)
       (assoc :phase2-elapsed-ms (:phase2-elapsed-ms phase2-result)
@@ -1741,10 +1758,11 @@
                              "same flow below applies — investigate, inventory surviving vars, "
                              "and design a smaller resume tree.\n\n"
                              "Recovery flow:\n"
-                             "  1. **Investigate**: read `:failure-reasons` and `:failure-indices` on "
-                             "the failed entry, OR `:nil-writes` keys on a `:status :success` entry "
-                             "whose declared writes came back nil/empty. If those fields aren't "
-                             "specific enough, drill in with "
+                             "  1. **Investigate**: read `:failed-leaves` (each entry has `:node-id` "
+                             "+ `:error` — surfaces direct-leaf runtime failures), `:failure-reasons` "
+                             "and `:failure-indices` (map-each per-child failures), OR `:nil-writes` "
+                             "keys on a `:status :success` entry whose declared writes came back "
+                             "nil/empty. If those fields aren't specific enough, drill in with "
                              "`(tree-failures)` / `(tree-detail tick-id)` / `(node-output node-id)`.\n"
                              "  2. **Inventory surviving vars**: check `(list-vars)` or `:outputs-keys` "
                              "from the same `:tree-results` entry to see EXACTLY what data already "
@@ -1819,6 +1837,63 @@
                              "stylistic differences, or completeness questions are fine — finalize "
                              "and let the evaluation layer judge quality.\n\n")
                         "")
+                      ;; T2-Hardening-C: forward guidance — recurring SCI/Clojure
+                      ;; pitfalls observed across the bench suite that the model
+                      ;; consistently hits on first iteration. Each bullet pairs
+                      ;; the footgun with a concrete workaround so the rule is
+                      ;; immediately actionable. Generic across all tasks; do
+                      ;; NOT add task-specific guidance here.
+                      "## Common pitfalls\n"
+                      "These are recurring SCI/Clojure footguns that hit model-authored code. "
+                      "Reading this list once now prevents the retry loop from rediscovering "
+                      "each pitfall via execution failure. Each entry pairs the failure mode "
+                      "with the concrete fix.\n\n"
+                      "- **Set literals with computed elements fail SCI's reader.** "
+                      "`#{(get-in m k1) (get-in m k2)}` — the elements aren't literal values "
+                      "so the reader rejects the form. Use `(set [(expr1) (expr2)])` to build "
+                      "a set from runtime values.\n"
+                      "- **`frequencies` on collections that may contain `nil` produces a "
+                      "`{nil N}` entry that collides downstream.** When the source collection "
+                      "has nils (e.g. partially-populated schedule slots), build the count "
+                      "from the non-nil values: `(frequencies (filter some? coll))`.\n"
+                      "- **`(get-var :foo)` returns `nil` after a Phase-2 `:failure`.** "
+                      "If the prior tree's leaf failed, the value it was supposed to write "
+                      "never landed. Always check before consuming: "
+                      "`(when-let [v (get-var :foo)] ...)`. Don't assume vars exist just "
+                      "because the writes were DECLARED on the tree — the writes are an "
+                      "intent, not a fact.\n"
+                      "- **Namespaced symbols don't resolve in the SCI sandbox.** "
+                      "`clojure.string/join`, `clojure.set/intersection`, etc. won't load. "
+                      "Use the bound sandbox primitives or re-derive locally with `(let ...)` "
+                      "+ basic Clojure (`str`, `apply`, `interpose`, `reduce`, `map`, "
+                      "`filter`, `into`, `vec`).\n"
+                      "- **`:output-schemas` must match downstream `:code` consumer's "
+                      "expectations.** If the `:llm` declares `:output-schemas {:foo "
+                      ":string}` but the downstream `:code` expects a parsed map, the "
+                      "consumer crashes on `(get parsed-map ...)`. Match the Malli shape "
+                      "to the actual data shape: `[:map [:a :string] [:b :int]]`, NOT "
+                      "`[:map :a :string :b :int]`. Nested map fields require `[:map [:k "
+                      ":type]]` brace nesting.\n"
+                      "- **Inline-fn bodies that reference unbound names fail at execution "
+                      "time, not at emit.** When you write `[:code {:fn (fn [{:keys "
+                      "[inputs]}] (use-name x))}]` and `x` isn't bound, SCI doesn't notice "
+                      "until the leaf actually runs; the error surfaces as 'Could not "
+                      "resolve symbol' from inside the validator, far from your emit-tree "
+                      "call. Double-check that every name your `:fn` body references is "
+                      "either in `(:keys [...])` destructured from `inputs`, in a `let` "
+                      "binding inside the fn, or a sandbox primitive.\n"
+                      "- **`(get-in m [...])` on nil returns nil silently.** If your "
+                      "`:reads` brings in a value that's nil (because a prior step "
+                      "failed), `(get-in nil [:k1 :k2])` returns nil instead of throwing. "
+                      "Downstream operations on nil throw far from the actual problem. "
+                      "Verify the top of the data is non-nil before deep `get-in`.\n"
+                      "- **For-comprehensions return lazy sequences that defer side "
+                      "effects.** `(for [x xs] (process! x))` doesn't execute until the "
+                      "result is consumed; if the surrounding code only checks `(count "
+                      "...)` or the result is dropped, the side effects never fire. Use "
+                      "`(mapv ...)` or wrap in `(doall ...)` when you need eager "
+                      "evaluation or predictable error attribution.\n\n"
+
                       "## Output Contract\n"
                       "You MUST call (final! {...}) with keys: " (pr-str (:writes node)) "\n\n"
                       "## CRITICAL OUTPUT FORMAT\n"
@@ -2005,8 +2080,8 @@
                 _ (dbg "dscloj-options =" dscloj-options)
                 _ (dbg "module :outputs =" (:outputs module))
                 _ (dbg "module :instructions length =" (count (:instructions module)))
-                _ (dbg "inputs :task =" (subs (:task inputs) 0 (min 100 (count (:task inputs)))) "...")
-                _ (dbg "inputs :inputs-info =" (subs (:inputs-info inputs) 0 (min 200 (count (:inputs-info inputs)))) "...")
+                _ (dbg "inputs :task =" (:task inputs))
+                _ (dbg "inputs :inputs-info =" (:inputs-info inputs))
                 _ (dbg "calling dscloj/predict...")
                 llm-result (try
                              (dscloj/predict effective-provider module inputs dscloj-options)
@@ -2022,15 +2097,15 @@
                 _ (dbg "[:outputs :code] nil?:" (nil? (get-in llm-result [:outputs :code])))
                 _ (dbg "[:outputs] keys:" (keys (:outputs llm-result)))
                 _ (when debug?
-                    (dbg "FULL llm-result:" (pr-str (update llm-result :outputs #(into {} (map (fn [[k v]] [k (if (string? v) (subs v 0 (min 500 (count v))) v)]) %))))))
+                    (dbg "FULL llm-result:" (pr-str llm-result)))
                 _ (when (and debug? (get-in llm-result [:outputs :code]))
-                    (dbg "GENERATED CODE (first 1000 chars):" (subs (get-in llm-result [:outputs :code]) 0 (min 1000 (count (get-in llm-result [:outputs :code]))))))
+                    (dbg "GENERATED CODE (full):" (get-in llm-result [:outputs :code])))
                 _ (dbg ":code blank?:" (if (string? (:code llm-result))
                                          (str/blank? (:code llm-result))
                                          "N/A"))
                 _ (when (and debug? (string? (:code llm-result)))
                     (dbg ":code length:" (count (:code llm-result)))
-                    (dbg ":code first 200 chars:" (subs (:code llm-result) 0 (min 200 (count (:code llm-result))))))
+                    (dbg ":code (full):" (:code llm-result)))
                 _ (dbg "========================================\n")
                 ;; Extract code from LLM result
                 ;; With function calling mode, code may be returned as:

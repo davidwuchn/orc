@@ -393,6 +393,27 @@
                (->> representative-uses (map (fn [u] (str "  - " u))) (str/join "\n"))
                "\n"))))))
 
+(defn- ->uuid
+  "Normalize a target-id to a java.util.UUID before the read-model lookup.
+
+   The classifier's :top-candidates carry :document-metadata.:target-id as
+   a STRING (ColBERT bridges metadata through JSON, so a UUID seed comes
+   back as \"5a08300e-10e3-305a-80c1-17eafea15ff7\"). The descriptions
+   read-model keys bodies under the literal java.util.UUID. Without this
+   coercion the lookup misses silently and the prepend degrades to
+   summary-only.
+
+   Pass-through for already-UUID input keeps the function idempotent.
+   String input that does not parse as a UUID returns nil — that's a
+   genuine miss and the prepend renders without the rich body (rather
+   than crashing the request)."
+  [v]
+  (cond
+    (uuid? v) v
+    (string? v) (try (java.util.UUID/fromString v)
+                     (catch IllegalArgumentException _ nil))
+    :else nil))
+
 (defn- fetch-tree-body
   "Pull a tree-class description body via ontology/get-description.
 
@@ -403,15 +424,19 @@
    path. The classifier search index continues to partition by
    :tree-fingerprint — that's the index lookup, not the body read.
 
+   T2-Hardening-B: coerce target-id to UUID before the lookup. The
+   classifier's candidate metadata round-trips target-id through JSON
+   so it arrives as a stringified UUID; the read-model keys by UUID.
+
    Returns nil on any failure (helper is best-effort — the prepend
    degrades to summary-only when the full body is unavailable)."
   [ctx target-id]
-  (when target-id
+  (when-let [uuid-target (->uuid target-id)]
     (let [get-description (requiring-resolve
                             'ai.obney.orc.ontology.interface/get-description)]
       (try
         (when get-description
-          (get-description ctx :tree-class target-id))
+          (get-description ctx :tree-class uuid-target))
         (catch Exception _ nil)))))
 
 (defn- derive-seed-name
