@@ -100,7 +100,7 @@ Every sheet execution automatically captures detailed traces.
 
 ### Stage 2: Evaluation (5 Default Judges + Custom)
 
-Run reference-free evaluation using LLM-as-judge patterns. As of 2026-06, the evaluation component supports both retrospective batch evaluation AND inline per-event evaluation (Gap-1's per-event runtime) — see [`EVALUATION-COMPONENT.md`](EVALUATION-COMPONENT.md) for both modes.
+Run reference-free evaluation using LLM-as-judge patterns. The evaluation component supports both retrospective batch evaluation AND inline per-event evaluation that fires automatically when `:repl-researcher` nodes complete — see [`EVALUATION-COMPONENT.md`](EVALUATION-COMPONENT.md) for both modes.
 
 **Component:** `components/evaluation/`
 

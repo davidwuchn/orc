@@ -111,6 +111,17 @@ The `:repl-researcher` node type provides a two-phase execution pattern. See [`d
 
 In recursive mode, after Phase 2 completes (any status), the tree's outputs are merged into sandbox-vars, a lightweight summary entry is appended to `:tree-results`, and control returns to the Phase 1 loop. The model can run follow-up `(llm ...)` / `(code ...)`, drill into prior trees via `(tree-detail)` / `(tree-failures)` / etc. when the summary isn't enough, emit another tree, or call `(final! ...)` to terminate. Existing callers using `:rlm true` are unaffected — terminal behavior is preserved.
 
+## Self-Improving Loop
+
+Workflows that opt into `:rlm {:auto-classify? true :recursive? true}` participate in a self-improving loop:
+
+- **Pattern injection at design time** — before the model designs its tree, the top-fitting pattern from the seed corpus (including capabilities, observed strengths with worked-example DSL snippets, weaknesses with recommended fixes) is prepended to the model's instruction.
+- **Body evolution from execution evidence** — after enough tasks classify to the same pattern, a reflection step updates the pattern body. New strengths and traits emerge from observed runs; evidence-counts climb on existing entries. Anti-recency safeguards prevent single-bad-burst overcorrection.
+- **Behavioral mints** — when the model encounters work no existing pattern fits, it can contribute a new behavior via `(mint-behavior! ...)`. Minted behaviors persist for future retrieval across all consumers and surface in classify-behaviors at high confidence when behavioral shape matches (even across domains).
+- **Focused failure recovery** — when a leaf in an emitted tree throws, the next iteration's `:tree-results` summary surfaces `:failed-leaves` with the node-id + error. The model typically emits a single-node recovery tree reading surviving sandbox-vars rather than rebuilding the pipeline.
+
+External-consumer entry point: [`docs/SELF-IMPROVING-LOOP.md`](docs/SELF-IMPROVING-LOOP.md). Architecture detail: [`docs/LIVING-DESCRIPTIONS.md`](docs/LIVING-DESCRIPTIONS.md). Recursive RLM reference: [`docs/RLM-GUIDE.md`](docs/RLM-GUIDE.md).
+
 ## Skills
 
 ### ORC Domain
