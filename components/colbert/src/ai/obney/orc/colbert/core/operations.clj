@@ -240,6 +240,58 @@
              :score (* weight (double score))})
           normalized)))
 
+(defn search-batch
+  "Batch-search a ColBERT index for MANY queries in ONE bridge round-trip, with the
+   index loaded ONCE (not once-per-query). Returns a vector of result-lists aligned
+   to `queries`, each list shaped like `search`'s output.
+
+   Args:
+     ctx - Context map (used for read-model lookup)
+     opts - Options map:
+       :queries  - Vector of query strings (required)
+       :index-id - Index UUID (required)
+       :k        - Number of results per query (default: 10)"
+  [ctx {:keys [queries index-id k]
+        :or {k 10}}]
+  (let [index (read-models/get-index ctx index-id)]
+    (when-not index
+      (throw (ex-info "Index not found" {:index-id index-id})))
+    (when (= :deleted (:status index))
+      (throw (ex-info "Index has been deleted" {:index-id index-id})))
+    (let [alias (str index-id)]
+      ;; Load the index ONCE; the bridge then runs every query against the resident
+      ;; model in a single round-trip (no per-query load, no per-query reload).
+      (bridge/load-model! alias :index-path (:index-path index))
+      (bridge/search-batch alias {:queries (vec queries) :k k}))))
+
+(defn search-for-rrf-batch
+  "Batched `search-for-rrf`: ONE index load + ONE bridge round-trip for ALL queries.
+   Returns a vector aligned to `queries`, each element a vector of {:uri :score}
+   ready for RRF fusion. This is the batched integration point for ontology
+   hybrid-search over a whole transcript — it collapses N per-line ColBERT
+   round-trips into one.
+
+   Args:
+     ctx - Context map containing :event-store
+     opts - Options map:
+       :queries    - Vector of query strings (required)
+       :index-id   - ColBERT index UUID (required)
+       :k          - Results per query (default: 20)
+       :normalize? - Normalize scores to [0,1] (default: true)
+       :weight     - Score weight multiplier (default: 1.0)"
+  [ctx {:keys [queries index-id k normalize? weight]
+        :or {k 20 normalize? true weight 1.0}}]
+  (->> (search-batch ctx {:queries queries :index-id index-id :k k})
+       (mapv (fn [results]
+               (let [normalized (if normalize?
+                                  (normalize-result-scores results)
+                                  results)]
+                 ;; Same :document_id (underscore) ⇒ :uri mapping as search-for-rrf.
+                 (mapv (fn [{:keys [score] :as r}]
+                         {:uri (or (:document_id r) (:document-id r))
+                          :score (* weight (double score))})
+                       normalized))))))
+
 (defn hybrid-search
   "Combine ColBERT with existing ontology search via RRF.
 

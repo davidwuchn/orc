@@ -769,6 +769,25 @@
   [event-store opts]
   (retrieval/hybrid-search event-store opts))
 
+(defn hybrid-search-batch
+  "Batched hybrid-search over MANY query-texts. The ColBERT signal runs in ONE
+   batched pass (index loaded ONCE, one bridge round-trip); embedding + graph stay
+   per-query (in-JVM). Returns a vector of per-query result-maps, each shaped exactly
+   like hybrid-search's output, aligned to `:query-texts`.
+
+   Use over a whole transcript instead of mapping hybrid-search per line: collapses N
+   ColBERT round-trips (and N index loads) into one, no per-search reload, while
+   keeping the embedding+ColBERT RRF fusion substance-identical to the single-query
+   path.
+
+   Args:
+     event-store: Grain event store
+     opts: same as hybrid-search, except
+       :query-texts - Vector of natural-language queries (instead of :query-text)
+       :seed-uris   - shared graph seeds applied to every query (usually nil)"
+  [event-store opts]
+  (retrieval/hybrid-search-batch event-store opts))
+
 (defn hybrid-search-failures
   "Search failure concepts using hybrid graph + embedding search.
 

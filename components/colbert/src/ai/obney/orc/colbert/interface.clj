@@ -211,6 +211,36 @@
   [ctx opts]
   (operations/search-for-rrf ctx opts))
 
+(defn search-batch
+  "Batch-search a ColBERT index for many queries in ONE round-trip, index loaded
+   ONCE. Returns a vector of result-lists aligned to `:queries`.
+
+   Args:
+     ctx - Context map containing :event-store
+     opts - Options map:
+       :queries  - Vector of query strings (required)
+       :index-id - Index UUID (required)
+       :k        - Results per query (default: 10)"
+  [ctx opts]
+  (operations/search-batch ctx opts))
+
+(defn search-for-rrf-batch
+  "Batched `search-for-rrf`: ONE index load + ONE round-trip for all queries.
+   Returns a vector aligned to `:queries`, each a vector of {:uri :score} for RRF
+   fusion. The batched integration point for ontology hybrid-search over a whole
+   transcript.
+
+   Args:
+     ctx - Context map containing :event-store
+     opts - Options map:
+       :queries    - Vector of query strings (required)
+       :index-id   - ColBERT index UUID (required)
+       :k          - Results per query (default: 20)
+       :normalize? - Normalize scores to [0,1] (default: true)
+       :weight     - Score weight multiplier (default: 1.0)"
+  [ctx opts]
+  (operations/search-for-rrf-batch ctx opts))
+
 (defn hybrid-search
   "Combine ColBERT with existing ontology search via RRF.
 
