@@ -941,7 +941,7 @@
                              ;; No provider - use mock
                              :else
                              (executor/execute-leaf-mock node blackboard))
-                  {:keys [status outputs error duration-ms usage]} result
+                  {:keys [status outputs error duration-ms usage raw-response]} result
                   _ (when is-llm-call?
                       (u/log ::leaf-llm-subcall-completed
                              :node-id node-id
@@ -963,6 +963,11 @@
                                 :writes (normalize-output-keys (or outputs {}))}
                          duration-ms (assoc :duration-ms duration-ms)
                          error (assoc :error error)
+                         ;; Verbatim raw LLM response on parse failures —
+                         ;; persisted on the completion event so (node-output
+                         ;; <node-id>) can retrieve the full text for diagnosis.
+                         (and (= :failure status) raw-response)
+                         (assoc :raw-response raw-response)
                          (seq exec-context) (assoc :inputs exec-context)
                          (seq usage) (assoc :usage usage))))
               ;; ALSO emit the RLM-specific learning-signal event when an LLM
