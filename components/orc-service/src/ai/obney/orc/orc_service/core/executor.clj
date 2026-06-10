@@ -17,7 +17,6 @@
    - Blackboard values → DSCloj input values
    - DSCloj output values → Blackboard writes"
   (:require [dscloj.core :as dscloj]
-            [litellm.router :as litellm-router]
             [clojure.string :as str]
             [clojure.set]
             [clojure.walk :as walk]
@@ -849,42 +848,6 @@
 ;; AI Execution
 ;; =============================================================================
 
-(defn- get-provider-with-model
-  "Get or create a provider config with the specified model.
-
-   litellm-clj's router ignores :model in request options when using a registered
-   provider keyword. To work around this, when a model override is specified,
-   we dynamically register a model-specific provider if it doesn't exist.
-
-   The litellm config structure must be:
-   {:provider :provider-name :model \"model-name\" :config {:api-key ... :base-url ...}}
-
-   Returns the provider keyword to use (either original or model-specific)."
-  [provider model-override]
-  (if (and model-override (keyword? provider))
-    ;; Create a model-specific provider name
-    (let [model-provider-name (keyword (str (name provider) "/" model-override))
-          existing (litellm-router/get-config model-provider-name)]
-      (when-not existing
-        ;; Register the model-specific provider
-        (let [base-config (litellm-router/get-config provider)]
-          (when base-config
-            ;; Build the correct config structure for litellm
-            ;; If base-config already has :provider/:model/:config structure, use it
-            ;; Otherwise, assume it's a flat config and wrap it
-            (let [structured-config
-                  (if (and (:provider base-config) (:config base-config))
-                    ;; Already structured, just update the model
-                    (assoc base-config :model model-override)
-                    ;; Flat config - wrap it in the correct structure
-                    {:provider provider
-                     :model model-override
-                     :config (dissoc base-config :provider :model)})]
-              (litellm-router/register! model-provider-name structured-config)))))
-      model-provider-name)
-    ;; No override needed, use provider as-is
-    provider))
-
 (defn- outputs-have-nil?
   "Check if any output values are nil, including nested maps where all values are nil."
   [outputs]
@@ -921,24 +884,25 @@
         output-mapping (:output-mapping module)
         ;; Remove the mapping from module before passing to DSCloj
         dscloj-module (dissoc module :output-mapping)
-        ;; Build effective provider config with model override if specified
-        effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking via :with-metadata? true.
         ;; Disable validation since we serialize complex inputs to JSON strings.
         ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
         ;; but preserve an explicit caller/node :use-function-calling? override
         ;; for models where tool-backed structured output is more reliable.
+        ;; The node's :model rides through as a per-request override —
+        ;; litellm-clj's router honors :model in the request options.
         dscloj-options (merge {:validate? false
                                :with-metadata? true
                                :use-function-calling? false}
-                              options)
+                              options
+                              (when (:model node) {:model (:model node)}))
         ;; Retry config - defaults to 1 retry with 500ms delay
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
 
         ;; Single attempt function
         try-once (fn []
-                   (let [result (dscloj/predict effective-provider dscloj-module inputs dscloj-options)
+                   (let [result (dscloj/predict provider dscloj-module inputs dscloj-options)
                          ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
                          raw-outputs (or (:outputs result) result)
                          ;; Reassemble flattened outputs back into nested structure
@@ -1036,13 +1000,13 @@
                                  :let [entry (get blackboard key-name)]
                                  :when entry]
                              [key-name (:value entry)]))
-        ;; Build effective provider config with model override if specified
-        effective-provider (get-provider-with-model provider (:model node))
         ;; Request metadata for usage tracking
         ;; Disable validation since inputs may be JSON serialized
-        dscloj-options (assoc options :validate? false)]
+        ;; The node's :model rides through as a per-request override.
+        dscloj-options (cond-> (assoc options :validate? false)
+                         (:model node) (assoc :model (:model node)))]
     (try
-      (let [response (dscloj/predict effective-provider module input-values dscloj-options)
+      (let [response (dscloj/predict provider module input-values dscloj-options)
             ;; Response now has {:outputs {...} :usage {...} :model "..."}
             bool-result (get-in response [:outputs :result])
             duration-ms (- (System/currentTimeMillis) start-time)]
@@ -1291,9 +1255,6 @@
         ;; Build blackboard metadata (types only, no values)
         bb-metadata (build-blackboard-metadata node blackboard)
 
-        ;; Build effective provider config with model override if specified
-        effective-provider (get-provider-with-model provider (:model node))
-
         ;; Track usage across iterations
         total-usage (atom {:prompt-tokens 0 :completion-tokens 0 :total-tokens 0})]
 
@@ -1331,13 +1292,12 @@
                         :context bb-metadata
                         :history (or (build-iteration-history history) "None")
                         :tools (str/join ", " all-tools)}
-                ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
-                ;; Passing :model causes response parsing issues in dscloj
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
-                dscloj-options (assoc execution-options :validate? false :with-metadata? true)
+                ;; The node's :model rides through as a per-request override.
+                dscloj-options (cond-> (assoc execution-options :validate? false :with-metadata? true)
+                                 (:model node) (assoc :model (:model node)))
 
-                ;; Generate code - use effective-provider for correct model override
-                llm-result (dscloj/predict effective-provider module inputs dscloj-options)
+                llm-result (dscloj/predict provider module inputs dscloj-options)
                 ;; Extract code from LLM result
                 ;; With :with-metadata? true, dscloj returns {:outputs {:code "..."} :usage {...}}
                 ;; Code may be a string or a parsed Clojure form (if function calling mode parsed it)
@@ -2075,21 +2035,19 @@
                 inputs {:task (:instruction node)
                         :inputs-info (pr-str inputs-preview)
                         :history (or (build-iteration-history history) "None")}
-                ;; Note: Don't pass :model in dscloj-options - effective-provider already has it
-                ;; Passing :model causes response parsing issues in dscloj
                 ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
                 ;; but preserve an explicit caller/node :use-function-calling? override.
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
+                ;; The node's :model rides through as a per-request override.
                 dscloj-options (merge {:validate? false
                                        :use-function-calling? false
                                        :with-metadata? true}
-                                      options)
-                effective-provider (get-provider-with-model provider (:model node))
+                                      options
+                                      (when (:model node) {:model (:model node)}))
 
                 _ (dbg "\n========== ITERATION" (inc (count history)) "==========")
                 _ (dbg "node :model =" (:model node))
                 _ (dbg "provider =" provider)
-                _ (dbg "effective-provider =" effective-provider)
                 _ (dbg "dscloj-options =" dscloj-options)
                 _ (dbg "module :outputs =" (:outputs module))
                 _ (dbg "module :instructions length =" (count (:instructions module)))
@@ -2097,7 +2055,7 @@
                 _ (dbg "inputs :inputs-info =" (:inputs-info inputs))
                 _ (dbg "calling dscloj/predict...")
                 llm-result (try
-                             (dscloj/predict effective-provider module inputs dscloj-options)
+                             (dscloj/predict provider module inputs dscloj-options)
                              (catch Exception e
                                (dbg "dscloj/predict EXCEPTION:" (.getMessage e))
                                {:code nil :error (.getMessage e)}))
@@ -2277,9 +2235,9 @@
                         ;; (:sub-model node) is set, walk the canonical tree
                         ;; and inject :model sub-model into each (sheet/llm ...)
                         ;; form that lacks an explicit :model. The Phase-2 leaf
-                        ;; executor's get-provider-with-model then routes those
-                        ;; calls through the sub-model. Backward compatible —
-                        ;; nil sub-model is a no-op.
+                        ;; executor passes that :model through as a per-request
+                        ;; override. Backward compatible — nil sub-model is a
+                        ;; no-op.
                         sub-model (or (get rlm-config :sub-model)
                                       (:sub-model node))
                         generated-tree (inject-sub-model
