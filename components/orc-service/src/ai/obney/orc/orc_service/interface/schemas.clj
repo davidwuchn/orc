@@ -481,6 +481,9 @@
    [:map
     [:sheet-id :uuid]
     [:tick-id {:optional true} :uuid]
+    ;; Lineage: tick that spawned this one (RLM Phase 2 trees, delegate
+    ;; nodes). Lets observers correlate a child-tick cascade to its root.
+    [:parent-tick-id {:optional true} :uuid]
     ;; Fields for async execution with isolated blackboard
     [:inputs {:optional true} :map]
     [:use-version {:optional true} :int]
@@ -924,6 +927,9 @@
    [:map
     [:sheet-id :uuid]
     [:tick-id :uuid]
+    ;; Lineage: tick that spawned this one (RLM Phase 2 trees, delegate
+    ;; nodes). Absent for root ticks and on events from older versions.
+    [:parent-tick-id {:optional true} :uuid]
     [:iteration {:optional true} :int]
     ;; Fields for async execution with isolated blackboard
     [:inputs {:optional true} :map]

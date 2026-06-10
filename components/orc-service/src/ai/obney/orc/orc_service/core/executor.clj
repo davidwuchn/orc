@@ -29,7 +29,9 @@
             [ai.obney.orc.orc-service.core.sci-sandbox :as sci-sandbox]
             [ai.obney.orc.orc-service.core.rlm-sandbox :as rlm-sandbox]
             [ai.obney.orc.orc-service.core.rlm-tree-executor :as tree-executor]
-            [ai.obney.orc.orc-service.core.rlm-drill-down :as drill]))
+            [ai.obney.orc.orc-service.core.rlm-drill-down :as drill]
+            [ai.obney.orc.orc-service.core.streaming :as streaming]
+            [clojure.core.async :as async]))
 
 ;; Forward declarations
 (declare execute-repl-researcher-rlm)
@@ -877,7 +879,7 @@
    This function flattens nested :map schemas into separate output fields
    (matching Python DSPy's approach), then reassembles them back into
    nested structure for the blackboard."
-  [node blackboard provider & {:keys [options] :or {options {}}}]
+  [node blackboard provider & {:keys [options stream] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
         module (build-module node blackboard)
         inputs (gather-inputs node blackboard)
@@ -900,14 +902,68 @@
         max-retries (get options :max-retries 1)
         retry-delay-ms (get options :retry-delay-ms 500)
 
+        ;; Token streaming (Stage 2). Active only when ALL of: a subscriber
+        ;; asked for deltas on this tick (`stream` config threaded from the
+        ;; todo processor), the loaded DSCloj has predict-stream-v2
+        ;; (capability detection — older pins fall back to blocking), and
+        ;; the node isn't using function-calling (no text stream to parse).
+        predict-stream-v2 (when (and stream
+                                     (or (:fields? stream) (:raw? stream))
+                                     (not (:use-function-calling? dscloj-options)))
+                            (some-> (resolve 'dscloj.core/predict-stream-v2) deref))
+        emit-delta! (when predict-stream-v2
+                      (let [base (cond-> (select-keys stream [:sheet-id :node-id])
+                                   (:map-each stream) (assoc :map-each (:map-each stream)))]
+                        ;; :attempt lets consumers detect a retry restart and
+                        ;; reset their per-node delta accumulation.
+                        (fn [attempt m]
+                          (streaming/emit! (:tick-id stream)
+                                           (merge base {:attempt attempt} m)))))
+
+        ;; Single streaming attempt: consume the typed-event channel,
+        ;; forwarding deltas/field-snapshots to the stream hub, and return
+        ;; the EXACT shape try-once returns so retry/budget/event emission
+        ;; are identical to the blocking path.
+        try-once-streaming
+        (fn [attempt]
+          (let [ch (predict-stream-v2 provider dscloj-module inputs dscloj-options)]
+            (loop [terminal nil]
+              (if-let [ev (async/<!! ch)]
+                (case (:dscloj/event ev)
+                  :delta (do (when (:raw? stream)
+                               (emit-delta! attempt
+                                            {:orc.stream/type :llm-raw-delta
+                                             :text (:text ev)}))
+                             (recur terminal))
+                  :fields (do (when (:fields? stream)
+                                (emit-delta! attempt
+                                             {:orc.stream/type :llm-fields
+                                              :fields (reassemble-flattened-outputs
+                                                       (:fields ev) output-mapping)}))
+                              (recur terminal))
+                  :error (recur {:error (str "LLM stream error: " (pr-str (:error ev)))})
+                  :final (let [outputs (reassemble-flattened-outputs (:outputs ev) output-mapping)]
+                           (when (:fields? stream)
+                             (emit-delta! attempt
+                                          {:orc.stream/type :llm-fields
+                                           :fields outputs
+                                           :final? true}))
+                           (recur {:outputs outputs
+                                   :usage (normalize-usage (:usage ev))
+                                   :model (or (:model ev) (:model node))}))
+                  (recur terminal))
+                (or terminal {:error "LLM stream ended without a final result"})))))
+
         ;; Single attempt function
-        try-once (fn []
-                   (let [result (dscloj/predict provider dscloj-module inputs dscloj-options)
-                         ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
-                         raw-outputs (or (:outputs result) result)
-                         ;; Reassemble flattened outputs back into nested structure
-                         outputs (reassemble-flattened-outputs raw-outputs output-mapping)]
-                     {:outputs outputs :usage (normalize-usage (:usage result)) :model (or (:model result) (:model node))}))
+        try-once (fn [attempt]
+                   (if predict-stream-v2
+                     (try-once-streaming attempt)
+                     (let [result (dscloj/predict provider dscloj-module inputs dscloj-options)
+                           ;; DSCloj returns outputs directly as a flat map, not wrapped in {:outputs ...}
+                           raw-outputs (or (:outputs result) result)
+                           ;; Reassemble flattened outputs back into nested structure
+                           outputs (reassemble-flattened-outputs raw-outputs output-mapping)]
+                       {:outputs outputs :usage (normalize-usage (:usage result)) :model (or (:model result) (:model node))})))
 
         ;; Compute backoff delay for a given attempt
         backoff-for (fn [attempt]
@@ -918,7 +974,7 @@
     (loop [attempt 0]
       (let [{:keys [outputs usage model error]}
             (try
-              (try-once)
+              (try-once attempt)
               (catch Exception e
                 {:error (.getMessage e)}))]
         (cond
@@ -2045,6 +2101,14 @@
                                       options
                                       (when (:model node) {:model (:model node)}))
 
+                ;; Live-stream visibility: ephemeral, no-op without subscribers.
+                _ (streaming/emit! (:tick-id context)
+                                   (cond-> {:orc.stream/type :rlm-iteration-started
+                                            :iteration (inc iteration)
+                                            :max-iterations max-iterations}
+                                     (:sheet-id context) (assoc :sheet-id (:sheet-id context))
+                                     (:node-id context) (assoc :node-id (:node-id context))))
+
                 _ (dbg "\n========== ITERATION" (inc (count history)) "==========")
                 _ (dbg "node :model =" (:model node))
                 _ (dbg "provider =" provider)
@@ -2107,6 +2171,15 @@
                     (swap! sandbox-vars update :iteration-reasonings
                            (fnil conj []) reasoning))
 
+                _ (when (and (string? code) (not (str/blank? code)))
+                    (streaming/emit! (:tick-id context)
+                                     (cond-> {:orc.stream/type :rlm-code-generated
+                                              :iteration (inc iteration)
+                                              :code (streaming/truncate-value code)}
+                                       (string? reasoning) (assoc :reasoning (streaming/truncate-value reasoning))
+                                       (:sheet-id context) (assoc :sheet-id (:sheet-id context))
+                                       (:node-id context) (assoc :node-id (:node-id context)))))
+
                 ;; Update usage tracking (normalize handles snake_case -> kebab-case)
                 _ (when-let [u (normalize-usage (:usage llm-result))]
                     (swap! total-usage
@@ -2162,6 +2235,20 @@
                                        :error (:error exec-result)
                                        :vars-created (vec new-vars)})
                     final-output (:final-output exec-result)
+                    _ (streaming/emit! (:tick-id context)
+                                       (cond-> {:orc.stream/type :rlm-sandbox-completed
+                                                :iteration (inc iteration)
+                                                :final? (some? final-output)}
+                                         (some? (:result exec-result))
+                                         (assoc :result (streaming/truncate-value (:result exec-result)))
+                                         (:stdout exec-result)
+                                         (assoc :stdout (streaming/truncate-value (:stdout exec-result)))
+                                         (:error exec-result)
+                                         (assoc :error (str (:error exec-result)))
+                                         (seq new-vars)
+                                         (assoc :vars-created (vec new-vars))
+                                         (:sheet-id context) (assoc :sheet-id (:sheet-id context))
+                                         (:node-id context) (assoc :node-id (:node-id context))))
                     ;; Aggregate sub-LLM usage into total usage
                     sub-llm-usage (:sub-llm-usage exec-result)
                     _ (when (and sub-llm-usage (pos? (:total-tokens sub-llm-usage 0)))
@@ -2531,19 +2618,19 @@
       :outputs {string-key value}
       :error string?
       :duration-ms int}"
-  [node blackboard provider & {:keys [context options] :or {context {} options {}}}]
+  [node blackboard provider & {:keys [context options stream] :or {context {} options {}}}]
   (let [executor-type (or (:executor node) :ai)
         retry-config (:retry node)
         execution-options (merge options (:options node))
         execute-fn (fn []
                      (case executor-type
-                       :ai (execute-ai node blackboard provider :options execution-options)
+                       :ai (execute-ai node blackboard provider :options execution-options :stream stream)
                        :code (execute-code node blackboard context)
                        :tool {:status :failure
                               :error "Tool executor not yet implemented"
                               :duration-ms 0}
                        ;; Default to AI
-                       (execute-ai node blackboard provider :options execution-options)))]
+                       (execute-ai node blackboard provider :options execution-options :stream stream)))]
     (if retry-config
       (execute-with-retry execute-fn retry-config)
       (execute-fn))))

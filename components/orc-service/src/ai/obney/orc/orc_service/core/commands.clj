@@ -928,7 +928,7 @@
   "Start a tree tick (execute from root).
    When inputs are provided, builds a full execution snapshot for
    independent async execution with tick-scoped blackboard isolation."
-  [{{:keys [sheet-id tick-id inputs use-version force-draft options]} :command
+  [{{:keys [sheet-id tick-id parent-tick-id inputs use-version force-draft options]} :command
     :as context}]
   (let [new-tick-id (or tick-id (random-uuid))]
     (if inputs
@@ -953,6 +953,7 @@
                              :tick-id new-tick-id
                              :inputs inputs
                              :execution-snapshot snapshot}
+                      parent-tick-id (assoc :parent-tick-id parent-tick-id)
                       (:version-number snapshot) (assoc :version-number (:version-number snapshot))
                       options (assoc :options options))})]}))
       ;; Legacy UI tick: no snapshot, reads live sheet state
@@ -976,8 +977,9 @@
              {:type :sheet/tree-tick-started
               :tags #{[:sheet sheet-id]
                       [:tick new-tick-id]}
-              :body {:sheet-id sheet-id
-                     :tick-id new-tick-id}})]})))))
+              :body (cond-> {:sheet-id sheet-id
+                             :tick-id new-tick-id}
+                      parent-tick-id (assoc :parent-tick-id parent-tick-id))})]})))))
 (defcommand :sheet tick-node
   {:authorized? authenticated?}
   "Start a single node tick (for testing or manual execution)."
