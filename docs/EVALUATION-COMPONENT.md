@@ -25,6 +25,35 @@ LLM-as-judge evaluation for ORC sheet service executions, with GEPA-compatible f
 ;; => {:score 0.85, :feedback "Well grounded...", :dimensions [...]}
 ```
 
+## PA-3 (2026-06): tier-1 grounding judge redesign — decoupled discrete Scale + reason-before-score
+
+> **Status: the grounding judge has moved to the tier-1 shape (ADR 0011 / `doc/judge-framework-verdict-notes.md`). The other three LLM judges migrate in PA-4.** The grounding judge's proposed 1–5 **band wording is PENDING HUMAN REVIEW** — see `GROUNDING_SCALE` in `core/rubrics.clj` and the PA-3 calibration evidence.
+
+A judge is **one evaluation capability** producing a score + feedback. It is **not inherently a pass/fail gate**; the *same* judge is deployable two ways (both first-class): event-subscribed/out-of-band (`:judge/score-emitted` → consolidator/GEPA) or in-pipeline as behavior-tree gate logic. Improving the built-in judge benefits both modes.
+
+What changed for grounding:
+
+1. **Decoupled `Scale`** (`core/scale.clj`) — a first-class artifact separate from the criteria/stance. `discrete-scale` builds a discrete **1–5 with an explicit per-level band description**; `level->unit-score` maps it **deterministically** to `[0,1]` (1→0.0, 2→0.25, 3→0.5, 4→0.75, 5→1.0) so storage/aggregation shape is unchanged. The grounding judge's three pieces are kept separate: `GROUNDING_CRITERIA` (what), `GROUNDING_STANCE` (how to behave — adversarial), `GROUNDING_SCALE` (how to score).
+2. **Adversarial, source-grounded, reason-before-score** — the judge takes a skeptical reviewer stance, grounds in the *source* (not the producer's self-report), and the output fields are **ordered so `:reasoning` + claim lists come BEFORE the discrete `:level`** (field order = generation order in the DSCloj tool schema). There is **no self-reported float score**; `:score` is derived from the band.
+3. **Structured output via the typed blackboard** — DSCloj input/output fields with `{:description …}`. **No `:output-schemas`, no JSON-in-the-prompt.** The instruction names the fields and the bands; it carries no JSON example.
+4. **No-run-through gate** (`scale/gate-banded-output`) — empty/garbage model output **throws** (never a silent 0). In-pipeline this fails the node loudly; event-subscribed the runtime isolates + mulog-logs it.
+
+`grounding-result` now carries the **back-compatible** `{:score :grounded-claims :ungrounded-claims :feedback}` PLUS richer `{:level :reasoning}`. Consumers reading `:score` (incl. the per-event runtime → `:judge/score-emitted`) are unaffected.
+
+### Calibration evidence (real traces, live OpenRouter — PENDING REVIEW)
+
+Scored real responses built from the real bench doc `employment_agreement.txt` (model `google/gemini-2.5-flash`), via `development/prototype_grounding_calibration.clj`:
+
+| Crafted response (degrading grounding) | judge band | score |
+|---|---|---|
+| Faithful extraction | 5 | 1.00 |
+| Mostly grounded, one hedged inference | 3 | 0.50 |
+| Gist right, unverifiable inferences as fact | 2 | 0.25 |
+| Fabricated specifics (wrong title/salary/date) | 1 | 0.00 |
+| Contradicts source / different subject | 1 | 0.00 |
+
+Bands are **strictly monotonic** with degrading quality and **stable across repeats** (faithful→5 ×3, fabricated→1 ×3) — the discrete-scale anti-mode-collapse thesis confirmed on real data. The adversarial stance grades ~1 band **stricter** in the middle than lenient hand-labels (a single explicit inference drops a response below band 4) — that strictness level is the **open policy question for human review**.
+
 ## Overview
 
 The evaluation component provides **reference-free LLM-as-judge evaluation** for LLM outputs. It evaluates quality without requiring ground truth labels by using LLMs to judge four dimensions:

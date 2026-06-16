@@ -8,7 +8,23 @@
    - Weight for aggregation with other dimensions
 
    These rubrics are designed for REFERENCE-FREE evaluation,
-   meaning they don't require ground truth labels.")
+   meaning they don't require ground truth labels.
+
+   ---------------------------------------------------------------------------
+   PA-3 (2026-06): the GROUNDING judge has been redesigned to the tier-1
+   shape (ADR 0011 / doc/judge-framework-verdict-notes.md):
+     - a first-class DISCRETE 1-5 `Scale` with explicit per-level bands,
+       DECOUPLED from the criteria/instruction (see core/scale.clj), mapped
+       deterministically to [0,1] for storage;
+     - an ADVERSARIAL, SOURCE-GROUNDED, reason-BEFORE-score stance;
+     - structured output via the typed blackboard (DSCloj output fields with
+       {:description ...}) — NO json-in-prompt, NO permissive output schema.
+   The old soft-0.0-1.0 `GROUNDING_RUBRIC` below is retained only for the
+   legacy retrospective code paths; the live grounding judge uses
+   GROUNDING_CRITERIA + GROUNDING_SCALE. The OTHER three rubrics
+   (instruction / reasoning / completeness) are migrated in PA-4 (demand-pull).
+   ---------------------------------------------------------------------------"
+  (:require [ai.obney.orc.evaluation.core.scale :as scale]))
 
 ;; =============================================================================
 ;; Grounding/Hallucination Detection
@@ -56,6 +72,76 @@ The LLM was given these inputs:
   \"ungrounded-claims\": [\"list of claims that are NOT supported\"],
   \"feedback\": \"Specific actionable feedback explaining the score. Include suggestions for improvement.\"
 }"})
+
+;; =============================================================================
+;; PA-3 — Grounding judge: decoupled criteria + discrete-band Scale
+;; =============================================================================
+;;
+;; These three artifacts are kept SEPARATE on purpose (the tier-1 decoupling):
+;;   GROUNDING_CRITERIA — WHAT to evaluate (the dimension's definition)
+;;   GROUNDING_STANCE   — HOW to behave (adversarial, source-grounded persona)
+;;   GROUNDING_SCALE    — HOW to score (a first-class discrete 1-5 Scale)
+;; The judge composes them; none of them embeds the others.
+
+(def GROUNDING_CRITERIA
+  "WHAT the grounding judge evaluates. Decoupled from the scale + stance."
+  (str "Grounding measures whether every factual claim in the RESPONSE can be "
+       "traced to the SOURCE (the inputs/context the producer was given). "
+       "An ungrounded claim is any statement of fact, number, name, date, or "
+       "entity that is NOT present in or directly entailed by the source — "
+       "even if it sounds plausible or is generally true in the world. "
+       "Contradicting the source is worse than merely adding unsupported "
+       "detail. Generic framing, hedging, and restating the task are neither "
+       "grounded nor ungrounded claims — judge the substantive factual "
+       "content."))
+
+(def GROUNDING_STANCE
+  "HOW the grounding judge behaves: an adversarial, source-grounded reviewer.
+   This is the cheap, high-value calibration move (ADR 0011): the judge
+   defends the null that the output is NOT grounded and hunts for flaws."
+  (str "You are a skeptical, adversarial reviewer. Your default assumption is "
+       "that the response is NOT fully grounded until the source proves "
+       "otherwise. Actively hunt for claims the source does not support. Check "
+       "every specific fact, number, name, date, and entity against the "
+       "source — not against your own world knowledge, and never against the "
+       "producer's self-report. A confident, fluent response that invents one "
+       "specific fact is a grounding failure, not a success. First reason "
+       "through the evidence, THEN choose a band."))
+
+(def GROUNDING_SCALE
+  "PA-3 PROPOSED grounding Scale — PENDING HUMAN REVIEW (HITL).
+
+   A first-class discrete 1-5 scale with explicit per-level bands, decoupled
+   from the criteria/stance. Mapped deterministically to [0,1] via
+   scale/level->unit-score (1→0.0, 2→0.25, 3→0.5, 4→0.75, 5→1.0).
+
+   These band descriptions were calibrated against REAL bench-document
+   traces (employment_agreement.txt, yyj_rfp-derived) scored live on
+   OpenRouter — see development/prototype_grounding_calibration.clj and the
+   PA-3 report. DO NOT treat this wording as finalized until reviewed."
+  (scale/discrete-scale
+    {:min 1 :max 5
+     :bands
+     {1 (str "Ungrounded / fabricated. The response contradicts the source on "
+             "central facts, or is about a different subject entirely, or "
+             "nearly all of its specific claims are inventions. A reader "
+             "relying on it would be badly misled.")
+      2 (str "Largely ungrounded. Multiple specific claims (facts, numbers, "
+             "names, dates, entities) are unsupported or wrong, OR one central "
+             "fact is fabricated/contradicted, even if some surrounding detail "
+             "is correct. More wrong than right on substance.")
+      3 (str "Mixed grounding. Most of the substance is supported, but there "
+             "are one or more clear unsupported claims or unverifiable "
+             "inferences stated as fact (not merely hedged). A reader should "
+             "verify before trusting it.")
+      4 (str "Well grounded. Every CORE fact traces to the source. Any "
+             "deviation is limited to a single low-stakes, clearly-hedged "
+             "extrapolation (e.g. 'likely', 'probably') or a minor imprecise "
+             "phrasing that does not mislead about a core fact.")
+      5 (str "Fully grounded. Every substantive factual claim is directly "
+             "supported by the source. No fabrication, no contradiction, and "
+             "no inference presented as fact — hedged or otherwise. Strictly "
+             "faithful to what the source says.")}}))
 
 ;; =============================================================================
 ;; Instruction Following
@@ -227,3 +313,24 @@ Evaluate completeness:
   (if keys
     (select-keys DEFAULT_RUBRICS keys)
     DEFAULT_RUBRICS))
+
+;; =============================================================================
+;; PA-3 — tier-1 grounding rubric accessor (criteria × stance × scale)
+;; =============================================================================
+
+(def GROUNDING_TIER1
+  "The redesigned grounding judge's decoupled pieces, bundled for the judge fn
+   to compose at call time. The Scale is first-class and separable."
+  {:name "Source Grounding"
+   :weight 0.35
+   :criteria GROUNDING_CRITERIA
+   :stance GROUNDING_STANCE
+   :scale GROUNDING_SCALE})
+
+(defn get-tier1-rubric
+  "Get a redesigned (tier-1) rubric by key. Currently only :grounding (PA-3);
+   the rest migrate in PA-4."
+  [key]
+  (case key
+    :grounding GROUNDING_TIER1
+    nil))
