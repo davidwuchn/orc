@@ -27,7 +27,7 @@ LLM-as-judge evaluation for ORC sheet service executions, with GEPA-compatible f
 
 ## PA-3 (2026-06): tier-1 grounding judge redesign — decoupled discrete Scale + reason-before-score
 
-> **Status: the grounding judge has moved to the tier-1 shape (ADR 0011 / `doc/judge-framework-verdict-notes.md`). The other three LLM judges migrate in PA-4.** The grounding judge's proposed 1–5 **band wording is PENDING HUMAN REVIEW** — see `GROUNDING_SCALE` in `core/rubrics.clj` and the PA-3 calibration evidence.
+> **Status: the grounding judge has moved to the tier-1 shape (ADR 0011 / `doc/judge-framework-verdict-notes.md`). The other three LLM judges migrate in PA-4.** The grounding judge's 1–5 **band wording is FINALIZED (keep-strict, human-reviewed 2026-06-16)** — see `GROUNDING_SCALE` in `core/rubrics.clj` and the PA-3 calibration evidence.
 
 A judge is **one evaluation capability** producing a score + feedback. It is **not inherently a pass/fail gate**; the *same* judge is deployable two ways (both first-class): event-subscribed/out-of-band (`:judge/score-emitted` → consolidator/GEPA) or in-pipeline as behavior-tree gate logic. Improving the built-in judge benefits both modes.
 
@@ -40,7 +40,7 @@ What changed for grounding:
 
 `grounding-result` now carries the **back-compatible** `{:score :grounded-claims :ungrounded-claims :feedback}` PLUS richer `{:level :reasoning}`. Consumers reading `:score` (incl. the per-event runtime → `:judge/score-emitted`) are unaffected.
 
-### Calibration evidence (real traces, live OpenRouter — PENDING REVIEW)
+### Calibration evidence (real traces, live OpenRouter)
 
 Scored real responses built from the real bench doc `employment_agreement.txt` (model `google/gemini-2.5-flash`), via `development/prototype_grounding_calibration.clj`:
 
@@ -52,7 +52,7 @@ Scored real responses built from the real bench doc `employment_agreement.txt` (
 | Fabricated specifics (wrong title/salary/date) | 1 | 0.00 |
 | Contradicts source / different subject | 1 | 0.00 |
 
-Bands are **strictly monotonic** with degrading quality and **stable across repeats** (faithful→5 ×3, fabricated→1 ×3) — the discrete-scale anti-mode-collapse thesis confirmed on real data. The adversarial stance grades ~1 band **stricter** in the middle than lenient hand-labels (a single explicit inference drops a response below band 4) — that strictness level is the **open policy question for human review**.
+Bands are **strictly monotonic** with degrading quality and **stable across repeats** (faithful→5 ×3, fabricated→1 ×3) — the discrete-scale anti-mode-collapse thesis confirmed on real data. The adversarial stance grades ~1 band **stricter** in the middle than lenient hand-labels (a single explicit inference drops a response below band 4). **Human-reviewed decision (2026-06-16): keep strict** — any inference-as-fact, even hedged, caps at band 3; band-4 wording was aligned to this. Rationale: grounding is the failure mode the flywheel must catch, balanced by the other dimension judges, the satisfaction judge, and human-gated GEPA acceptance (watch for Goodhart toward terse inference-free answers).
 
 ## Overview
 

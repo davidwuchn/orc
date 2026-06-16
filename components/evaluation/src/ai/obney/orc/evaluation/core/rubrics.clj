@@ -109,7 +109,7 @@ The LLM was given these inputs:
        "through the evidence, THEN choose a band."))
 
 (def GROUNDING_SCALE
-  "PA-3 PROPOSED grounding Scale — PENDING HUMAN REVIEW (HITL).
+  "PA-3 grounding Scale — REVIEWED & FINALIZED 2026-06-16 (keep-strict).
 
    A first-class discrete 1-5 scale with explicit per-level bands, decoupled
    from the criteria/stance. Mapped deterministically to [0,1] via
@@ -118,7 +118,10 @@ The LLM was given these inputs:
    These band descriptions were calibrated against REAL bench-document
    traces (employment_agreement.txt, yyj_rfp-derived) scored live on
    OpenRouter — see development/prototype_grounding_calibration.clj and the
-   PA-3 report. DO NOT treat this wording as finalized until reviewed."
+   PA-3 report. Strictness policy (human-reviewed): ANY inference presented
+   as fact — even hedged ('likely', 'probably') — caps at band 3. Grounding
+   is deliberately unforgiving; balanced by the other dimension judges, the
+   satisfaction judge, and human-gated GEPA acceptance."
   (scale/discrete-scale
     {:min 1 :max 5
      :bands
@@ -131,13 +134,13 @@ The LLM was given these inputs:
              "fact is fabricated/contradicted, even if some surrounding detail "
              "is correct. More wrong than right on substance.")
       3 (str "Mixed grounding. Most of the substance is supported, but there "
-             "are one or more clear unsupported claims or unverifiable "
-             "inferences stated as fact (not merely hedged). A reader should "
-             "verify before trusting it.")
-      4 (str "Well grounded. Every CORE fact traces to the source. Any "
-             "deviation is limited to a single low-stakes, clearly-hedged "
-             "extrapolation (e.g. 'likely', 'probably') or a minor imprecise "
-             "phrasing that does not mislead about a core fact.")
+             "are one or more unsupported claims or inferences presented as "
+             "fact — INCLUDING hedged ones ('likely', 'probably'). A reader "
+             "should verify before trusting it.")
+      4 (str "Well grounded. Every substantive claim traces to the source; "
+             "the only deviation is a minor imprecise phrasing or omission "
+             "that does not mislead about a fact. NO inference or extrapolation "
+             "presented as fact, even hedged — any such claim caps at band 3.")
       5 (str "Fully grounded. Every substantive factual claim is directly "
              "supported by the source. No fabrication, no contradiction, and "
              "no inference presented as fact — hedged or otherwise. Strictly "
