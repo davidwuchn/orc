@@ -590,7 +590,7 @@ Create deterministic executors for testing:
 
 ## Attaching Judges to Nodes
 
-Judges are evaluators that grade a node's outputs after execution and emit `:judge/score-emitted` events. The judge system is **general** — any `:leaf` or `:repl-researcher` node can have judges attached. RLM-specific defaults (the 5 default judges auto-attached to `:repl-researcher` when the Living Description opt-in flag is on) are covered separately in [`RLM-GUIDE.md`](RLM-GUIDE.md#attaching-judges-to-your-behavior-trees); this section is the general attachment surface.
+Judges are evaluators that grade a node's outputs after execution and emit `:judge/score-emitted` events. The judge system is **general** — any `:leaf` or `:repl-researcher` node can have judges attached. RLM-specific defaults (the 5 default judges auto-attached to `:repl-researcher` when the Living Description opt-in flag is on) are covered separately in [`RLM-GUIDE.md`](RLM-GUIDE.md#judges-on-repl-researcher-nodes-rlm-specific-defaults--living-description-loop); this section is the general attachment surface.
 
 ### Two-step attachment
 
@@ -632,6 +632,8 @@ Judges attach in two steps via existing commands (no DSL change needed):
 | `:completeness` | LLM judge — does the output cover all required aspects? | `judges/completeness-judge` |
 | `:heuristic-structural` | Deterministic — grades shape of `:writes :generated-tree-raw` if present | `heuristic-structural/evaluate-tree-structure` |
 | `:custom` | Consumer-defined ORC workflow as judge — see below | `invoke-custom-judge` |
+
+> The four built-in LLM judges (`:grounding`, `:instruction-following`, `:reasoning`, `:completeness`) run the **tier-1 shape** (ADR 0011): a decoupled discrete **1–5 `Scale`**, an adversarial reviewer stance, **reason-before-score**, typed-blackboard output (no `:output-schemas`, no JSON-in-prompt), and a no-run-through gate. The emitted `:score` is `[0,1]` derived deterministically from the band. See [`EVALUATION-COMPONENT.md`](EVALUATION-COMPONENT.md#tier-1-judge-model-2026-06-decoupled-discrete-scale--reason-before-score--all-four-llm-judges).
 
 ### When judges fire
 

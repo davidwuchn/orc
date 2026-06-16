@@ -855,11 +855,13 @@ When the Living Description opt-in flag is on, every `:repl-researcher` node tha
 
 | Judge | What it grades | Implementation |
 |---|---|---|
-| `heuristic-structural` | The shape of the tree the model emitted in Phase 1 | Pure heuristic over `:generated-tree-raw` |
-| `grounding` | Are the output claims supported by the original inputs? | LLM with structured-output rubric |
-| `reasoning` | Logical consistency of the model's chain of thought | LLM rubric |
-| `completeness` | Does the output cover what the instruction asked? | LLM rubric |
-| `instruction-following` | Did the model follow the explicit task requirements? | LLM rubric |
+| `heuristic-structural` | The shape of the tree the model emitted in Phase 1 | Pure heuristic over `:generated-tree-raw` (deterministic, no LLM; keeps its `[0,1]` shape directly) |
+| `grounding` | Are the output claims supported by the original inputs? | Tier-1 LLM judge: adversarial source-grounded, reason-before-score, discrete 1–5 `Scale` |
+| `reasoning` | Logical consistency of the model's chain of thought | Tier-1 LLM judge: adversarial logician, reason-before-score, discrete 1–5 `Scale` |
+| `completeness` | Does the output cover what the instruction asked? | Tier-1 LLM judge: adversarial coverage auditor, reason-before-score, discrete 1–5 `Scale` |
+| `instruction-following` | Did the model follow the explicit task requirements? | Tier-1 LLM judge: adversarial compliance auditor, reason-before-score, discrete 1–5 `Scale` |
+
+> **Tier-1 judge shape (ADR 0011 / [`EVALUATION-COMPONENT.md`](EVALUATION-COMPONENT.md#tier-1-judge-model-2026-06-decoupled-discrete-scale--reason-before-score--all-four-llm-judges)):** the four LLM judges score on a decoupled discrete **1–5 `Scale`** (explicit per-level bands, mapped deterministically to `[0,1]`), take an **adversarial reviewer stance**, and **reason before they score** (field order forces `:reasoning` + evidence lists before the `:level` band). Output is carried by the **typed blackboard** — no `:output-schemas`, no JSON-in-the-prompt — and a **no-run-through gate** throws on empty/garbage output rather than emitting a silent 0. The `:judge/score-emitted` event still carries a `[0,1]` `:score`, so the consolidator pipeline below is unchanged; the score is just no longer a self-reported float — it's derived from the band.
 
 Consumers can override defaults by explicitly calling `:sheet/set-node-judges` on a repl-researcher node — then ONLY their list applies. To turn the loop on:
 

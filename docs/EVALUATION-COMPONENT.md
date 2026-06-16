@@ -25,24 +25,41 @@ LLM-as-judge evaluation for ORC sheet service executions, with GEPA-compatible f
 ;; => {:score 0.85, :feedback "Well grounded...", :dimensions [...]}
 ```
 
-## PA-3 (2026-06): tier-1 grounding judge redesign — decoupled discrete Scale + reason-before-score
+## Tier-1 judge model (2026-06): decoupled discrete Scale + reason-before-score — ALL FOUR LLM judges
 
-> **Status: the grounding judge has moved to the tier-1 shape (ADR 0011 / `doc/judge-framework-verdict-notes.md`). The other three LLM judges migrate in PA-4.** The grounding judge's 1–5 **band wording is FINALIZED (keep-strict, human-reviewed 2026-06-16)** — see `GROUNDING_SCALE` in `core/rubrics.clj` and the PA-3 calibration evidence.
+> **Status: all four built-in LLM judges run the tier-1 shape (ADR 0011 / `doc/judge-framework-verdict-notes.md`). Grounding migrated in PA-3; instruction-following, reasoning, and completeness migrated in PA-4 — they mirror grounding exactly.** Grounding's 1–5 **band wording is FINALIZED (keep-strict, human-reviewed 2026-06-16)** — see `GROUNDING_SCALE` in `core/rubrics.clj`; the PA-4 dimensions carry the same keep-strict band philosophy.
+>
+> This is the canonical, live judge shape. The old soft `0.0–1.0` bundled rubrics (`GROUNDING_RUBRIC`, `INSTRUCTION_FOLLOWING_RUBRIC`, `REASONING_QUALITY_RUBRIC`, `COMPLETENESS_RUBRIC` with their "1.0 Excellent / 0.8 Good" anchors and JSON-in-prompt) are **retained in `core/rubrics.clj` only for legacy retrospective code paths** — they are NOT what the live judges use.
 
-A judge is **one evaluation capability** producing a score + feedback. It is **not inherently a pass/fail gate**; the *same* judge is deployable two ways (both first-class): event-subscribed/out-of-band (`:judge/score-emitted` → consolidator/GEPA) or in-pipeline as behavior-tree gate logic. Improving the built-in judge benefits both modes.
+A judge is **one evaluation capability** producing a score + feedback. It is **not inherently a pass/fail gate**; the *same* judge is deployable two ways (both first-class): event-subscribed/out-of-band (`:judge/score-emitted` → consolidator/GEPA — the learning path) or in-pipeline as behavior-tree gate logic (its verdict gates flow; adds per-turn inference). Improving the built-in judge benefits both modes.
 
-What changed for grounding:
+What the tier-1 shape is (identical across grounding, instruction-following, reasoning, completeness):
 
-1. **Decoupled `Scale`** (`core/scale.clj`) — a first-class artifact separate from the criteria/stance. `discrete-scale` builds a discrete **1–5 with an explicit per-level band description**; `level->unit-score` maps it **deterministically** to `[0,1]` (1→0.0, 2→0.25, 3→0.5, 4→0.75, 5→1.0) so storage/aggregation shape is unchanged. The grounding judge's three pieces are kept separate: `GROUNDING_CRITERIA` (what), `GROUNDING_STANCE` (how to behave — adversarial), `GROUNDING_SCALE` (how to score).
-2. **Adversarial, source-grounded, reason-before-score** — the judge takes a skeptical reviewer stance, grounds in the *source* (not the producer's self-report), and the output fields are **ordered so `:reasoning` + claim lists come BEFORE the discrete `:level`** (field order = generation order in the DSCloj tool schema). There is **no self-reported float score**; `:score` is derived from the band.
-3. **Structured output via the typed blackboard** — DSCloj input/output fields with `{:description …}`. **No `:output-schemas`, no JSON-in-the-prompt.** The instruction names the fields and the bands; it carries no JSON example.
-4. **No-run-through gate** (`scale/gate-banded-output`) — empty/garbage model output **throws** (never a silent 0). In-pipeline this fails the node loudly; event-subscribed the runtime isolates + mulog-logs it.
+1. **Decoupled `Scale`** (`core/scale.clj`) — a first-class artifact separate from the criteria/stance. `discrete-scale` builds a discrete **1–5 with an explicit per-level band description**; `level->unit-score` maps it **deterministically** to `[0,1]` (1→0.0, 2→0.25, 3→0.5, 4→0.75, 5→1.0) so storage/aggregation shape is unchanged. Each judge keeps three pieces separate, bundled in `*_TIER1` and resolved via `rubrics/get-tier1-rubric`:
+   - **`*_CRITERIA`** — *what* to evaluate (the dimension's definition);
+   - **`*_STANCE`** — *how to behave* (an adversarial reviewer persona);
+   - **`*_SCALE`** — *how to score* (the first-class discrete 1–5 `Scale`).
+   None of the three embeds the others; the judge fn composes them at call time.
+2. **Adversarial, reason-before-score** — each judge takes a skeptical reviewer stance (grounding defends "not grounded"; instruction-following is a compliance auditor; reasoning is an adversarial logician; completeness is a coverage auditor). Grounding grades against the *source* only (never the producer's self-report). The output fields are **ordered so `:reasoning` + the dimension's evidence lists come BEFORE the discrete `:level`** (field order = generation order in the DSCloj tool schema). There is **no self-reported float score**; `:score` is derived deterministically from the band.
+3. **Structured output via the typed blackboard** — DSCloj input/output fields with `{:description …}`. **No `:output-schemas`, no JSON-in-the-prompt.** The instruction names the fields and the bands; it carries no JSON example and no "return only JSON" directive. The trace data is passed as typed INPUT fields, not interpolated into the instruction.
+4. **No-run-through gate** (`scale/gate-banded-output`) — empty/garbage model output (or a missing/unusable `:level`) **throws** (never a silent 0). This catches structured-output regressions. In-pipeline this fails the node loudly; event-subscribed the runtime isolates + mulog-logs it.
 
-`grounding-result` now carries the **back-compatible** `{:score :grounded-claims :ungrounded-claims :feedback}` PLUS richer `{:level :reasoning}`. Consumers reading `:score` (incl. the per-event runtime → `:judge/score-emitted`) are unaffected.
+Each judge's result now carries the **back-compatible** dimension shape (e.g. `grounding-result` → `{:score :grounded-claims :ungrounded-claims :feedback}`, `instruction-result` → `{:score :requirements-met :requirements-missed :feedback}`, `reasoning-result` → `{:score :reasoning-strengths :reasoning-weaknesses :feedback}`, `completeness-result` → `{:score :aspects-covered :aspects-missing :feedback}`) PLUS richer `{:level :reasoning}`. Consumers reading `:score` (incl. the per-event runtime → `:judge/score-emitted`) are unaffected.
+
+### Keep-strict band philosophy (ADR 0011)
+
+Every dimension's band-4 wording caps a response at band 3 the moment it crosses the dimension's red line — and only a fully-clean response reaches band 5:
+
+- **Grounding:** ANY inference presented as fact — even hedged ("likely", "probably") — caps at band 3.
+- **Instruction-following:** ANY missed required component or violated prohibition caps at band 3.
+- **Reasoning:** ANY logical leap presented as established caps at band 3.
+- **Completeness:** ANY required aspect missing, or answered as a thin stub, caps at band 3.
+
+Strictness is deliberate (grounding/coverage/compliance/soundness are the failure modes the flywheel must catch) and is balanced by the other dimension judges, the turn-level satisfaction judge, and human-gated GEPA acceptance (watch for Goodhart toward terse, inference-free answers).
 
 ### Calibration evidence (real traces, live OpenRouter)
 
-Scored real responses built from the real bench doc `employment_agreement.txt` (model `google/gemini-2.5-flash`), via `development/prototype_grounding_calibration.clj`:
+Grounding bands were scored against real responses built from the real bench doc `employment_agreement.txt` (model `google/gemini-2.5-flash`), via `development/prototype_grounding_calibration.clj`; the PA-4 dimensions were calibrated the same way (`development/src/prototype_tier1_calibration.clj`):
 
 | Crafted response (degrading grounding) | judge band | score |
 |---|---|---|
@@ -52,7 +69,7 @@ Scored real responses built from the real bench doc `employment_agreement.txt` (
 | Fabricated specifics (wrong title/salary/date) | 1 | 0.00 |
 | Contradicts source / different subject | 1 | 0.00 |
 
-Bands are **strictly monotonic** with degrading quality and **stable across repeats** (faithful→5 ×3, fabricated→1 ×3) — the discrete-scale anti-mode-collapse thesis confirmed on real data. The adversarial stance grades ~1 band **stricter** in the middle than lenient hand-labels (a single explicit inference drops a response below band 4). **Human-reviewed decision (2026-06-16): keep strict** — any inference-as-fact, even hedged, caps at band 3; band-4 wording was aligned to this. Rationale: grounding is the failure mode the flywheel must catch, balanced by the other dimension judges, the satisfaction judge, and human-gated GEPA acceptance (watch for Goodhart toward terse inference-free answers).
+Bands are **strictly monotonic** with degrading quality and **stable across repeats** (faithful→5 ×3, fabricated→1 ×3) — the discrete-scale anti-mode-collapse thesis confirmed on real data. The adversarial stance grades ~1 band **stricter** in the middle than lenient hand-labels (a single explicit inference drops a response below band 4). **Human-reviewed decision (2026-06-16): keep strict** (see the band philosophy above); band-4 wording was aligned to this.
 
 ## Overview
 
@@ -92,7 +109,7 @@ When the Living Description opt-in flag is on, the
 in parallel via futures. Score events land as `:judge/score-emitted`
 in the event store, and the consolidator integrates them on the next
 reflection cycle. See
-[`RLM-GUIDE.md` § Attaching judges to your behavior trees](RLM-GUIDE.md#attaching-judges-to-your-behavior-trees)
+[`RLM-GUIDE.md` § Judges on repl-researcher nodes](RLM-GUIDE.md#judges-on-repl-researcher-nodes-rlm-specific-defaults--living-description-loop)
 for the full attach-and-fire flow.
 
 Inline evaluation costs N extra LLM calls per qualifying node tick
@@ -311,24 +328,22 @@ Built-in judges:
 - `reasoning-judge` - Logical coherence
 - `completeness-judge` - Coverage completeness
 
-### Rubric
+### Rubric (tier-1: decoupled criteria × stance × Scale)
 
-A prompt template that defines evaluation criteria. Each rubric includes:
+A tier-1 rubric is **not** a single bundled prompt string. It keeps the three concerns separate and is resolved via `rubrics/get-tier1-rubric`:
 
 ```clojure
-{:name "Source Grounding"
- :weight 0.35
- :description "Evaluates whether response is grounded in context"
- :prompt "You are evaluating whether an LLM response is grounded...
-
-          ## Scoring Rubric
-          - 1.0 (Excellent): Every claim traceable, no hallucinations
-          - 0.8 (Good): Almost all claims grounded
-          ...
-
-          ## Required Output (JSON)
-          {\"score\": <float>, \"grounded-claims\": [...], ...}"}
+(rubrics/get-tier1-rubric :grounding)
+;; => {:name "Source Grounding"
+;;     :weight 0.35
+;;     :criteria GROUNDING_CRITERIA   ;; WHAT to evaluate (decoupled)
+;;     :stance   GROUNDING_STANCE     ;; HOW to behave — adversarial (decoupled)
+;;     :scale    GROUNDING_SCALE}     ;; HOW to score — a first-class discrete 1–5 Scale
 ```
+
+The judge fn composes `stance + criteria + (scale/render-bands scale)` into a short, field-name-oriented instruction at call time. The output shape is carried by the **typed blackboard** (DSCloj output fields with `{:description …}`), so there is **no `## Required Output (JSON)` block** and **no "1.0 Excellent / 0.8 Good" soft anchor** in the prompt — the per-level band descriptions ARE the scoring anchors.
+
+> The old single-string `*_RUBRIC` defs (with embedded `## Scoring Rubric` soft-0–1 anchors and a `## Required Output (JSON)` example) survive in `core/rubrics.clj` **only for legacy retrospective code paths**. The live judges use the tier-1 rubrics above.
 
 ---
 
@@ -352,15 +367,19 @@ A prompt template that defines evaluation criteria. Each rubric includes:
 > reflection stays alongside the composite — consumers who want the
 > independent per-judge signal aren't disrupted.
 
+> **All four LLM judges below run the tier-1 shape** (decoupled discrete 1–5 Scale, adversarial reason-before-score, typed-blackboard output, no-run-through gate — see the [tier-1 section](#tier-1-judge-model-2026-06-decoupled-discrete-scale--reason-before-score--all-four-llm-judges) above). In every judge result, `:score` is a `[0,1]` value **derived deterministically from the discrete `:level` band** (the model never self-reports a float). Each result also carries the richer tier-1 fields `:level` (the 1–5 band) and `:reasoning` (the adversarial analysis written before the band was chosen).
+
 ### 1. Grounding Judge (advisory 35% weight)
 
-Detects hallucinations by checking if claims are supported by input context.
+Adversarial, source-grounded reviewer: detects hallucinations by checking whether every substantive claim traces to the source (the inputs), never the producer's self-report.
 
 **Output fields:**
-- `score`: 0.0-1.0
-- `grounded-claims`: List of claims supported by inputs
-- `ungrounded-claims`: List of unsupported claims (hallucinations)
+- `reasoning`: Adversarial source-grounded analysis (written BEFORE the band)
+- `grounded-claims`: List of substantive claims supported by the source
+- `ungrounded-claims`: List of unsupported claims (fabrications, unsupported numbers/names/dates, inferences stated as fact)
+- `level`: The chosen 1–5 grounding band
 - `feedback`: Actionable improvement suggestions
+- `score`: `[0,1]`, derived deterministically from `:level` via the Scale
 
 **Example:**
 ```clojure
@@ -380,13 +399,15 @@ Detects hallucinations by checking if claims are supported by input context.
 
 ### 2. Instruction Following Judge (advisory 25% weight)
 
-Evaluates whether the LLM followed its given instruction.
+Adversarial compliance auditor: enumerates the instruction's explicit requirements AND prohibitions, then checks each against the response.
 
 **Output fields:**
-- `score`: 0.0-1.0
-- `requirements-met`: List of instruction requirements satisfied
-- `requirements-missed`: List of requirements not satisfied
+- `reasoning`: Adversarial compliance audit (written BEFORE the band)
+- `requirements-met`: Explicit instruction requirements that WERE satisfied
+- `requirements-missed`: Requirements not satisfied, or prohibitions violated
+- `level`: The chosen 1–5 instruction-following band
 - `feedback`: Suggestions for better compliance
+- `score`: `[0,1]`, derived deterministically from `:level` via the Scale
 
 **Example:**
 ```clojure
@@ -405,31 +426,35 @@ Evaluates whether the LLM followed its given instruction.
 
 ### 3. Reasoning Judge (advisory 20% weight)
 
-Evaluates the coherence and quality of reasoning.
+Adversarial logician: traces the inference chain from premises to conclusion and attacks the weakest link.
 
 **Output fields:**
-- `score`: 0.0-1.0
-- `reasoning-strengths`: Aspects of reasoning that were good
-- `reasoning-weaknesses`: Logical gaps or unclear elements
-- `feedback`: Suggestions for clearer reasoning
+- `reasoning`: Adversarial logical analysis (written BEFORE the band)
+- `reasoning-strengths`: Aspects of the inference chain that are sound
+- `reasoning-weaknesses`: Logical gaps, unstated assumptions, non-sequiturs, overreaching conclusions
+- `level`: The chosen 1–5 reasoning-quality band
+- `feedback`: Suggestions for clearer, more rigorous reasoning
+- `score`: `[0,1]`, derived deterministically from `:level` via the Scale
 
 ### 4. Completeness Judge (advisory 20% weight)
+
+Adversarial coverage auditor: enumerates the distinct aspects the task required, then checks each against the response for presence AND sufficient detail.
+
+**Output fields:**
+- `reasoning`: Adversarial coverage audit (written BEFORE the band)
+- `aspects-covered`: Required aspects addressed with sufficient detail
+- `aspects-missing`: Required aspects missing or answered only as thin stubs
+- `level`: The chosen 1–5 completeness band
+- `feedback`: Suggestions for better coverage
+- `score`: `[0,1]`, derived deterministically from `:level` via the Scale
 
 ### 5. Heuristic Structural Judge (added 2026-06; deterministic, no LLM)
 
 Pure-Clojure heuristic that grades the SHAPE of a tree the model produced (via `:generated-tree-raw` in the host's writes). Looks for patterns like declared `:output-schemas`, presence of `:aggregate` for deterministic merges, `:max-concurrency` on `:map-each`, etc. Returns a score reflecting "how well-formed is this tree as a behavior tree?"
 
-Fires alongside the 4 LLM judges when Living Description is on. No LLM cost. Also fires per `:rlm/tree-generated` event (each intermediate Phase-1 emit-tree iteration), not just on terminal completion.
+This judge is **deterministic** — it keeps its `[0,1]` shape directly (no discrete `Scale`, no LLM call, so `get-tier1-rubric` returns `nil` for it). Fires alongside the 4 LLM judges when Living Description is on. No LLM cost. Also fires per `:rlm/tree-generated` event (each intermediate Phase-1 emit-tree iteration), not just on terminal completion.
 
 **Source:** `components/evaluation/src/.../core/heuristic_structural.clj`
-
-Evaluates whether all aspects of the task were addressed.
-
-**Output fields:**
-- `score`: 0.0-1.0
-- `aspects-covered`: Aspects that were addressed
-- `aspects-missing`: Aspects that should have been included
-- `feedback`: Suggestions for better coverage
 
 ---
 
@@ -696,36 +721,49 @@ When evaluating traces, the system automatically uses the criteria defined in th
 
 #### 2. Programmatic Rubric Access
 
-Access the built-in rubrics directly:
+Access the **tier-1** rubrics (criteria × stance × Scale) the live judges use:
 
 ```clojure
-;; Get a specific rubric
-(eval/get-rubric :grounding)
-;; => {:name "Source Grounding" :weight 0.35 :prompt "..."}
+;; Get a tier-1 rubric (the live judge shape)
+(rubrics/get-tier1-rubric :grounding)
+;; => {:name "Source Grounding" :weight 0.35
+;;     :criteria "..." :stance "..." :scale {:kind :discrete :min 1 :max 5 :bands {...}}}
 
-;; Get multiple rubrics
-(eval/get-rubrics [:grounding :reasoning])
-
-;; Get all default rubrics
-eval/DEFAULT_RUBRICS
+;; Available: :grounding :instruction-following :reasoning :completeness
+;; (returns nil for keys without a tier-1 rubric, e.g. :heuristic-structural)
 ```
+
+> `eval/get-rubric` / `eval/get-rubrics` / `eval/DEFAULT_RUBRICS` return the **legacy** soft-0–1 single-string rubrics. Those are retained for legacy retrospective code paths only — do not build new live judges on them.
 
 #### 3. Custom Judge Functions
 
-For complex domain-specific validation, create a custom judge function:
+For complex domain-specific validation, create a custom judge function. Follow the tier-1 shape: a decoupled discrete `Scale`, reason-before-score field ordering, typed-blackboard output (no JSON-in-prompt), and the no-run-through gate.
 
 ```clojure
-;; Custom judge with domain-specific criteria
+(require '[ai.obney.orc.evaluation.core.scale :as scale])
+
+;; A custom domain Scale with explicit per-level bands (decoupled from criteria)
+(def domain-completeness-scale
+  (scale/discrete-scale
+    {:min 1 :max 5
+     :bands {1 "None of company name / budget / timeline / decision-maker present."
+             2 "Only one of the four required fields present."
+             3 "Two of the four present, or all four but most as thin stubs."
+             4 "Three of the four present with adequate detail."
+             5 "All four present with sufficient detail."}}))
+
 (defn my-completeness-judge
   [{:keys [inputs]}]
   (let [trace-data (get inputs :trace-data)
-        custom-rubric {:name "Domain Completeness"
-                       :prompt "Evaluate if response includes: company name,
-                                budget range, timeline, decision maker.
-                                Score 0.25 for each present element.
-                                ..."}
-        prompt (judges/render-rubric-prompt custom-rubric trace-data)]
-    {:completeness-result (judges/call-llm-judge prompt ...)}))
+        ;; Output fields are ordered :reasoning first, :level last
+        ;; (field order = generation order → reason-before-score). Each field
+        ;; is a typed DSCloj field with {:description ...} — never JSON-in-prompt.
+        raw (judges/call-tier1-judge-llm :completeness
+                                         (custom-output-fields)
+                                         trace-data)
+        ;; no-run-through gate: throws on empty/garbage output; maps :level → :score
+        gated (scale/gate-banded-output domain-completeness-scale raw)]
+    {:completeness-result gated}))
 ```
 
 Or reference a custom evaluation sheet via the `:custom` judge type:
@@ -904,8 +942,9 @@ The evaluation component is designed to feed into GEPA-style instruction optimiz
 |------|---------|
 | `interface.clj` | Public API - all exports |
 | `core/feedback.clj` | ScoreWithFeedback, MetricDimension, feedback templates |
-| `core/judges.clj` | Judge implementations, LLM calling, configuration |
-| `core/rubrics.clj` | Evaluation prompt templates |
+| `core/scale.clj` | First-class decoupled discrete `Scale` (1–5 bands → `[0,1]`), band rendering, no-run-through gate |
+| `core/judges.clj` | Judge implementations (tier-1 reason-before-score), LLM calling, configuration |
+| `core/rubrics.clj` | Tier-1 rubrics (`*_CRITERIA`/`*_STANCE`/`*_SCALE`/`*_TIER1`, `get-tier1-rubric`); legacy soft-0–1 rubrics for retrospective paths |
 | `core/trace_extraction.clj` | Query traces from event store |
 | `core/sheets.clj` | ORC workflow definitions |
 | `development/src/evaluation_demo.clj` | Usage examples and demos |

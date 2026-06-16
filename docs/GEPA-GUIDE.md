@@ -192,11 +192,13 @@ Four judges evaluate LLM outputs:
 | `:reasoning` | 0.20 | Is reasoning clear and logical? |
 | `:completeness` | 0.20 | Are all aspects of the task addressed? |
 
-Each judge returns:
+Each tier-1 judge returns (ADR 0011 — adversarial, reason-before-score, discrete 1–5 band):
 ```clojure
-{:score 0.85          ;; 0.0 - 1.0
+{:score 0.75          ;; [0,1], derived deterministically from :level (NOT self-reported)
+ :level 4             ;; the discrete 1–5 band the judge chose
+ :reasoning "..."     ;; the adversarial analysis, written BEFORE the band
  :feedback "..."      ;; Actionable improvement suggestions
- :details {...}}      ;; Judge-specific details (grounded-claims, etc.)
+ ;; + dimension-specific evidence lists, e.g. :grounded-claims / :ungrounded-claims}
 ```
 
 ---
@@ -443,22 +445,25 @@ Each judge is an LLM-as-judge that evaluates trace data:
  :instruction "Answer concisely."}       ;; The instruction being evaluated
 ```
 
-### Judge Rubrics
+### Judge Rubrics (tier-1: decoupled criteria × stance × discrete Scale)
 
-Rubrics are defined in `evaluation/core/rubrics.clj`. Each rubric provides:
-- Scoring criteria (0.0 - 1.0 scale)
-- What constitutes excellent vs poor scores
-- Prompt template for the judge LLM
+Rubrics are defined in `evaluation/core/rubrics.clj` and resolved via `get-tier1-rubric`. Each tier-1 rubric keeps three concerns **decoupled** (ADR 0011):
+- **criteria** — *what* to evaluate;
+- **stance** — *how to behave* (an adversarial reviewer persona);
+- **scale** — *how to score* (a first-class discrete **1–5 `Scale`** with explicit per-level bands, mapped deterministically to `[0,1]`; 1→0.0 … 5→1.0).
 
-**Example: Grounding Rubric**
+The judge **reasons before it scores** (field order forces `:reasoning` + evidence lists before the `:level` band), and output is carried by the **typed blackboard** — there is **no soft "1.0 Excellent / 0.8 Good" anchor and no JSON-in-the-prompt**. The per-level band descriptions are the scoring anchors.
+
+**Example: Grounding bands (`GROUNDING_SCALE`, keep-strict)**
 ```
-1.0 (Excellent): Every claim is traceable to inputs, no hallucinations
-0.8 (Good): Almost all claims grounded, very minor extrapolations only
-0.6 (Adequate): Most claims grounded, some unsupported but plausible inferences
-0.4 (Poor): Significant ungrounded claims that could mislead
-0.2 (Very Poor): Most information not from inputs
-0.0 (Failed): Contains clear hallucinations or contradicts inputs
+5: Fully grounded — every substantive claim directly supported; no inference-as-fact.
+4: Well grounded — minor imprecision only; ANY inference-as-fact (even hedged) caps at 3.
+3: Mixed — one or more unsupported claims or inferences presented as fact (incl. hedged).
+2: Largely ungrounded — multiple unsupported specifics, or one central fact fabricated.
+1: Ungrounded / fabricated — contradicts the source or nearly all claims are inventions.
 ```
+
+> The old single-string soft-0–1 `*_RUBRIC` defs survive in `rubrics.clj` for legacy retrospective paths only. The live judges use the tier-1 rubrics above. Full detail: [`EVALUATION-COMPONENT.md`](EVALUATION-COMPONENT.md#tier-1-judge-model-2026-06-decoupled-discrete-scale--reason-before-score--all-four-llm-judges).
 
 ### Using Judges Directly
 
