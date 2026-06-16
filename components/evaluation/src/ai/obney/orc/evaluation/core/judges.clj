@@ -54,25 +54,35 @@
    [:feedback :string]])
 
 (def InstructionFollowingResultSchema
-  "Malli schema for instruction following judge output"
+  "Malli schema for instruction following judge output. PA-4: :score is now
+   derived from the discrete :level via the Scale (1-5 -> [0,1]); :level and
+   :reasoning are the richer tier-1 fields (reason-before-score)."
   [:map
    [:score :double]
+   [:level {:optional true} [:enum 1 2 3 4 5]]
+   [:reasoning {:optional true} :string]
    [:requirements-met [:vector :string]]
    [:requirements-missed [:vector :string]]
    [:feedback :string]])
 
 (def ReasoningResultSchema
-  "Malli schema for reasoning quality judge output"
+  "Malli schema for reasoning quality judge output. PA-4: tier-1 shape (see
+   InstructionFollowingResultSchema)."
   [:map
    [:score :double]
+   [:level {:optional true} [:enum 1 2 3 4 5]]
+   [:reasoning {:optional true} :string]
    [:reasoning-strengths [:vector :string]]
    [:reasoning-weaknesses [:vector :string]]
    [:feedback :string]])
 
 (def CompletenessResultSchema
-  "Malli schema for completeness judge output"
+  "Malli schema for completeness judge output. PA-4: tier-1 shape (see
+   InstructionFollowingResultSchema)."
   [:map
    [:score :double]
+   [:level {:optional true} [:enum 1 2 3 4 5]]
+   [:reasoning {:optional true} :string]
    [:aspects-covered [:vector :string]]
    [:aspects-missing [:vector :string]]
    [:feedback :string]])
@@ -204,47 +214,124 @@
    :outputs (grounding-output-fields)
    :instructions instruction})
 
+;; -----------------------------------------------------------------------------
+;; PA-4 tier-1 output fields (reason-before-score), per dimension.
+;;
+;; Field order in the DSCloj tool schema IS the generation order, so :reasoning
+;; and the dimension's evidence lists come BEFORE :level — the model reasons,
+;; THEN commits to a band. There is NO soft :score field; the score is derived
+;; deterministically from the discrete :level via the Scale. Output shape is
+;; carried entirely by these typed fields (the typed blackboard) — never by
+;; json-in-prompt and never by a permissive :output-schemas override.
+;; -----------------------------------------------------------------------------
+
 (defn- instruction-following-output-fields []
-  [{:name :score
-    :spec :double
-    :description "Score from 0.0 to 1.0"}
+  [{:name :reasoning
+    :spec :string
+    :description (str "Your adversarial compliance audit: enumerate the "
+                      "instruction's explicit requirements and prohibitions, "
+                      "then check each against the response. Write this BEFORE "
+                      "choosing a level.")}
    {:name :requirements-met
     :spec [:vector :string]
-    :description "List of instruction requirements that were satisfied"}
+    :description "Explicit instruction requirements that WERE satisfied."}
    {:name :requirements-missed
     :spec [:vector :string]
-    :description "List of instruction requirements that were NOT satisfied"}
+    :description (str "Explicit instruction requirements that were NOT "
+                      "satisfied, or prohibitions that were violated. Empty if "
+                      "none.")}
+   {:name :level
+    :spec [:enum 1 2 3 4 5]
+    :description "The instruction-following band (1-5) chosen AFTER the reasoning, per the bands defined in the instruction."}
    {:name :feedback
     :spec :string
-    :description "Specific actionable feedback explaining the score"}])
+    :description "Specific, actionable feedback the producer can act on to better follow the instruction."}])
 
 (defn- reasoning-output-fields []
-  [{:name :score
-    :spec :double
-    :description "Score from 0.0 to 1.0"}
+  [{:name :reasoning
+    :spec :string
+    :description (str "Your adversarial logical analysis: trace the inference "
+                      "chain from premises to conclusion and attack the "
+                      "weakest link. Write this BEFORE choosing a level.")}
    {:name :reasoning-strengths
     :spec [:vector :string]
-    :description "Aspects of reasoning that were good"}
+    :description "Aspects of the inference chain that are sound."}
    {:name :reasoning-weaknesses
     :spec [:vector :string]
-    :description "Logical gaps or unclear elements"}
+    :description (str "Logical gaps, unstated assumptions, non-sequiturs, or "
+                      "overreaching conclusions. Empty if none.")}
+   {:name :level
+    :spec [:enum 1 2 3 4 5]
+    :description "The reasoning-quality band (1-5) chosen AFTER the reasoning, per the bands defined in the instruction."}
    {:name :feedback
     :spec :string
-    :description "Specific actionable feedback for improving reasoning"}])
+    :description "Specific, actionable feedback the producer can act on to improve reasoning rigor."}])
 
 (defn- completeness-output-fields []
-  [{:name :score
-    :spec :double
-    :description "Score from 0.0 to 1.0"}
+  [{:name :reasoning
+    :spec :string
+    :description (str "Your adversarial coverage audit: enumerate the distinct "
+                      "aspects the task required, then check each against the "
+                      "response for presence and sufficient detail. Write this "
+                      "BEFORE choosing a level.")}
    {:name :aspects-covered
     :spec [:vector :string]
-    :description "Aspects of the task that were addressed"}
+    :description "Required aspects of the task that WERE addressed with sufficient detail."}
    {:name :aspects-missing
     :spec [:vector :string]
-    :description "Aspects that should have been included but weren't"}
+    :description (str "Required aspects that are missing or answered only as "
+                      "thin stubs. Empty if none.")}
+   {:name :level
+    :spec [:enum 1 2 3 4 5]
+    :description "The completeness band (1-5) chosen AFTER the reasoning, per the bands defined in the instruction."}
    {:name :feedback
     :spec :string
-    :description "Specific actionable feedback for improving completeness"}])
+    :description "Specific, actionable feedback the producer can act on to improve completeness."}])
+
+;; -----------------------------------------------------------------------------
+;; PA-4 tier-1 instruction composition + LLM call (mirrors the grounding pair).
+;; -----------------------------------------------------------------------------
+
+(defn build-tier1-instruction
+  "Compose a tier-1 judge's instruction from the DECOUPLED pieces:
+   stance (how to behave) + criteria (what to evaluate) + the Scale's bands
+   (how to score). Generic over the instruction-following / reasoning /
+   completeness dimensions (grounding keeps its own build-grounding-instruction
+   because it grades against the source ONLY, not the producer instruction).
+
+   Kept short and field-name-oriented per the structured-output rule: it tells
+   the model WHAT to do and names the output fields, but contains NO JSON
+   example and NO 'return only JSON' directive — the output shape is the typed
+   blackboard's job, not the prompt's. The trace data is passed as typed INPUT
+   fields (see build-tier1-module), not interpolated here."
+  [{:keys [criteria stance scale]}]
+  (str stance "\n\n"
+       "WHAT TO EVALUATE:\n" criteria "\n\n"
+       "You are given three inputs: `instruction` (the task the producer was "
+       "given), `response` (what the producer wrote), and `inputs` (the "
+       "context/material the producer had). Evaluate the response against the "
+       "instruction (and the inputs where relevant).\n\n"
+       "SCORING BANDS (choose exactly one level for the `level` field):\n"
+       (scale/render-bands scale) "\n\n"
+       "Fill `reasoning` first (adversarial analysis), then the evidence "
+       "lists, then choose `level`, then write `feedback`."))
+
+(defn- build-tier1-module
+  "DSCloj module for a tier-1 (instruction/reasoning/completeness) judge. Typed
+   INPUT fields carry the trace data; typed OUTPUT fields carry the verdict. No
+   json-in-prompt, no permissive output schema."
+  [instruction output-fields]
+  {:inputs [{:name :instruction
+             :spec :string
+             :description "The instruction the producer was given (the task to evaluate compliance/coverage against)."}
+            {:name :response
+             :spec :string
+             :description "The producer's output to evaluate."}
+            {:name :inputs
+             :spec :string
+             :description "The context/material the producer had (for relevance checks)."}]
+   :outputs output-fields
+   :instructions instruction})
 
 (defn call-llm-judge
   "Call an LLM to evaluate using the given prompt and parse the response.
@@ -297,6 +384,36 @@
                                 :model model})]
     (or (:outputs result) result)))
 
+(defn call-tier1-judge-llm
+  "PA-4 tier-1 LLM call for the instruction-following / reasoning / completeness
+   judges. Mirrors call-grounding-judge-llm: sends the trace data as typed
+   INPUT fields (instruction / response / inputs) and the decoupled instruction
+   composed from the rubric-key's criteria + stance + Scale bands. Returns the
+   raw parsed output map (with :reasoning, the dimension's evidence lists,
+   :level, :feedback) — gating + level->score mapping is the caller's job, so
+   the no-run-through gate sees the raw model output.
+
+   `output-fields` is the dimension's reason-before-score field vector."
+  [rubric-key output-fields trace-data & {:keys [provider model]
+                                          :or {provider *judge-provider*
+                                               model *judge-model*}}]
+  (let [rubric (rubrics/get-tier1-rubric rubric-key)
+        instruction (build-tier1-instruction rubric)
+        module (build-tier1-module instruction output-fields)
+        response (cond
+                   (:response trace-data) (:response trace-data)
+                   (string? (:outputs trace-data)) (:outputs trace-data)
+                   (:outputs trace-data) (json/generate-string (:outputs trace-data) {:pretty true})
+                   :else "")
+        inputs {:instruction (or (:instruction trace-data) "No instruction provided")
+                :response (str response)
+                :inputs (coerce-source-string (:inputs trace-data))}
+        result (dscloj/predict provider module inputs
+                               {:with-metadata? false
+                                :validate? false
+                                :model model})]
+    (or (:outputs result) result)))
+
 ;; =============================================================================
 ;; Mock LLM Responses (for testing)
 ;; =============================================================================
@@ -311,26 +428,30 @@
    :ungrounded-claims []
    :feedback "Mock evaluation. In production, this analyzes actual grounding against the source."})
 
-(defn- mock-instruction-following-result [prompt]
-  {:score 0.85
-   :requirements-met ["Mock: Main task addressed"]
+;; PA-4 tier-1 mocks mirror mock-grounding-result: a discrete :level +
+;; :reasoning, NOT a self-reported :score. The judge fn maps :level -> :score
+;; via the Scale, so the mocks deliberately omit :score to exercise that path.
+
+(defn- mock-instruction-following-result []
+  {:level 4
+   :reasoning "Mock compliance audit: main task and required components satisfied; one minor imprecision."
+   :requirements-met ["Mock: main task addressed"]
    :requirements-missed []
-   :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
-                  "In production, this would analyze instruction compliance.")})
+   :feedback "Mock evaluation. In production, this audits compliance with each instruction directive."})
 
-(defn- mock-reasoning-result [prompt]
-  {:score 0.75
-   :reasoning-strengths ["Mock: Clear logical structure"]
+(defn- mock-reasoning-result []
+  {:level 4
+   :reasoning "Mock logical analysis: chain is sound with one minor unstated-but-obvious assumption."
+   :reasoning-strengths ["Mock: clear logical structure"]
    :reasoning-weaknesses []
-   :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
-                  "In production, this would analyze reasoning quality.")})
+   :feedback "Mock evaluation. In production, this attacks the weakest link in the inference chain."})
 
-(defn- mock-completeness-result [prompt]
-  {:score 0.9
-   :aspects-covered ["Mock: Main aspects addressed"]
+(defn- mock-completeness-result []
+  {:level 4
+   :reasoning "Mock coverage audit: every required aspect addressed; one non-essential elaboration omitted."
+   :aspects-covered ["Mock: main aspects addressed"]
    :aspects-missing []
-   :feedback (str "Mock evaluation - prompt length: " (count prompt) " chars. "
-                  "In production, this would analyze completeness.")})
+   :feedback "Mock evaluation. In production, this audits coverage of every required aspect."})
 
 ;; =============================================================================
 ;; Judge Functions (Code Executor Pattern)
@@ -374,55 +495,93 @@
       :feedback (or (:feedback gated) "")}}))
 
 (defn instruction-following-judge
-  "Evaluate if the LLM followed its instruction.
+  "PA-4 tier-1 instruction-following judge: adversarial compliance auditor,
+   reason-before-score, on a decoupled discrete 1-5 Scale mapped
+   deterministically to [0,1]. Mirrors grounding-judge exactly.
 
    Input keys:
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     instruction-result: Map with :score, :requirements-met, :requirements-missed, :feedback"
+     instruction-result: BACK-COMPATIBLE shape
+       {:score (double 0-1) :requirements-met :requirements-missed :feedback}
+       PLUS the richer tier-1 fields {:level :reasoning}. :score is derived
+       from the discrete :level via the Scale, never self-reported.
+
+   The no-run-through gate (scale/gate-banded-output) THROWS on empty/garbage
+   model output."
   [{:keys [inputs] :as _executor-context}]
   (let [trace-data (:trace-data inputs)
-        rubric (rubrics/get-rubric :instruction-following)
-        prompt (render-rubric-prompt rubric trace-data)
-        result (if *use-mock-llm*
-                 (mock-instruction-following-result prompt)
-                 (call-llm-judge prompt (instruction-following-output-fields)))]
-    {:instruction-result result}))
+        the-scale (:scale (rubrics/get-tier1-rubric :instruction-following))
+        raw (if *use-mock-llm*
+              (mock-instruction-following-result)
+              (call-tier1-judge-llm :instruction-following
+                                    (instruction-following-output-fields)
+                                    trace-data))
+        gated (scale/gate-banded-output the-scale raw)]
+    {:instruction-result
+     {:score (:score gated)
+      :level (:level gated)
+      :requirements-met (vec (:requirements-met gated))
+      :requirements-missed (vec (:requirements-missed gated))
+      :reasoning (or (:reasoning gated) "")
+      :feedback (or (:feedback gated) "")}}))
 
 (defn reasoning-judge
-  "Evaluate the quality of reasoning in the response.
+  "PA-4 tier-1 reasoning-quality judge: adversarial logician, reason-before-
+   score, on a decoupled discrete 1-5 Scale mapped deterministically to [0,1].
+   Mirrors grounding-judge exactly.
 
    Input keys:
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     reasoning-result: Map with :score, :reasoning-strengths, :reasoning-weaknesses, :feedback"
+     reasoning-result: BACK-COMPATIBLE shape {:score :reasoning-strengths
+       :reasoning-weaknesses :feedback} PLUS {:level :reasoning}."
   [{:keys [inputs] :as _executor-context}]
   (let [trace-data (:trace-data inputs)
-        rubric (rubrics/get-rubric :reasoning)
-        prompt (render-rubric-prompt rubric trace-data)
-        result (if *use-mock-llm*
-                 (mock-reasoning-result prompt)
-                 (call-llm-judge prompt (reasoning-output-fields)))]
-    {:reasoning-result result}))
+        the-scale (:scale (rubrics/get-tier1-rubric :reasoning))
+        raw (if *use-mock-llm*
+              (mock-reasoning-result)
+              (call-tier1-judge-llm :reasoning
+                                    (reasoning-output-fields)
+                                    trace-data))
+        gated (scale/gate-banded-output the-scale raw)]
+    {:reasoning-result
+     {:score (:score gated)
+      :level (:level gated)
+      :reasoning-strengths (vec (:reasoning-strengths gated))
+      :reasoning-weaknesses (vec (:reasoning-weaknesses gated))
+      :reasoning (or (:reasoning gated) "")
+      :feedback (or (:feedback gated) "")}}))
 
 (defn completeness-judge
-  "Evaluate the completeness of the response.
+  "PA-4 tier-1 completeness judge: adversarial coverage auditor, reason-before-
+   score, on a decoupled discrete 1-5 Scale mapped deterministically to [0,1].
+   Mirrors grounding-judge exactly.
 
    Input keys:
      trace-data: Map with :inputs, :outputs/:response, :instruction
 
    Output keys:
-     completeness-result: Map with :score, :aspects-covered, :aspects-missing, :feedback"
+     completeness-result: BACK-COMPATIBLE shape {:score :aspects-covered
+       :aspects-missing :feedback} PLUS {:level :reasoning}."
   [{:keys [inputs] :as _executor-context}]
   (let [trace-data (:trace-data inputs)
-        rubric (rubrics/get-rubric :completeness)
-        prompt (render-rubric-prompt rubric trace-data)
-        result (if *use-mock-llm*
-                 (mock-completeness-result prompt)
-                 (call-llm-judge prompt (completeness-output-fields)))]
-    {:completeness-result result}))
+        the-scale (:scale (rubrics/get-tier1-rubric :completeness))
+        raw (if *use-mock-llm*
+              (mock-completeness-result)
+              (call-tier1-judge-llm :completeness
+                                    (completeness-output-fields)
+                                    trace-data))
+        gated (scale/gate-banded-output the-scale raw)]
+    {:completeness-result
+     {:score (:score gated)
+      :level (:level gated)
+      :aspects-covered (vec (:aspects-covered gated))
+      :aspects-missing (vec (:aspects-missing gated))
+      :reasoning (or (:reasoning gated) "")
+      :feedback (or (:feedback gated) "")}}))
 
 ;; =============================================================================
 ;; Aggregation Executor
