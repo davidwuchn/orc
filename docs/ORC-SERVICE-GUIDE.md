@@ -174,6 +174,18 @@ Iterate over a collection.
   (sheet/llm "process" ...))
 ```
 
+> **Parallel-safety — the leaf must be a primitive.** `map-each` collects each iteration from the
+> leaf's **explicit `:writes`, isolated per iteration** — that's what makes `:parallel` safe. A
+> **composite** leaf (`fallback`/`sequence`) completes with *empty* parent writes, so the engine
+> instead reads **all non-special keys off the per-iteration blackboard**; under `:parallel` that
+> **scrambles results across items**, and even sequentially a key written by only one branch
+> **bleeds** to later items. Keep a parallel `map-each` leaf a **primitive** (`llm`/`code`) with
+> explicit `:writes`; do **not** wrap it in a `fallback` whose writes you depend on. On a leaf
+> failure the engine isolates it — status `:partial`, the failed item **dropped and the result
+> vector compacted** (no index gap), and top-level `:failure-indices` is nil — so recover *which*
+> item failed from the event/trace channel and re-run/surface it at the parent (never ship a
+> compacted partial as complete). See ORC-PRINCIPLES Principle 14.
+
 ### Leaf Nodes
 
 #### `llm`

@@ -287,6 +287,32 @@ poisons the loop.
 by their specific process id, never with a blunt kill-all that would take down other
 work). When capturing or comparing model-authored artifacts, record them verbatim.
 
+## 14. A parallel `:map-each` leaf must be a primitive with explicit `:writes`
+
+A `:map-each` collects each iteration's result from the leaf's **explicit declared `:writes`,
+isolated per iteration** — that isolation is exactly what makes `:parallel` safe. A **composite**
+leaf (`:fallback`/`:sequence`) completes with *empty* parent `:writes`, so the engine falls back to
+reading **all non-special keys off the per-iteration blackboard**. That composite-read path is
+**not** parallel-safe (results scramble across concurrent iterations) and **bleeds stale keys** (a
+key the taken branch didn't write keeps a prior iteration's value).
+
+**Why it matters.** Wrapping a `:map-each` leaf in a `:fallback` — the natural reach for per-item
+recovery — silently switches collection from the isolated explicit-writes path to the racy
+composite-read path. Under `:parallel` the per-item results get **misattributed across items**; even
+sequentially, a key written by only one branch **bleeds forward** to later items. Shape/structural
+tests pass blind to this (the tree is well-formed) — only a **live, multi-iteration** run with a real
+per-item failure exposes it: the Principle-12 ceiling, not the floor.
+
+**How.** Keep every parallel `:map-each` leaf a **primitive** (`:llm`/`:code`) that declares its
+`:writes` explicitly; don't wrap the leaf in a composite whose writes you then depend on. For per-item
+recovery, handle failure **outside** the per-iteration collection: when a leaf fails the engine
+**isolates** it — the workflow does not abort (status `:partial`), the failed leaf is **dropped and
+the result vector compacts** (no index gap), and top-level `:failure-indices` is nil — so recovering
+*which* item failed comes from the **event/trace channel**, not the result map. Re-run or surface the
+gap at the parent; never present a compacted partial as complete. (Relatedly, node-scope shared keys
+in `:parallel`/`:map-each` — Principle 9.) Verify any `:map-each` fault handling with a live run that
+induces a real per-item failure. See also: `docs/ORC-SERVICE-GUIDE.md` (`map-each`), Principles 9 and 12.
+
 ---
 
 ## Where these come from
