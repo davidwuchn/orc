@@ -16,6 +16,7 @@
             [ai.obney.orc.gepa.interface :as gepa]
             [ai.obney.orc.gepa.interface.schemas]
             [ai.obney.orc.gepa.core.read-models :as rm]
+            [ai.obney.orc.gepa.core.todo-processors :as tp]
             [ai.obney.grain.event-store-v3.interface :as es]
             [ai.obney.grain.control-plane.interface :as control-plane]))
 
@@ -101,6 +102,26 @@
           (let [seed (first evaluated)]
             (println "  " (subs (str (get (:feedbacks seed) 0)) 0
                                 (min 400 (count (str (get (:feedbacks seed) 0)))))))
+          (println "\n--- seed per-instance generated OUTPUTS (instance 0) ---")
+          (let [seed (first evaluated)]
+            (println "  " (pr-str (get (:outputs seed) 0))))
+          ;; PROOF for #4: the reflective example the proposer actually sees now
+          ;; carries BOTH the real bad output AND the judges' rich feedback.
+          (println "\n--- reflective example shown to the proposer (seed, ex 0) ---")
+          (let [seed (first evaluated)
+                refl (tp/build-reflective-dataset
+                       ctx opt-id (:candidate-id seed)
+                       {:reflection-minibatch-size 3})
+                ex0 (first refl)]
+            (println "  #reflective-examples:" (count refl))
+            (println "  Generated Outputs:" (pr-str (get ex0 "Generated Outputs")))
+            (println "  Feedback (first 300):"
+                     (let [fb (str (get ex0 "Feedback"))]
+                       (subs fb 0 (min 300 (count fb)))))
+            (println "  PROOF both-present?:"
+                     (and (map? (get ex0 "Generated Outputs"))
+                          (seq (get ex0 "Generated Outputs"))
+                          (seq (str (get ex0 "Feedback"))))))
           (let [aggs (keep :aggregate-score (vals (:candidates pop-state)))
                 seed-score (double (:aggregate-score (first evaluated)))
                 best-score (double (or (:aggregate-score best) (:best-score result) 0.0))]

@@ -124,19 +124,27 @@
    weakest-first feedback) is used as the ReflectiveExample feedback INSTEAD of
    the legacy 'scored 0.XX' string. This is what lets the proposer turn a bad
    instruction into a good one. Falls back to the score string per-instance
-   when no rich feedback is available (back-compat)."
+   when no rich feedback is available (back-compat).
+
+   The per-instance generated `:outputs` (the candidate's actual bad answer for
+   each failing instance) are likewise put into the 'Generated Outputs' slot so
+   the proposer sees BOTH what was produced AND why it scored low. Falls back to
+   `{}` per-instance when no output was recorded (back-compat)."
   [context optimization-id candidate-id config]
   (let [event-store (:event-store context)
         failures (rm/get-failing-instances context optimization-id candidate-id)
         trainset (rm/get-trainset context optimization-id)
         ;; Per-instance RICH judge feedback recorded on candidate-evaluated.
         feedbacks (rm/get-candidate-feedbacks context optimization-id candidate-id)
+        ;; Per-instance generated outputs recorded on candidate-evaluated.
+        outputs (rm/get-candidate-outputs context optimization-id candidate-id)
         minibatch-size (get config :reflection-minibatch-size 3)]
 
     (u/log ::building-reflective-dataset
            :candidate-id candidate-id
            :num-failures (count failures)
            :num-rich-feedbacks (count feedbacks)
+           :num-outputs (count outputs)
            :minibatch-size minibatch-size)
 
     ;; Sample failures and build examples in Python GEPA format
@@ -151,12 +159,15 @@
                                    "")
                       ;; Prefer the judges' rich feedback; else legacy string.
                       feedback (reflective-feedback-for-instance
-                                 feedbacks instance-id score expected)]
+                                 feedbacks instance-id score expected)
+                      ;; The candidate's actual generated output for this
+                      ;; instance (the bad answer); {} when none was recorded.
+                      generated-output (get outputs instance-id {})]
                   ;; Return in exact Python GEPA ReflectiveExample format
                   (reflection/make-reflective-example
-                    input           ;; Inputs
-                    {}              ;; Generated Outputs (from trace if available)
-                    feedback))))    ;; Feedback string
+                    input             ;; Inputs
+                    generated-output  ;; Generated Outputs (the real bad answer)
+                    feedback))))      ;; Feedback string
          vec)))
 
 (defn select-component
@@ -234,9 +245,12 @@
   "Evaluate a candidate's instructions on the full validation set.
 
    Returns {:scores [double ...] :trace-ids [uuid ...]
-            :feedbacks {instance-idx -> feedback-string} :metric-calls int}.
+            :feedbacks {instance-idx -> feedback-string}
+            :outputs {instance-idx -> output-map} :metric-calls int}.
    :feedbacks only contains entries for examples whose metric supplied rich
-   feedback (the judge metric); structural metrics leave it empty."
+   feedback (the judge metric); structural metrics leave it empty. :outputs
+   carries the per-instance generated output blackboard so the reflective
+   dataset can show the proposer the actual (bad) answer text."
   [context sheet-id instructions valset metric-fn]
   (let [results (doall  ;; Force evaluation for side effects
                   (map-indexed
@@ -252,6 +266,9 @@
      :feedbacks (into {} (keep-indexed (fn [idx r]
                                          (when (:feedback r) [idx (:feedback r)]))
                                        results))
+     :outputs (into {} (keep-indexed (fn [idx r]
+                                       (when (some? (:output r)) [idx (:output r)]))
+                                     results))
      :metric-calls (count valset)}))
 
 (defn evaluate-candidate-on-subsample
@@ -582,6 +599,9 @@
            :scores (:scores eval-result)
            :trace-ids (:trace-ids eval-result)
            :feedbacks (:feedbacks eval-result)
+           ;; Per-instance generated outputs so the reflective dataset can
+           ;; show the proposer the actual (bad) answer text.
+           :outputs (:outputs eval-result)
            :metric-calls (:metric-calls eval-result)})))))
 
 ;; =============================================================================

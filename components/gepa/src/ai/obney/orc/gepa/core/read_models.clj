@@ -283,7 +283,7 @@
                      assoc :status :evaluating)
 
           :gepa/candidate-evaluated
-          (let [{:keys [candidate-id scores aggregate-score feedbacks metric-calls]} event]
+          (let [{:keys [candidate-id scores aggregate-score feedbacks outputs metric-calls]} event]
             (-> pop
                 (update-in [:candidates candidate-id] merge
                            {:scores scores
@@ -291,6 +291,9 @@
                             ;; Per-instance RICH judge feedback (instance-idx ->
                             ;; feedback string); used by build-reflective-dataset.
                             :feedbacks (or feedbacks {})
+                            ;; Per-instance generated OUTPUT (instance-idx ->
+                            ;; output map); used by build-reflective-dataset.
+                            :outputs (or outputs {})
                             :status :evaluated})
                 (update :evaluated (fnil conj #{}) candidate-id)
                 (update :total-metric-calls + (or metric-calls 0))))
@@ -609,6 +612,15 @@
   (let [pop-state (get-population-state ctx optimization-id)
         candidate (get-in pop-state [:candidates candidate-id])]
     (or (:feedbacks candidate) {})))
+
+(defn get-candidate-outputs
+  "Get the per-instance generated OUTPUT recorded for a candidate.
+   Returns map of {instance-idx -> output-map}, or {} if none (e.g. the
+   workflow produced no output, or this candidate predates output threading)."
+  [ctx optimization-id candidate-id]
+  (let [pop-state (get-population-state ctx optimization-id)
+        candidate (get-in pop-state [:candidates candidate-id])]
+    (or (:outputs candidate) {})))
 
 (defn get-failing-instances
   "Get instances where a candidate scored below threshold.
