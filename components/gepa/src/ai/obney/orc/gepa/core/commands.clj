@@ -174,7 +174,7 @@
 
    Called after workflow execution and trace collection.
    Updates the population with scores and triggers frontier update."
-  [{{:keys [optimization-id candidate-id scores trace-ids metric-calls]} :command
+  [{{:keys [optimization-id candidate-id scores trace-ids feedbacks metric-calls]} :command
     :keys [event-store] :as ctx}]
   (let [candidate (rm/get-candidate ctx optimization-id candidate-id)]
     (cond
@@ -202,6 +202,11 @@
                            :scores (vec scores)
                            :aggregate-score aggregate-score
                            :trace-ids (vec trace-ids)
+                           ;; Per-instance RICH judge feedback (instance-idx ->
+                           ;; weakest-first feedback string). Empty/absent for
+                           ;; structural metrics. The reflective dataset uses
+                           ;; this instead of the score-only string.
+                           :feedbacks (or feedbacks {})
                            :metric-calls metric-calls
                            :evaluated-at (time/now)}})]
          :command/result {:aggregate-score aggregate-score

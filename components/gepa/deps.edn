@@ -1,4 +1,8 @@
 {:paths ["src" "resources"]
- :deps {com.brunobonacci/mulog {:mvn/version "0.9.0"}}
+ :deps {com.brunobonacci/mulog {:mvn/version "0.9.0"}
+        ;; gepa's make-judge-metric runs the tier-1 evaluation judges as the
+        ;; real GEPA metric (grounding/instruction-following/reasoning/
+        ;; completeness), so it depends on the evaluation component.
+        orc/evaluation {:local/root "../evaluation"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {}}}}
