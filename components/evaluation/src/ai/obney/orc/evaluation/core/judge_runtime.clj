@@ -19,11 +19,32 @@
   (:require [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
             [ai.obney.grain.event-store-v3.interface :as es]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp :refer [defreadmodel]]
-            [ai.obney.orc.ontology.interface :as ontology]
             [ai.obney.orc.orc-service.interface :as orc]
             [ai.obney.orc.evaluation.core.judges :as judges]
             [ai.obney.orc.evaluation.core.heuristic-structural :as heuristic-structural]
             [com.brunobonacci.mulog :as u]))
+
+;; =============================================================================
+;; Living Description opt-in gate (lazily resolved)
+;; =============================================================================
+
+(defn- living-description-enabled?
+  "Return the system-level Living Description opt-in flag.
+
+   The flag lives in the ontology component. We resolve it lazily via
+   `requiring-resolve` so the evaluation component does NOT hard-depend on
+   ontology: judges run as a standalone capability (Layer 1) with no DJL,
+   no ColBERT, no Python on the classpath. When ontology is not present,
+   the flag is simply false — judges still fire on terminal execution and
+   emit `:judge/score-emitted`; only the self-improving write-side (which
+   needs ontology anyway) stays dormant. When ontology IS present this is
+   identical to calling `ontology/get-living-description-enabled?`."
+  [ctx]
+  (boolean
+   (when-let [f (try (requiring-resolve
+                      'ai.obney.orc.ontology.interface/get-living-description-enabled?)
+                     (catch Throwable _ nil))]
+     (f ctx))))
 
 ;; =============================================================================
 ;; Trace-data construction
@@ -556,7 +577,7 @@
                      (:judges node))))
 
            (and (= :repl-researcher (:type node))
-                (ontology/get-living-description-enabled? ctx))
+                (living-description-enabled? ctx))
            default-judges
 
            :else [])]
@@ -579,7 +600,7 @@
    redundant but kept for clarity / short-circuit before any node
    lookup."
   [{:keys [event] :as context}]
-  (when (ontology/get-living-description-enabled? context)
+  (when (living-description-enabled? context)
     (let [sheet-id (:sheet-id event)
           node-id (:node-id event)
           ;; Gap-7: pass the event's :completion-kind into the resolver
@@ -720,7 +741,7 @@
    (currently heuristic-structural) and invokes them in parallel with
    per-judge timeout — same discipline as on-node-execution-completed."
   [{:keys [event] :as context}]
-  (when (ontology/get-living-description-enabled? context)
+  (when (living-description-enabled? context)
     (let [tick-id (:execution-id event)
           raw-dsl (:raw-dsl event)
           direct-sheet-id (:sheet-id event)

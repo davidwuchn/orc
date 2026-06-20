@@ -1,0 +1,120 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" font-family="'SF Mono','Fira Code','Cascadia Code',monospace" font-size="12">
+  <rect width="900" height="500" fill="#f8fafc" rx="10"/>
+  <text x="24" y="28" font-size="14" font-weight="bold" fill="#0f172a">[:delegate] parent → child — concrete example</text>
+  <text x="24" y="46" font-size="11" fill="#64748b">The parent sheet registers the child first (build-workflow!). Then delegates to it by UUID. The child runs with its own isolated blackboard.</text>
+
+  <!-- parent sheet panel -->
+  <rect x="16" y="60" width="418" height="424" rx="10" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="16" y="60" width="418" height="34" rx="10" fill="#1e293b"/>
+  <rect x="16" y="84" width="418" height="10" fill="#1e293b"/>
+  <text x="32" y="82" font-size="12" font-weight="bold" fill="white">PARENT: "lead-processor"</text>
+
+  <!-- setup note -->
+  <rect x="32" y="104" width="386" height="52" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="48" y="120" font-size="10" fill="#374151" font-weight="600">Setup (done once at startup):</text>
+  <text x="48" y="136" font-size="10" fill="#059669">(def enrichment-id (orc/build-workflow! ctx lead-enrichment))</text>
+  <text x="48" y="150" font-size="10" fill="#374151">enrichment-id is a stable UUID derived from the workflow name.</text>
+
+  <!-- sequence container -->
+  <rect x="32" y="164" width="386" height="310" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="32" y="164" width="140" height="22" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="42" y="179" font-size="11" fill="#475569" font-weight="600">[:sequence] process</text>
+
+  <!-- validate node -->
+  <line x1="225" y1="186" x2="225" y2="202" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="48" y="202" width="354" height="56" rx="7" fill="#d1fae5" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="48" y="202" width="354" height="22" rx="7" fill="#059669"/>
+  <rect x="48" y="216" width="354" height="6" fill="#059669"/>
+  <text x="64" y="216" font-size="11" font-weight="bold" fill="white">[:code] validate-lead</text>
+  <text x="64" y="238" font-size="10" fill="#065f46">reads: <tspan fill="#047857">raw-lead</tspan>   writes: <tspan fill="#047857">validated-lead, is-valid?</tspan></text>
+
+  <!-- connector -->
+  <line x1="225" y1="258" x2="225" y2="276" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- delegate node -->
+  <rect x="48" y="276" width="354" height="100" rx="7" fill="#ecfdf5" stroke="#059669" stroke-width="2.5"/>
+  <rect x="48" y="276" width="354" height="24" rx="7" fill="#059669"/>
+  <rect x="48" y="292" width="354" height="8" fill="#059669"/>
+  <text x="64" y="292" font-size="11" font-weight="bold" fill="white">[:delegate] enrich-step</text>
+  <text x="64" y="316" font-size="10" fill="#064e3b">:target-sheet-id enrichment-id</text>
+  <text x="64" y="332" font-size="10" fill="#064e3b">:reads   [:validated-lead]</text>
+  <text x="64" y="348" font-size="10" fill="#064e3b">:writes  [:enriched-lead]</text>
+  <!-- portal -->
+  <rect x="64" y="356" width="188" height="16" rx="4" fill="#d1fae5" stroke="#34d399" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="82" y="368" font-size="10" fill="#059669" font-weight="600">▶  "lead-enrichment" →</text>
+  <line x1="402" y1="364" x2="450" y2="364" stroke="#059669" stroke-width="2" stroke-dasharray="4,3"/>
+  <polygon points="448,359 458,364 448,369" fill="#059669"/>
+
+  <!-- connector -->
+  <line x1="225" y1="376" x2="225" y2="394" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- route node -->
+  <rect x="48" y="394" width="354" height="66" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="48" y="394" width="354" height="22" rx="7" fill="#4a7fe5"/>
+  <rect x="48" y="408" width="354" height="6" fill="#4a7fe5"/>
+  <text x="64" y="408" font-size="11" font-weight="bold" fill="white">[:llm] route-lead</text>
+  <text x="64" y="432" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">enriched-lead</tspan></text>
+  <text x="64" y="448" font-size="10" fill="#1e3a5f">writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, routing-decision</tspan></text>
+
+  <!-- child sheet panel -->
+  <rect x="458" y="60" width="426" height="424" rx="10" fill="white" stroke="#059669" stroke-width="2"/>
+  <rect x="458" y="60" width="426" height="34" rx="10" fill="#047857"/>
+  <rect x="458" y="84" width="426" height="10" fill="#047857"/>
+  <text x="474" y="82" font-size="12" font-weight="bold" fill="white">CHILD: "lead-enrichment"</text>
+
+  <!-- child bb note -->
+  <rect x="474" y="104" width="394" height="36" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="490" y="120" font-size="10" fill="#065f46" font-weight="600">Isolated blackboard — receives: validated-lead</text>
+  <text x="490" y="134" font-size="10" fill="#059669">parent state (raw-lead, is-valid?) is NOT visible here</text>
+
+  <!-- child sequence -->
+  <rect x="474" y="148" width="394" height="320" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <rect x="474" y="148" width="140" height="22" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="484" y="163" font-size="11" fill="#475569" font-weight="600">[:sequence] enrich</text>
+
+  <line x1="671" y1="170" x2="671" y2="186" stroke="#94a3b8" stroke-width="1.5"/>
+
+  <!-- child: parallel enrichment -->
+  <rect x="490" y="186" width="362" height="130" rx="7" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <rect x="490" y="186" width="220" height="20" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+  <text x="500" y="200" font-size="10" fill="#92400e" font-weight="600">[:parallel] gather-signals (all)</text>
+  <!-- fan-out -->
+  <line x1="610" y1="206" x2="610" y2="214" stroke="#b45309" stroke-width="1.5"/>
+  <line x1="538" y1="214" x2="700" y2="214" stroke="#b45309" stroke-width="1.5"/>
+  <line x1="538" y1="214" x2="538" y2="222" stroke="#b45309" stroke-width="1.5"/>
+  <line x1="700" y1="214" x2="700" y2="222" stroke="#b45309" stroke-width="1.5"/>
+  <!-- crm lookup (code) -->
+  <rect x="498" y="222" width="160" height="82" rx="5" fill="#d1fae5" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="498" y="222" width="160" height="20" rx="5" fill="#059669"/>
+  <rect x="498" y="234" width="160" height="6" fill="#059669"/>
+  <text x="510" y="234" font-size="10" font-weight="bold" fill="white">[:code] crm-lookup</text>
+  <text x="510" y="258" font-size="9" fill="#065f46">reads: validated-lead</text>
+  <text x="510" y="272" font-size="9" fill="#065f46">writes: crm-record</text>
+  <text x="510" y="286" font-size="9" fill="#065f46">calls external CRM API</text>
+  <!-- intent score (llm) -->
+  <rect x="670" y="222" width="166" height="82" rx="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="670" y="222" width="166" height="20" rx="5" fill="#4a7fe5"/>
+  <rect x="670" y="234" width="166" height="6" fill="#4a7fe5"/>
+  <text x="682" y="234" font-size="10" font-weight="bold" fill="white">[:llm] score-intent</text>
+  <text x="682" y="258" font-size="9" fill="#1e3a5f">reads: validated-lead</text>
+  <text x="682" y="272" font-size="9" fill="#1e3a5f">writes: ★ reasoning</text>
+  <text x="682" y="286" font-size="9" fill="#1d4ed8">        intent-score</text>
+
+  <line x1="671" y1="316" x2="671" y2="332" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="667,330 671,338 675,330" fill="#94a3b8"/>
+
+  <!-- compose enriched-lead -->
+  <rect x="490" y="340" width="362" height="56" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="490" y="340" width="362" height="22" rx="7" fill="#4a7fe5"/>
+  <rect x="490" y="354" width="362" height="6" fill="#4a7fe5"/>
+  <text x="506" y="354" font-size="11" font-weight="bold" fill="white">[:llm] compose-enriched-lead</text>
+  <text x="506" y="378" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">validated-lead, crm-record, intent-score</tspan></text>
+
+  <!-- return note -->
+  <rect x="490" y="406" width="362" height="48" rx="6" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+  <text x="506" y="422" font-size="10" fill="#065f46" font-weight="600">writes: enriched-lead  ← mapped to parent :writes</text>
+  <text x="506" y="438" font-size="10" fill="#059669">parent sees: enriched-lead only (crm-record, intent-score stay here)</text>
+
+  <!-- DSL code snippet -->
+  <rect x="16" y="490" width="868" height="6" rx="0" fill="none"/>
+</svg>

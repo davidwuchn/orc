@@ -1,3 +1,7 @@
+> **Archived.** This document predates the RLM architecture (2025). The self-improving loop pipeline it describes is now implemented differently. See [SELF-IMPROVING-LOOP.md](../SELF-IMPROVING-LOOP.md) for the current consumer guide and [LIVING-DESCRIPTIONS.md](../LIVING-DESCRIPTIONS.md) for architecture detail.
+
+---
+
 # Feedback Loop Architecture
 
 This document describes the end-to-end continuous improvement cycle that connects execution, evaluation, ontology learning, and context injection into a self-improving system.
@@ -5,7 +9,7 @@ This document describes the end-to-end continuous improvement cycle that connect
 **Related Documentation:**
 - [EVALUATION-PLAN.md](./EVALUATION-PLAN.md) - Strategic vision for evaluation and GEPA optimization
 - [ONTOLOGY-COMPONENT.md](./ONTOLOGY-COMPONENT.md) - Ontology component architecture
-- [dsl-tutorial.md](./dsl-tutorial.md) - ORC DSL and `:context` parameter
+- [DSL-REFERENCE.md](./DSL-REFERENCE.md) - ORC DSL and `:context` parameter
 
 ---
 

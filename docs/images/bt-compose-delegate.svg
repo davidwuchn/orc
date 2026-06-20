@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="620" font-family="'SF Mono','Fira Code','Cascadia Code',monospace" font-size="12">
+  <rect width="1080" height="620" fill="#f8fafc" rx="10"/>
+
+  <!-- Title -->
+  <text x="24" y="28" font-size="14" font-weight="bold" fill="#0f172a">Subbehavior composition via :delegate</text>
+  <text x="24" y="46" font-size="11" fill="#64748b">A central tree delegates units of work to independently-versioned sub-sheets. Each sub-sheet has its own isolated blackboard and internal tree.</text>
+
+  <!-- ═══ PARENT TREE (left column) ═══ -->
+  <rect x="16" y="58" width="440" height="548" rx="10" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="16" y="58" width="440" height="34" rx="10" fill="#1e293b"/>
+  <rect x="16" y="82" width="440" height="10" fill="#1e293b"/>
+  <text x="32" y="80" font-size="12" font-weight="bold" fill="white">PARENT: "analysis-pipeline"</text>
+
+  <!-- Sequence container -->
+  <rect x="32" y="102" width="408" height="494" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="32" y="102" width="140" height="22" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="42" y="117" font-size="11" fill="#475569" font-weight="600">[:sequence] main</text>
+
+  <!-- survey node -->
+  <line x1="236" y1="124" x2="236" y2="142" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="48" y="142" width="376" height="72" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="48" y="142" width="376" height="24" rx="7" fill="#4a7fe5"/>
+  <rect x="48" y="158" width="376" height="8" fill="#4a7fe5"/>
+  <text x="64" y="158" font-size="11" font-weight="bold" fill="white">[:llm] survey</text>
+  <text x="64" y="182" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">document</tspan></text>
+  <text x="64" y="196" font-size="10" fill="#1e3a5f">writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, document-survey</tspan></text>
+
+  <!-- connector to delegate 1 -->
+  <line x1="236" y1="214" x2="236" y2="232" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- delegate 1: risk-check -->
+  <rect x="48" y="232" width="376" height="88" rx="7" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <rect x="48" y="232" width="376" height="24" rx="7" fill="#059669"/>
+  <rect x="48" y="248" width="376" height="8" fill="#059669"/>
+  <text x="64" y="248" font-size="11" font-weight="bold" fill="white">[:delegate] risk-check</text>
+  <text x="64" y="272" font-size="10" fill="#064e3b">reads:  <tspan fill="#047857">document-survey</tspan></text>
+  <text x="64" y="286" font-size="10" fill="#064e3b">writes: <tspan fill="#047857">risk-summary</tspan></text>
+  <!-- portal indicator -->
+  <rect x="64" y="296" width="200" height="18" rx="4" fill="#d1fae5" stroke="#34d399" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="100" y="309" font-size="10" fill="#059669" font-weight="600">▶ expands →  "risk-analysis"</text>
+  <!-- portal arrow -->
+  <line x1="424" y1="308" x2="470" y2="308" stroke="#059669" stroke-width="2" stroke-dasharray="4,3"/>
+  <polygon points="468,303 478,308 468,313" fill="#059669"/>
+
+  <!-- connector to delegate 2 -->
+  <line x1="236" y1="320" x2="236" y2="338" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- delegate 2: compliance -->
+  <rect x="48" y="338" width="376" height="88" rx="7" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <rect x="48" y="338" width="376" height="24" rx="7" fill="#059669"/>
+  <rect x="48" y="354" width="376" height="8" fill="#059669"/>
+  <text x="64" y="354" font-size="11" font-weight="bold" fill="white">[:delegate] compliance</text>
+  <text x="64" y="378" font-size="10" fill="#064e3b">reads:  <tspan fill="#047857">document-survey</tspan></text>
+  <text x="64" y="392" font-size="10" fill="#064e3b">writes: <tspan fill="#047857">compliance-status</tspan></text>
+  <!-- portal indicator -->
+  <rect x="64" y="402" width="218" height="18" rx="4" fill="#d1fae5" stroke="#34d399" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="98" y="415" font-size="10" fill="#059669" font-weight="600">▶ expands →  "compliance-check"</text>
+  <!-- portal arrow -->
+  <line x1="424" y1="414" x2="470" y2="414" stroke="#059669" stroke-width="2" stroke-dasharray="4,3"/>
+  <polygon points="468,409 478,414 468,419" fill="#059669"/>
+
+  <!-- connector to synthesize -->
+  <line x1="236" y1="426" x2="236" y2="444" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- synthesize node -->
+  <rect x="48" y="444" width="376" height="72" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="48" y="444" width="376" height="24" rx="7" fill="#4a7fe5"/>
+  <rect x="48" y="460" width="376" height="8" fill="#4a7fe5"/>
+  <text x="64" y="460" font-size="11" font-weight="bold" fill="white">[:llm] synthesize</text>
+  <text x="64" y="484" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">risk-summary, compliance-status</tspan></text>
+  <text x="64" y="498" font-size="10" fill="#1e3a5f">writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, final-report</tspan></text>
+
+  <!-- ORC principle callout -->
+  <rect x="32" y="526" width="408" height="60" rx="6" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1"/>
+  <text x="48" y="544" font-size="10" fill="#0369a1" font-weight="600">ORC Principle 2: Complex behavior as delegatable subtrees</text>
+  <text x="48" y="558" font-size="10" fill="#0284c7">Each sub-sheet is independently testable, versionable, and reusable.</text>
+  <text x="48" y="572" font-size="10" fill="#0284c7">The central tree falls out of composing behaviors — not hand-drawn.</text>
+
+  <!-- ═══ RIGHT COLUMN: child sheets ═══ -->
+
+  <!-- Child 1: risk-analysis -->
+  <path d="M 470 290 L 510 290 L 510 200 L 544 200" stroke="#059669" stroke-width="1.5" fill="none" stroke-dasharray="5,3"/>
+
+  <rect x="544" y="62" width="520" height="274" rx="10" fill="white" stroke="#059669" stroke-width="2"/>
+  <rect x="544" y="62" width="520" height="32" rx="10" fill="#047857"/>
+  <rect x="544" y="84" width="520" height="10" fill="#047857"/>
+  <text x="560" y="82" font-size="12" font-weight="bold" fill="white">CHILD: "risk-analysis"</text>
+  <text x="784" y="82" font-size="10" fill="#a7f3d0">(:delegate risk-check)</text>
+
+  <!-- child 1 sequence -->
+  <rect x="560" y="102" width="488" height="224" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <rect x="560" y="102" width="140" height="20" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="570" y="116" font-size="10" fill="#475569" font-weight="600">[:sequence] main</text>
+
+  <!-- child 1: own blackboard note -->
+  <rect x="576" y="130" width="456" height="28" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="592" y="144" font-size="10" fill="#065f46" font-weight="600">Isolated blackboard — receives: document-survey (via :reads)</text>
+
+  <!-- child 1 node: identify-risks -->
+  <line x1="804" y1="158" x2="804" y2="172" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="576" y="172" width="456" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="576" y="172" width="456" height="22" rx="6" fill="#4a7fe5"/>
+  <rect x="576" y="186" width="456" height="6" fill="#4a7fe5"/>
+  <text x="592" y="185" font-size="11" font-weight="bold" fill="white">[:llm] identify-risks</text>
+  <text x="592" y="210" font-size="10" fill="#1e3a5f">reads: <tspan fill="#1d4ed8">document-survey</tspan>   writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, risk-list</tspan></text>
+
+  <!-- child 1 connector -->
+  <line x1="804" y1="232" x2="804" y2="248" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="800,246 804,254 808,246" fill="#94a3b8"/>
+
+  <!-- child 1 node: assess-severity -->
+  <rect x="576" y="256" width="456" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="576" y="256" width="456" height="22" rx="6" fill="#4a7fe5"/>
+  <rect x="576" y="270" width="456" height="6" fill="#4a7fe5"/>
+  <text x="592" y="269" font-size="11" font-weight="bold" fill="white">[:llm] assess-severity</text>
+  <text x="592" y="294" font-size="10" fill="#1e3a5f">reads: <tspan fill="#1d4ed8">risk-list</tspan>   writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, risk-summary  ← mapped to parent :writes</tspan></text>
+
+  <!-- Child 2: compliance-check -->
+  <path d="M 470 396 L 510 396 L 510 480 L 544 480" stroke="#059669" stroke-width="1.5" fill="none" stroke-dasharray="5,3"/>
+
+  <rect x="544" y="346" width="520" height="260" rx="10" fill="white" stroke="#059669" stroke-width="2"/>
+  <rect x="544" y="346" width="520" height="32" rx="10" fill="#047857"/>
+  <rect x="544" y="368" width="520" height="10" fill="#047857"/>
+  <text x="560" y="366" font-size="12" font-weight="bold" fill="white">CHILD: "compliance-check"</text>
+  <text x="772" y="366" font-size="10" fill="#a7f3d0">(:delegate compliance)</text>
+
+  <!-- child 2 sequence -->
+  <rect x="560" y="386" width="488" height="210" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <rect x="560" y="386" width="140" height="20" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="570" y="400" font-size="10" fill="#475569" font-weight="600">[:sequence] main</text>
+
+  <!-- child 2: blackboard note -->
+  <rect x="576" y="414" width="456" height="28" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="592" y="428" font-size="10" fill="#065f46" font-weight="600">Isolated blackboard — receives: document-survey (via :reads)</text>
+
+  <!-- child 2 node: check-clauses -->
+  <line x1="804" y1="442" x2="804" y2="456" stroke="#94a3b8" stroke-width="1.5"/>
+  <rect x="576" y="456" width="456" height="60" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="576" y="456" width="456" height="22" rx="6" fill="#4a7fe5"/>
+  <rect x="576" y="470" width="456" height="6" fill="#4a7fe5"/>
+  <text x="592" y="469" font-size="11" font-weight="bold" fill="white">[:llm] check-clauses</text>
+  <text x="592" y="494" font-size="10" fill="#1e3a5f">reads: <tspan fill="#1d4ed8">document-survey</tspan>   writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, violations</tspan></text>
+
+  <!-- child 2 connector -->
+  <line x1="804" y1="516" x2="804" y2="530" stroke="#94a3b8" stroke-width="1.5"/>
+  <polygon points="800,528 804,536 808,528" fill="#94a3b8"/>
+
+  <!-- child 2 node: verdict -->
+  <rect x="576" y="538" width="456" height="48" rx="6" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="576" y="538" width="456" height="22" rx="6" fill="#4a7fe5"/>
+  <rect x="576" y="552" width="456" height="6" fill="#4a7fe5"/>
+  <text x="592" y="551" font-size="11" font-weight="bold" fill="white">[:code] compute-status</text>
+  <text x="592" y="573" font-size="10" fill="#065f46">reads: violations   writes: compliance-status  ← mapped to parent :writes</text>
+
+  <!-- Legend -->
+  <rect x="16" y="612" width="1048" height="4" rx="0" fill="none"/>
+</svg>

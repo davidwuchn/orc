@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1020" height="560" font-family="'SF Mono','Fira Code','Cascadia Code',monospace" font-size="12">
+  <rect width="1020" height="560" fill="#f8fafc" rx="10"/>
+  <text x="24" y="28" font-size="14" font-weight="bold" fill="#0f172a">[:repl-researcher] as a node inside a larger tree</text>
+  <text x="24" y="46" font-size="11" fill="#64748b">The researcher sits between two static LLM nodes. Pre-process feeds it cleaned input. Post-process packages its output. The researcher handles the open-ended exploration.</text>
+
+  <!-- parent sheet panel -->
+  <rect x="16" y="60" width="500" height="480" rx="10" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="16" y="60" width="500" height="34" rx="10" fill="#1e293b"/>
+  <rect x="16" y="84" width="500" height="10" fill="#1e293b"/>
+  <text x="32" y="82" font-size="12" font-weight="bold" fill="white">PARENT: "research-pipeline"</text>
+
+  <!-- sequence container -->
+  <rect x="32" y="104" width="468" height="426" rx="6" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="32" y="104" width="140" height="22" rx="4" fill="#f1f5f9" stroke="#94a3b8" stroke-width="1"/>
+  <text x="42" y="119" font-size="11" fill="#475569" font-weight="600">[:sequence] main</text>
+
+  <!-- pre-process llm -->
+  <line x1="266" y1="126" x2="266" y2="144" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="48" y="144" width="436" height="76" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="48" y="144" width="436" height="24" rx="7" fill="#4a7fe5"/>
+  <rect x="48" y="160" width="436" height="8" fill="#4a7fe5"/>
+  <text x="64" y="160" font-size="11" font-weight="bold" fill="white">[:llm] pre-process</text>
+  <text x="350" y="160" font-size="10" fill="#c7d9ff">static / deterministic</text>
+  <text x="64" y="184" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">raw-input</tspan></text>
+  <text x="64" y="200" font-size="10" fill="#1e3a5f">writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, cleaned-input</tspan></text>
+  <!-- pre-process note -->
+  <text x="48" y="228" font-size="10" fill="#64748b" font-style="italic">  Deterministic cleanup — always produces cleaned-input.</text>
+
+  <line x1="266" y1="234" x2="266" y2="252" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- repl-researcher node -->
+  <rect x="48" y="252" width="436" height="132" rx="7" fill="#fff7ed" stroke="#ea580c" stroke-width="2.5"/>
+  <rect x="48" y="252" width="436" height="24" rx="7" fill="#c2410c"/>
+  <rect x="48" y="268" width="436" height="8" fill="#c2410c"/>
+  <text x="64" y="268" font-size="11" font-weight="bold" fill="white">[:repl-researcher] research</text>
+  <text x="318" y="268" font-size="10" fill="#fed7aa">exploratory / adaptive</text>
+  <text x="64" y="292" font-size="10" fill="#7c2d12">:model    "google/gemini-2.5-flash"</text>
+  <text x="64" y="308" font-size="10" fill="#7c2d12">:reads    [:cleaned-input]</text>
+  <text x="64" y="324" font-size="10" fill="#7c2d12">:writes   [:research-notes]</text>
+  <text x="64" y="340" font-size="10" fill="#c2410c">:rlm      {:recursive? true   :max-iterations 5}</text>
+  <!-- portal arrow to right panel -->
+  <rect x="64" y="348" width="260" height="18" rx="4" fill="#ffedd5" stroke="#fed7aa" stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="86" y="361" font-size="10" fill="#c2410c" font-weight="600">▶ Phase 1 ↔ Phase 2 loop →</text>
+  <line x1="484" y1="357" x2="534" y2="357" stroke="#ea580c" stroke-width="2" stroke-dasharray="4,3"/>
+  <polygon points="532,352 542,357 532,362" fill="#ea580c"/>
+  <text x="64" y="378" font-size="10" fill="#9a3412">  Iterates: designs a tree, runs it, inspects results, refines.</text>
+  <text x="64" y="392" font-size="10" fill="#9a3412">  Calls (final! {:research-notes "..."}) when done.</text>
+
+  <line x1="266" y1="384" x2="266" y2="404" stroke="#94a3b8" stroke-width="2"/>
+
+  <!-- post-process llm -->
+  <rect x="48" y="404" width="436" height="76" rx="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="48" y="404" width="436" height="24" rx="7" fill="#4a7fe5"/>
+  <rect x="48" y="420" width="436" height="8" fill="#4a7fe5"/>
+  <text x="64" y="420" font-size="11" font-weight="bold" fill="white">[:llm] post-process</text>
+  <text x="350" y="420" font-size="10" fill="#c7d9ff">static / deterministic</text>
+  <text x="64" y="444" font-size="10" fill="#1e3a5f">reads:  <tspan fill="#1d4ed8">research-notes</tspan></text>
+  <text x="64" y="460" font-size="10" fill="#1e3a5f">writes: <tspan fill="#7c3aed">★ reasoning</tspan><tspan fill="#1d4ed8">, final-report</tspan></text>
+  <text x="48" y="488" font-size="10" fill="#64748b" font-style="italic">  Wraps researcher output into a structured report.</text>
+
+  <!-- Right panel: what the researcher does -->
+  <rect x="542" y="60" width="462" height="480" rx="10" fill="white" stroke="#ea580c" stroke-width="2"/>
+  <rect x="542" y="60" width="462" height="34" rx="10" fill="#c2410c"/>
+  <rect x="542" y="84" width="462" height="10" fill="#c2410c"/>
+  <text x="558" y="82" font-size="12" font-weight="bold" fill="white">RESEARCHER: Phase 1 ↔ Phase 2 loop</text>
+
+  <!-- Phase 1 box -->
+  <rect x="558" y="104" width="430" height="150" rx="8" fill="#fff7ed" stroke="#fb923c" stroke-width="1.5"/>
+  <rect x="558" y="104" width="100" height="22" rx="4" fill="#ffedd5" stroke="#fb923c" stroke-width="1"/>
+  <text x="566" y="119" font-size="10" fill="#c2410c" font-weight="600">Phase 1 (SCI)</text>
+  <text x="574" y="145" font-size="10" fill="#7c2d12">Model runs Clojure in a sandboxed REPL.</text>
+  <text x="574" y="163" font-size="10" fill="#7c2d12">Can call: (llm ...) (code ...) (store! ...) (get-var ...)</text>
+  <text x="574" y="181" font-size="10" fill="#7c2d12">To spawn a sub-tree: (emit-tree! [...])</text>
+  <text x="574" y="199" font-size="10" fill="#7c2d12">To finish: (final! {:research-notes "..."})</text>
+  <text x="574" y="217" font-size="10" fill="#9a3412">Each iteration ← one LLM code-gen call.</text>
+
+  <!-- Loop arrows -->
+  <path d="M 763 254 C 763 280 763 290 763 310" stroke="#ea580c" stroke-width="2" fill="none"/>
+  <polygon points="758,308 763,318 768,308" fill="#ea580c"/>
+  <text x="772" y="284" font-size="9" fill="#c2410c">emit-tree!</text>
+
+  <!-- Phase 2 box -->
+  <rect x="558" y="320" width="430" height="180" rx="8" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <rect x="558" y="320" width="100" height="22" rx="4" fill="#d1fae5" stroke="#10b981" stroke-width="1"/>
+  <text x="566" y="335" font-size="10" fill="#065f46" font-weight="600">Phase 2 (child tick)</text>
+  <text x="574" y="360" font-size="10" fill="#064e3b">The emitted tree runs as a child sheet execution.</text>
+  <text x="574" y="378" font-size="10" fill="#064e3b">Example tree the model might design:</text>
+  <rect x="574" y="388" width="398" height="96" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="590" y="404" font-size="10" fill="#065f46">[:sequence</text>
+  <text x="606" y="420" font-size="10" fill="#059669">[:chunk-document {:from :cleaned-input :into :chunks}]</text>
+  <text x="606" y="436" font-size="10" fill="#059669">[:map-each {:from :chunks :as :chunk :into :notes</text>
+  <text x="618" y="452" font-size="10" fill="#059669">            :max-concurrency 3}</text>
+  <text x="618" y="468" font-size="10" fill="#1d4ed8">  [:llm {:reads [:chunk] :writes [:notes]}]]</text>
+  <text x="606" y="484" font-size="10" fill="#059669">[:final {:keys [:notes]}]]</text>
+
+  <!-- Merge back arrow -->
+  <path d="M 763 500 C 763 520 763 530 763 548 C 763 560 700 560 640 548 C 600 540 580 530 572 515" stroke="#ea580c" stroke-width="2" fill="none" stroke-dasharray="5,3"/>
+  <polygon points="567,517 572,506 577,517" fill="#ea580c"/>
+  <text x="618" y="548" font-size="9" fill="#c2410c">results merge back into Phase 1 sandbox-vars</text>
+  <text x="618" y="562" font-size="9" fill="#9a3412">model inspects, refines, or calls (final! ...)</text>
+</svg>

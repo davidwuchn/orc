@@ -11,7 +11,7 @@
      the reflective dataset so the proposer sees WHY a candidate scored low —
      not just the number."
   (:require [clojure.string :as string]
-            [ai.obney.orc.evaluation.core.judges :as judges]
+            [ai.obney.orc.evaluation.interface :as judges]
             [com.brunobonacci.mulog :as u]))
 
 (defn make-exact-match-metric

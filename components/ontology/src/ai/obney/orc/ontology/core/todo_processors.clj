@@ -14,8 +14,6 @@
    results don't flow to the ontology for learning."
   (:require [ai.obney.orc.ontology.core.classifier :as classifier]
             [ai.obney.orc.ontology.core.read-models :as rm]
-            [ai.obney.orc.colbert.interface :as colbert]
-            [ai.obney.orc.colbert.interface.schemas]
             [ai.obney.grain.command-processor-v2.interface :as command-processor]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]
             [ai.obney.grain.todo-processor-v2.interface :refer [defprocessor]]
@@ -377,8 +375,14 @@
    :split-documents? / :max-document-length / :model-name knobs in one
    place."
   [context descriptions reason-metadata]
-  (let [{:keys [collection document-ids document-metadatas]}
-        (build-document-collection descriptions)]
+  (if-not (find-ns 'ai.obney.orc.colbert.interface)
+    ;; ColBERT is an optional Layer-5 upgrade. When its component is not on the
+    ;; classpath, the ColBERT-backed Living-Description index simply isn't built
+    ;; — graph + embedding retrieval is unaffected. Clean no-op, not a failure.
+    (u/log ::reindex-skipped-no-colbert
+           :reason "colbert component not on classpath")
+    (let [{:keys [collection document-ids document-metadatas]}
+          (build-document-collection descriptions)]
     (u/log ::reindex-triggered
            :document-count (count collection)
            :reason-metadata reason-metadata)
@@ -403,7 +407,59 @@
                 :max-document-length 256}))
       (catch Exception e
         (u/log ::reindex-failed
-               :error (.getMessage e))))))
+               :error (.getMessage e)))))))
+
+(defonce
+  ^{:private true
+    :doc "In-process coalescing latches for the threshold/timer reindex
+   trigger, keyed by [tenant-id index-name], each holding
+   {:running? bool :dirty? bool}.
+
+   WHY: grain's todo-processor processes events CONCURRENTLY — the
+   execution-fn spawns one thread per event. A burst of N
+   *-description-updated events therefore lands N handler threads in
+   maybe-rebuild! at once. Each independently reads
+   events-since-last-rebuild via the read-model, all observe it >=
+   threshold (the :colbert/index-created reset from any one rebuild isn't
+   appended/visible until after the others have already read), and each
+   dispatches a redundant — and expensive — ColBERT rebuild. Observed: a
+   10-event burst produced 2..10 rebuilds.
+
+   FIX: a per-(tenant,index) coalescing latch with re-check. One thread
+   becomes the runner; concurrent threads mark the latch :dirty? instead
+   of dispatching. The runner re-reads-and-redecides until no work is
+   pending, so a burst collapses into a single rebuild WITHOUT a
+   lost-wakeup (the event that crosses the threshold always forces at
+   least one more pass that observes it). In-memory per JVM (grain
+   reindex processors are singleton per tenant). The mint force-rebuild!
+   path is intentionally NOT latched — it must always rebuild so a
+   freshly-minted behavior is indexed immediately."}
+  reindex-latches*
+  (atom {}))
+
+(defn- reindex-latch
+  "Return the coalescing latch (an atom holding {:running? :dirty?}) for
+   `k`, creating it on first use. Idempotent under contention."
+  [k]
+  (or (get @reindex-latches* k)
+      (get (swap! reindex-latches* update k
+                  (fn [existing] (or existing (atom {:running? false :dirty? false}))))
+           k)))
+
+(defn- run-rebuild-pass!
+  "One read-decide-dispatch pass. Returns nil. Reads the authoritative
+   reindex-state (the read-model revalidates with l1-ttl 0) so each pass
+   sees every event appended so far, including a prior pass's
+   :colbert/index-created reset."
+  [context]
+  (let [reindex-state (rm/get-reindex-state context)
+        reindex-config (rm/get-reindex-config context)
+        descriptions (collect-current-descriptions context)]
+    (when (should-rebuild? reindex-state reindex-config (count descriptions))
+      (dispatch-create-index! context descriptions
+        {:event-count (:events-since-last-rebuild reindex-state)
+         :threshold (:reindex-threshold-events reindex-config)
+         :cold-start? (not (:index-built? reindex-state))}))))
 
 (defn maybe-rebuild!
   "Read reindex-state + config; if the trigger conditions are met, build
@@ -415,16 +471,40 @@
    We dispatch via the command processor (NOT colbert/create-index!
    directly) because the interface fn bypasses event emission — it
    returns the bridge result but never emits :colbert/index-created.
-   The defcommand is the only path that emits the event."
+   The defcommand is the only path that emits the event.
+
+   Concurrency: grain runs one handler thread per event, so this is
+   wrapped in a per-(tenant,index) coalescing latch with re-check (see
+   `reindex-latches*`). A concurrent burst of description-updated events
+   collapses into a single rebuild — the winning thread re-reads and
+   re-decides until no peer has marked work pending, which both coalesces
+   redundant rebuilds and guarantees the threshold-crossing event is
+   never lost."
   [context]
-  (let [reindex-state (rm/get-reindex-state context)
-        reindex-config (rm/get-reindex-config context)
-        descriptions (collect-current-descriptions context)]
-    (when (should-rebuild? reindex-state reindex-config (count descriptions))
-      (dispatch-create-index! context descriptions
-        {:event-count (:events-since-last-rebuild reindex-state)
-         :threshold (:reindex-threshold-events reindex-config)
-         :cold-start? (not (:index-built? reindex-state))}))))
+  (let [latch (reindex-latch [(:tenant-id context) ontology-descriptions-index-name])
+        ;; Become the runner, or mark work pending for the active runner.
+        [old _] (swap-vals! latch (fn [{:keys [running?] :as s}]
+                                    (if running?
+                                      (assoc s :dirty? true)
+                                      {:running? true :dirty? false})))]
+    (when-not (:running? old)
+      (try
+        (loop []
+          ;; Clear dirty before the pass; peers that arrive during the pass
+          ;; will re-set it and force another pass.
+          (swap! latch assoc :dirty? false)
+          (run-rebuild-pass! context)
+          ;; Atomically: if work was marked pending during the pass, keep
+          ;; running for another pass; otherwise stop. Closing this in one
+          ;; CAS prevents a lost wakeup between the check and the stop.
+          (let [[before _] (swap-vals! latch
+                                       (fn [s] (if (:dirty? s)
+                                                 (assoc s :dirty? false)
+                                                 {:running? false :dirty? false})))]
+            (when (:dirty? before) (recur))))
+        (catch Throwable t
+          (reset! latch {:running? false :dirty? false})
+          (throw t))))))
 
 (defn force-rebuild!
   "QP-3: dispatch :colbert/create-index unconditionally, bypassing the

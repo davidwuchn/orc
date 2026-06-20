@@ -1,6 +1,8 @@
-# ORC Behavior Tree DSL Tutorial
+# ORC DSL Reference
 
-A comprehensive guide to building AI workflows with the ORC behavior tree DSL.
+> **If you're new to ORC**, start at [GETTING-STARTED.md](GETTING-STARTED.md). This is the complete DSL reference. The [Core Concepts section](#core-concepts) is the newcomer entry point; everything after that is advanced reference material.
+
+A comprehensive reference for building AI workflows with the ORC behavior tree DSL.
 
 ## Table of Contents
 
@@ -90,6 +92,8 @@ The ORC DSL offers several advantages over imperative code:
 ---
 
 ## Core Concepts
+
+> **Newcomer entry point — start here.** Lines 90–135 cover the essential mental model (blackboard, nodes, execution). Everything from [Node Reference](#node-reference) onward is advanced reference material.
 
 ### Blackboard
 
@@ -436,6 +440,8 @@ Execute another workflow (sheet) with isolated blackboard. Useful for composing 
 
 This tutorial builds a complete lead qualification and nurturing workflow, demonstrating all DSL features.
 
+![Delegate composition: lead-processor → lead-enrichment](images/bt-delegate-example.svg)
+
 ### Overview
 
 The system processes incoming sales leads through two parallel tracks:
@@ -733,6 +739,8 @@ Combine parallel tracks with parallel processing within each track:
 
 ### Error Handling with Fallback
 
+![3-tier fallback: try primary → try secondary → deterministic default](images/bt-fallback-condition.svg)
+
 Gracefully handle failures with fallback alternatives:
 
 ```clojure
@@ -759,6 +767,8 @@ Gracefully handle failures with fallback alternatives:
 ```
 
 ### LLM-Driven Routing
+
+![LLM-condition routing: fallback tries each branch, first success wins](images/bt-llm-routing.svg)
 
 Use `llm-condition` for intelligent routing:
 
@@ -1500,9 +1510,9 @@ Saves a sheet directly to a .clj file.
 
 ## Next Steps
 
-1. **Explore the demo** - See `development/src/lead_qualification_demo.clj`
-2. **Read the chatbot demo** - See `development/src/chatbot_demo.clj` for condition/llm-condition examples
-3. **Study the BRYC demo** - See `development/src/bryc_demo.clj` for a production-scale example
-4. **Build your own** - Start with a simple workflow and iterate
+1. **Start from Phase 1 of [GETTING-STARTED.md](GETTING-STARTED.md)** — wire a context and run your first tree
+2. **Compose subbehaviors** — once a single tree works, factor reusable pieces into their own sheets and `:delegate` to them (see [ORC-PRINCIPLES.md](ORC-PRINCIPLES.md) Principles 2–3)
+3. **Reach for `:repl-researcher`** when a step needs open-ended exploration whose shape you can't draw up front (see [RLM-GUIDE.md](RLM-GUIDE.md))
+4. **Build your own** — start with a simple workflow and iterate
 
 Happy workflow building!

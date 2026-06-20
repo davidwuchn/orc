@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="460" font-family="'SF Mono','Fira Code','Cascadia Code',monospace" font-size="12">
+  <rect width="860" height="460" fill="#f8fafc" rx="10"/>
+  <text x="24" y="28" font-size="14" font-weight="bold" fill="#0f172a">Recursive RLM execution cycle</text>
+  <text x="24" y="46" font-size="11" fill="#64748b">Phase 1 (code generation) and Phase 2 (tree execution) alternate. The model iterates until it calls (final! ...) or max-iterations is reached.</text>
+
+  <!-- Phase 1 box -->
+  <rect x="24" y="68" width="380" height="280" rx="10" fill="#fff7ed" stroke="#ea580c" stroke-width="2"/>
+  <rect x="24" y="68" width="380" height="32" rx="10" fill="#c2410c"/>
+  <rect x="24" y="90" width="380" height="10" fill="#c2410c"/>
+  <text x="40" y="88" font-size="12" font-weight="bold" fill="white">Phase 1 — SCI sandbox (code generation)</text>
+
+  <text x="40" y="124" font-size="11" fill="#7c2d12">Model generates Clojure code each iteration.</text>
+  <text x="40" y="142" font-size="11" fill="#7c2d12">Has access to sandbox primitives:</text>
+
+  <rect x="40" y="152" width="348" height="140" rx="6" fill="#ffedd5" stroke="#fed7aa" stroke-width="1"/>
+  <text x="56" y="170" font-size="10" fill="#9a3412">(llm "name" :instruction ... :writes [...])  ; call LLM directly</text>
+  <text x="56" y="188" font-size="10" fill="#9a3412">(code "name" :writes [...] :body ...)       ; deterministic compute</text>
+  <text x="56" y="206" font-size="10" fill="#9a3412">(store! :key value)                        ; save to sandbox-vars</text>
+  <text x="56" y="224" font-size="10" fill="#9a3412">(get-var :key)                             ; retrieve sandbox-var</text>
+  <text x="56" y="242" font-size="10" fill="#c2410c" font-weight="600">(emit-tree! [...])                         ; → triggers Phase 2</text>
+  <text x="56" y="260" font-size="10" fill="#c2410c" font-weight="600">(final! {:key value ...})                  ; → terminates loop</text>
+  <text x="56" y="278" font-size="10" fill="#9a3412">(tree-detail) (tree-failures) (node-output) ; drill-down</text>
+
+  <text x="40" y="322" font-size="10" fill="#9a3412" font-style="italic">Each iteration = one LLM code-generation call.</text>
+  <text x="40" y="338" font-size="10" fill="#9a3412" font-style="italic">Iteration history is rebuilt into each subsequent prompt.</text>
+
+  <!-- Loop arrows -->
+  <!-- emit-tree! arrow: Phase 1 → Phase 2 -->
+  <path d="M 404 200 L 444 200 L 444 220 L 460 220" stroke="#c2410c" stroke-width="2.5" fill="none"/>
+  <polygon points="457,215 467,220 457,225" fill="#c2410c"/>
+  <rect x="398" y="186" width="64" height="18" rx="4" fill="#ffedd5" stroke="#fb923c" stroke-width="1"/>
+  <text x="404" y="199" font-size="9" fill="#c2410c" font-weight="600">emit-tree!</text>
+
+  <!-- merge-back arrow: Phase 2 → Phase 1 -->
+  <path d="M 460 310 L 444 310 L 444 290 L 404 290" stroke="#059669" stroke-width="2.5" fill="none"/>
+  <polygon points="407,285 397,290 407,295" fill="#059669"/>
+  <rect x="398" y="296" width="64" height="18" rx="4" fill="#d1fae5" stroke="#4ade80" stroke-width="1"/>
+  <text x="404" y="309" font-size="9" fill="#059669" font-weight="600">merge back</text>
+
+  <!-- final! arrow out -->
+  <path d="M 404 360 L 430 360 L 430 410 L 24 410 L 24 390" stroke="#7c3aed" stroke-width="2.5" fill="none"/>
+  <polygon points="19,393 24,382 29,393" fill="#7c3aed"/>
+  <rect x="356" y="346" width="50" height="18" rx="4" fill="#ede9fe" stroke="#a78bfa" stroke-width="1"/>
+  <text x="362" y="359" font-size="9" fill="#7c3aed" font-weight="600">(final! ...)</text>
+  <text x="30" y="425" font-size="10" fill="#7c3aed">terminates loop → returns to parent tree</text>
+
+  <!-- Phase 2 box -->
+  <rect x="460" y="68" width="380" height="280" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+  <rect x="460" y="68" width="380" height="32" rx="10" fill="#047857"/>
+  <rect x="460" y="90" width="380" height="10" fill="#047857"/>
+  <text x="476" y="88" font-size="12" font-weight="bold" fill="white">Phase 2 — child tick (tree execution)</text>
+
+  <text x="476" y="124" font-size="11" fill="#064e3b">Model designed a tree. ORC executes it as</text>
+  <text x="476" y="142" font-size="11" fill="#064e3b">a child sheet with an isolated blackboard.</text>
+
+  <rect x="476" y="152" width="348" height="140" rx="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="492" y="170" font-size="10" fill="#065f46">Example tree the model emitted:</text>
+  <text x="492" y="190" font-size="10" fill="#059669">[:sequence</text>
+  <text x="508" y="208" font-size="10" fill="#059669">[:chunk-document {:from :input :into :chunks}]</text>
+  <text x="508" y="226" font-size="10" fill="#059669">[:map-each {:from :chunks :as :c :into :notes</text>
+  <text x="524" y="244" font-size="10" fill="#059669">            :max-concurrency 3}</text>
+  <text x="524" y="262" font-size="10" fill="#1d4ed8">  [:llm {:reads [:c] :writes [:notes]}]]</text>
+  <text x="508" y="280" font-size="10" fill="#059669">[:final {:keys [:notes]}]]</text>
+
+  <text x="476" y="314" font-size="10" fill="#065f46" font-style="italic">When Phase 2 tree completes, its :writes-declared</text>
+  <text x="476" y="330" font-size="10" fill="#065f46" font-style="italic">outputs merge into Phase 1 sandbox-vars.</text>
+  <text x="476" y="348" font-size="10" fill="#059669" font-style="italic">(get-var :notes) returns the merged result in next iteration.</text>
+
+  <!-- Iteration counter -->
+  <rect x="24" y="380" width="812" height="60" rx="8" fill="white" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="40" y="400" font-size="11" fill="#374151" font-weight="600">Loop properties</text>
+  <text x="40" y="418" font-size="10" fill="#64748b">Terminates when:  </text>
+  <text x="130" y="418" font-size="10" fill="#374151">(1) model calls (final! ...)  </text>
+  <text x="350" y="418" font-size="10" fill="#374151">(2) :max-iterations exhausted  </text>
+  <text x="576" y="418" font-size="10" fill="#374151">(3) :timeout-ms exceeded</text>
+  <text x="40" y="432" font-size="10" fill="#64748b">Phase 2 trees are free   </text>
+  <text x="138" y="432" font-size="10" fill="#374151">— do not count against :max-iterations (only Phase 1 code-gen calls count).</text>
+</svg>

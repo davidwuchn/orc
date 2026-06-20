@@ -6,6 +6,8 @@
 > a pointer to the relevant guide. These principles are framework-level: they hold
 > for any domain you apply ORC to.
 
+**Start at** [GETTING-STARTED.md](GETTING-STARTED.md) for a progressive introduction. **See** [COMPONENT-MAP.md](COMPONENT-MAP.md) for the dependency decision table.
+
 ## What ORC is
 
 ORC (Orchestrator) is a **behavior-tree execution engine** built on the Grain
@@ -39,6 +41,8 @@ Each exists for a reason. **Right-size the node to the work:**
 - genuinely freeform, multi-iteration exploration where the right tree shape isn't
   known up front → `:repl-researcher` (the heaviest node — **reserve it**)
 
+**Recursive mode is the default** — `:rlm true` and `{}` both resolve to `{:recursive? true}`; terminal mode (`{:recursive? false}`) is deprecated and will be removed. Source: `executor.clj line 2176: recursive-mode? (not= false (get-in node [:rlm :recursive?]))`.
+
 **Why it matters.** The most common mistake is the "prompt-bloat treadmill":
 expressing a multi-step methodology as one enormous instruction on a single
 `:repl-researcher` session. More prose never *structurally* guarantees a step runs
@@ -50,7 +54,7 @@ timeouts, and prompts that end up pleading "do NOT do X".
 **How.** Before reaching for `:repl-researcher`, ask "is the tree shape known?" If
 yes, compose `:llm`/`:code`/`:condition`/`:fallback` directly. Reserve
 `:repl-researcher` for the one step that genuinely needs to explore. See also:
-`docs/dsl-tutorial.md`, `docs/ORC-SERVICE-GUIDE.md`, `docs/pattern-compendium.md`,
+`docs/GETTING-STARTED.md` (progressive guide to the node palette), `docs/COMPONENT-MAP.md` (dependency decision table), `docs/DSL-REFERENCE.md`, `docs/ORC-SERVICE-GUIDE.md`, `docs/contributors/CONTRIBUTOR-GRAIN-PATTERNS.md`,
 and `docs/RLM-GUIDE.md` (when `:repl-researcher`/RLM is the right tool).
 
 ## 2. Compose complex behavior as durable, delegatable subtrees
@@ -74,7 +78,35 @@ subbehavior up by name and point a `:delegate` at it without rebuilding it. Give
 each subbehavior its *own* resilience (Principle 1's `:fallback`/`:condition` plus
 a validate/diagnose step) so one bad step self-corrects or fails *with a diagnosis*
 before poisoning downstream. See also: `docs/ORC-SERVICE-GUIDE.md`,
-`docs/dsl-tutorial.md`.
+`docs/DSL-REFERENCE.md`.
+
+![Subbehavior composition via :delegate](images/bt-compose-delegate.svg)
+
+```clojure
+;; The central tree delegates to independently-versioned sub-sheets
+(def analysis-pipeline
+  (orc/workflow "analysis-pipeline"
+    (orc/blackboard
+      {:document          :string
+       :document-survey   :string
+       :risk-summary      :string
+       :compliance-status :string
+       :final-report      :string})
+    (orc/sequence "main"
+      (orc/llm "survey"
+        :reads [:document] :writes [:reasoning :document-survey])
+      (orc/delegate "risk-check"
+        :target-sheet-id risk-analysis-id       ; pre-built child sheet
+        :reads  [:document-survey]
+        :writes [:risk-summary])
+      (orc/delegate "compliance"
+        :target-sheet-id compliance-check-id    ; another pre-built child sheet
+        :reads  [:document-survey]
+        :writes [:compliance-status])
+      (orc/llm "synthesize"
+        :reads [:risk-summary :compliance-status]
+        :writes [:reasoning :final-report]))))
+```
 
 ## 3. `:delegate` is the composition mechanism
 
@@ -95,6 +127,8 @@ assuming. Getting a *map* to arrive **parsed** across the seam is node-type-spec
 — see Principle 10. See also: `docs/ORC-SERVICE-GUIDE.md`, `docs/STREAMING.md`
 (lineage/observability across delegated ticks).
 
+![Isolated blackboard seam](images/bt-delegate-seam.svg)
+
 ## 4. Subbehaviors can evolve
 
 A subbehavior body need not be frozen prose. ORC supports **pattern injection at
@@ -114,7 +148,7 @@ quality is strongest in-distribution — adopt it with that in mind, not as magi
 **How.** Opt in at the node level, and assemble each subbehavior's prompt through
 **one seam** so a static prompt today can be flipped to a living, corpus-sourced
 body later without a node rewrite. See also: `docs/SELF-IMPROVING-LOOP.md`,
-`docs/LIVING-DESCRIPTIONS.md`, `docs/FEEDBACK-LOOP.md`, `docs/RLM-GUIDE.md`.
+`docs/LIVING-DESCRIPTIONS.md`, `docs/RLM-GUIDE.md`.
 
 ## 5. Make a fitness gate the loop's objective, not a terminal report
 
@@ -136,7 +170,7 @@ verdict: pass → done; fail → one adaptive routing step maps the failing crit
 the subbehavior that closes it → re-invoke → re-gate; unachievable → honest
 terminate. Keep the loop budget-bounded so it always terminates. (In the ontology
 domain this gate is a set of competency questions; the pattern is general.) See
-also: `docs/pattern-compendium.md`, `docs/ONTOLOGY.md` (the competency-question
+also: `docs/contributors/CONTRIBUTOR-GRAIN-PATTERNS.md`, `docs/ONTOLOGY.md` (the competency-question
 gate as a worked instance).
 
 ## 6. A deterministic skeleton wrapping LLM work is not "LLM-free"
@@ -169,7 +203,7 @@ shape someone already found, while the hard, valuable parts stay undone.
 **How.** Before building, ask whether you're just redrawing the known shape. Reuse
 proven capabilities by **re-housing** them into the right composition rather than
 forking them, and put the new effort into the parts that are genuinely hard. See
-also: `docs/ARCHITECTURE.md`, `docs/pattern-compendium.md`.
+also: `docs/ARCHITECTURE.md`, `docs/contributors/CONTRIBUTOR-GRAIN-PATTERNS.md`.
 
 ## 8. Events-first: commands → events → projections (no bare appends)
 
@@ -201,7 +235,7 @@ inspectable trace of *why* the node decided what it did.
 **How.** Declare `:reasoning` as the first `:writes` key on the `:llm` node. In
 `:parallel` and `:map-each`, **node-scope** the reasoning key (give it a per-node
 name) so concurrent siblings don't trample each other's reasoning on the shared
-blackboard. See also: `docs/dsl-tutorial.md`.
+blackboard. See also: `docs/DSL-REFERENCE.md`.
 
 ## 10. Getting a map across `:delegate` parsed is node-type-specific
 
@@ -324,11 +358,12 @@ that "completed" but produced nothing useful. They're written to be framework-le
 they should hold for whatever you build on ORC. The companion guides go deeper on
 specific capabilities:
 
-- **The DSL and node palette:** `docs/dsl-tutorial.md`, `docs/ORC-SERVICE-GUIDE.md`,
-  `docs/pattern-compendium.md`
+- **Getting started / progressive guide:** `docs/GETTING-STARTED.md`, `docs/COMPONENT-MAP.md`
+- **The DSL and node palette:** `docs/DSL-REFERENCE.md`, `docs/ORC-SERVICE-GUIDE.md`,
+  `docs/contributors/CONTRIBUTOR-GRAIN-PATTERNS.md`
 - **`:repl-researcher` / RLM mode:** `docs/RLM-GUIDE.md`
 - **Self-improvement, living descriptions, feedback:** `docs/SELF-IMPROVING-LOOP.md`,
-  `docs/LIVING-DESCRIPTIONS.md`, `docs/FEEDBACK-LOOP.md`, `docs/SELF-LEARNING-MANUAL.md`
+  `docs/LIVING-DESCRIPTIONS.md`, `docs/PATTERN-RECORDING.md`
 - **Events-first / Grain patterns:** `docs/EVENT-STORE-PATTERNS.md`, `CLAUDE.md`
 - **Live streaming / observability:** `docs/STREAMING.md`
 - **Architecture overview:** `docs/ARCHITECTURE.md`

@@ -6,6 +6,39 @@ ORC provides composable primitives for building, executing, optimizing, and eval
 
 > **Early-stage software.** ORC is under active development. Expect sharp edges and breaking changes — APIs, event schemas, and conventions may shift between commits. Pin to a specific `:git/sha` and review the diff before updating. Expect incomplete docs, use at your own peril!
 
+## New here?
+
+Start with **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — a progressive contract-analysis walkthrough from bare behavior tree through judges, GEPA, ontology, and self-improvement. _(Written by DOC-04; link active once that lands.)_
+
+## Pick your layer
+
+ORC is opt-in by layer. Most consumers only need Layer 0. See **[docs/COMPONENT-MAP.md](docs/COMPONENT-MAP.md)** for the full dependency graph and known issues.
+
+| Layer | Capability | Component(s) | Python? |
+|------:|-----------|------------|:-------:|
+| 0 | Core execution — behavior tree DSL, workflow execution, event-sourced state | `orc-service` | No |
+| 1 | LLM judges — grounding, reasoning, completeness, instruction-following | `evaluation` | No |
+| 2 | Observability — Langfuse trace forwarding | `langfuse` | No |
+| 3 | Prompt optimization — GEPA Pareto-frontier instruction evolution | `gepa` + `evaluation` | No |
+| 4 | DJL embeddings — dense vector embeddings, semantic concept search | `ontology` | No |
+| 5 | ColBERT retrieval — late-interaction scoring, PLAID indexing | `colbert` | **Yes** |
+| 6 | Evolutionary ontology builder — ingest CSV/JSON/SQL/text, auto-discover concepts | `ontology` + ORC sheets | No |
+| 7 | Self-improving loop — auto-classify executions, pattern evolution, behavior minting | `orc-service` + `evaluation` + `ontology` + `colbert` | **Yes** |
+| 8 | MCP Sheet Builder — dynamic workflow generation from MCP tool schemas | `mcp-sheet-builder` | No |
+
+> **Slim ORC:** To use only behavior tree execution, depend on `components/orc-service` directly and skip the `projects/orc` umbrella — this eliminates DJL, all Python subprocess machinery, GEPA, evaluation, langfuse, ontology, and mcp-sheet-builder. `orc-service` brings in exactly three libraries: DSCloj, mulog, and sci.
+>
+> ```clojure
+> ;; in your project's deps.edn
+> orc/orc-service {:git/url "https://github.com/ObneyAI/orc.git"
+>                  :git/sha "<sha>"
+>                  :deps/root "components/orc-service"}
+> ```
+
+> **Self-improving loop is alpha-stage.** Layer 7 (`:auto-classify?` + `:recursive?`) works end-to-end on workflows that align with the shipped seed corpus, but force-fit classifications appear on out-of-distribution tasks. It requires Python (via the `colbert` component's subprocess bridge). See [docs/SELF-IMPROVING-LOOP.md](docs/SELF-IMPROVING-LOOP.md) for an honest current-state breakdown.
+
+> **RLM recursive mode is now the default.** `:repl-researcher` nodes default to `{:rlm {:recursive? true}}`; terminal mode (`:rlm true` / `:rlm {:recursive? false}`) is deprecated and will be removed.
+
 ## Quick Start
 
 Add to your `deps.edn`:
@@ -41,6 +74,8 @@ obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
 
 ## Components
 
+The full opt-in layer table, dependency graph, and known issues live in **[docs/COMPONENT-MAP.md](docs/COMPONENT-MAP.md)**. For judge architecture, rubric design, and custom judge patterns see **[docs/JUDGE-ARCHITECTURE.md](docs/JUDGE-ARCHITECTURE.md)**.
+
 | Component | Namespace | Purpose |
 |-----------|-----------|---------|
 | **orc-service** | `ai.obney.orc.orc-service` | Core behavior tree execution, DSL, versioning, event sourcing |
@@ -57,9 +92,9 @@ ORC is built on the **Grain** event-sourcing framework (CQRS pattern):
 
 ```
 Commands -> Events -> Read Models -> Queries
-              |
-              v
-        Todo Processors (side effects)
+               |
+               v
+         Todo Processors (side effects)
 ```
 
 - **Sheets** are behavior trees stored as event streams
@@ -187,8 +222,13 @@ ORC is a library — consumers provide:
 
 | Guide | Description |
 |-------|-------------|
+| [**Getting Started**](docs/GETTING-STARTED.md) | Progressive onboarding: core → judges → GEPA → ontology → self-improvement |
+| [**Packages**](docs/PACKAGES.md) | Standalone packages — pull in only the layer you need |
+| [**Component Map**](docs/COMPONENT-MAP.md) | Opt-in layer table, full dependency graph, known issues |
+| [**Judge Architecture**](docs/JUDGE-ARCHITECTURE.md) | Rubric design, judge types, custom judges, scale design, composite scoring |
+| [ORC Principles](docs/ORC-PRINCIPLES.md) | Framework-level principles: node palette, `:delegate` composition, events-first discipline |
 | [ORC Service Guide](docs/ORC-SERVICE-GUIDE.md) | Core execution engine and DSL reference |
-| [DSL Tutorial](docs/dsl-tutorial.md) | Step-by-step workflow building tutorial |
+| [DSL Reference](docs/DSL-REFERENCE.md) | Complete DSL reference — Core Concepts section is the newcomer entry point |
 | [**RLM Guide**](docs/RLM-GUIDE.md) | Recursive Language Model — two-phase execution, recursive `emit-tree!`, drill-down primitives, and the Phase 2 tree DSL |
 | [Architecture](docs/ARCHITECTURE.md) | System architecture and design decisions |
 | [GEPA Guide](docs/GEPA-GUIDE.md) | Prompt optimization with GEPA |
@@ -196,8 +236,9 @@ ORC is a library — consumers provide:
 | [ColBERT Integration](docs/COLBERT-INTEGRATION.md) | Semantic retrieval setup |
 | [Ontology](docs/ONTOLOGY.md) | Concept graph and pattern discovery |
 | [MCP Sheet Builder](docs/MCP-SHEET-BUILDER-GUIDE.md) | Dynamic workflow generation |
+| [Self-Improving Loop](docs/SELF-IMPROVING-LOOP.md) | Alpha-stage: auto-classify, pattern evolution, behavior minting |
 | [Event Store Patterns](docs/EVENT-STORE-PATTERNS.md) | Grain event sourcing patterns |
-| [Pattern Compendium](docs/pattern-compendium.md) | Complete pattern reference |
+| [Contributor Grain Patterns](docs/contributors/CONTRIBUTOR-GRAIN-PATTERNS.md) | Complete pattern reference (contributors) |
 
 ### Benchmarks
 

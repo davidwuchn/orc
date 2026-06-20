@@ -32,10 +32,19 @@
             [ai.obney.orc.ontology.core.reranker :as reranker]
             [ai.obney.orc.ontology.core.task-classifier :as task-classifier]
             [ai.obney.orc.ontology.core.seeds :as seeds]
-            [ai.obney.orc.colbert.interface :as colbert]
             [ai.obney.grain.event-store-v3.interface :as event-store]
             [ai.obney.grain.read-model-processor-v2.interface :as rmp]
             [com.brunobonacci.mulog :as u]))
+
+(defn- colbert-fn
+  "Lazily resolve a fn from the colbert component. Returns nil when colbert
+   is not on the classpath, so the ontology builds and runs without it — the
+   ColBERT-backed Living-Description search simply returns no results, while
+   graph + embedding retrieval is unaffected. (ColBERT is an optional Layer-5
+   upgrade; see COMPONENT-MAP.md.)"
+  [fn-name]
+  (try (requiring-resolve (symbol "ai.obney.orc.colbert.interface" (name fn-name)))
+       (catch Throwable _ nil)))
 
 ;; =============================================================================
 ;; Static Ontology Access
@@ -237,7 +246,9 @@
    'ontology-descriptions', or nil if none exists."
   [ctx]
   (let [candidates (filter #(= "ontology-descriptions" (:index-name %))
-                           (colbert/list-indexes ctx))]
+                           (if-let [list-indexes (colbert-fn 'list-indexes)]
+                             (list-indexes ctx)
+                             []))]
     (when (seq candidates)
       (last (sort-by :created-at candidates)))))
 
@@ -370,7 +381,7 @@
                     (rerank-fetch-k k)
                     (if (= granularity :all) k (* 3 k)))
           raw-results (mapv normalize-search-result
-                            (colbert/search ctx
+                            ((colbert-fn 'search) ctx
                               {:query query
                                :index-id (:index-id index)
                                :k fetch-k}))
