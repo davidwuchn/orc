@@ -44,10 +44,10 @@ and deps.edn snippets: **[PACKAGES.md](PACKAGES.md)**.
 Example — judges with zero Python and zero DJL:
 
 ```clojure
-;; in your project's deps.edn
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "<sha>"
-             :deps/root "projects/orc-evaluation"}
+;; in your project's deps.edn — lib name matches the package
+obneyai/orc-evaluation {:git/url "https://github.com/ObneyAI/orc.git"
+                        :git/sha "<sha>"
+                        :deps/root "projects/orc-evaluation"}
 ```
 
 Every non-leaf package bundles the engine (`orc-service` + its `langfuse`

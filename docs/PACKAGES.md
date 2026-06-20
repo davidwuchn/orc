@@ -6,30 +6,44 @@ you need** to keep your dependency footprint (and JVM/Python weight) minimal.
 Each package is a `projects/<name>` with its own `deps.edn` that bundles exactly
 the components it needs.
 
-Every package is git-dep'd the same way — point `:deps/root` at the project:
+**You pull in ONE package and it bundles every component that capability needs
+(transitively).** You never assemble components by hand. Every package is
+git-dep'd the same way — give it a lib name that matches the package and point
+`:deps/root` at the project:
 
 ```clojure
-obneyai/orc
+;; in your project's deps.edn — pick the ONE package you need (table below)
+obneyai/orc-evaluation                  ;; lib name = the package name
 {:git/url "https://github.com/ObneyAI/orc.git"
  :git/sha "..."                         ;; pin to a reviewed commit
- :deps/root "projects/<package-name>"}
+ :deps/root "projects/orc-evaluation"}  ;; <- the project that bundles it
 ```
+
+> **Naming matters if you combine packages.** The lib name (the map key) is what
+> Clojure's tools.deps uses to identify the dependency. Name each one after its
+> package (`obneyai/orc-evaluation`, `obneyai/orc-ontology`, …) — not all
+> `obneyai/orc` — so you can pull **more than one** in the same `deps.edn`
+> without the keys colliding. The only time you combine packages today is
+> ColBERT (see [orc-colbert](#orc-colbert)); every other capability lives in a
+> single package.
 
 ## Package summary
 
-| Package | What you get | Pulls DJL? | Pulls Python? |
+| Package (`:deps/root`) | What you get | Pulls DJL? | Pulls Python? |
 |---------|-------------|:----------:|:-------------:|
-| **orc-service** | The engine: behavior-tree DSL, runtime, event-sourced execution, streaming, RLM (`:repl-researcher`) | No | No |
-| **orc-evaluation** | Engine + LLM-as-judge evaluation (grounding, reasoning, completeness, instruction-following) | No | No |
-| **orc-gepa** | Engine + evaluation + GEPA prompt optimization (Pareto + reflective mutation) | No | No |
-| **orc-ontology** | Engine + general-purpose event-sourced concept graph, DJL embeddings, evolutionary builder, self-improving write-side | **Yes** (DJL, in-JVM) | No |
-| **orc-colbert** | ColBERT late-interaction retrieval — the optional Layer-5 signal. Add alongside `orc-ontology`. | No | **Yes** (`.venv-colbert`) |
-| **orc-mcp-sheet-builder** | Engine + dynamic tree generation from MCP tool schemas (Layer 8, standalone) | No | No |
-| **orc** | The umbrella — everything above. The full self-improving loop. | Yes | Yes |
+| **`projects/orc-service`** | The engine: behavior-tree DSL, runtime, event-sourced execution, streaming, RLM (`:repl-researcher`) | No | No |
+| **`projects/orc-evaluation`** | Engine + LLM-as-judge evaluation (grounding, reasoning, completeness, instruction-following) | No | No |
+| **`projects/orc-gepa`** | Engine + evaluation + GEPA prompt optimization (Pareto + reflective mutation) | No | No |
+| **`projects/orc-ontology`** | Engine + general-purpose event-sourced concept graph, DJL embeddings, evolutionary builder, self-improving write-side | **Yes** (DJL, in-JVM) | No |
+| **`projects/orc-colbert`** | ColBERT late-interaction retrieval — the optional Layer-5 signal. Add alongside `orc-ontology`. | No | **Yes** (`.venv-colbert`) |
+| **`projects/orc-mcp-sheet-builder`** | Engine + dynamic tree generation from MCP tool schemas (Layer 8, standalone) | No | No |
+| **`projects/orc`** | The umbrella — everything above. The full self-improving loop. | Yes | Yes |
 
-> Every non-leaf package bundles the engine (`orc-service` + its `langfuse`
-> tracing layer) transitively. You never pull `orc-service` separately unless
-> you want *only* the engine.
+> The bold name is both the **lib name** to use in your `deps.edn` (e.g.
+> `obneyai/orc-evaluation`) and the **`:deps/root`** to point at (e.g.
+> `projects/orc-evaluation`). Every non-leaf package bundles the engine
+> (`orc-service` + its `langfuse` tracing layer) transitively — you never pull
+> `orc-service` separately unless you want *only* the engine.
 
 ## orc-service
 
@@ -40,8 +54,8 @@ libraries only: an LLM-call layer (DSCloj), structured logging (mulog), and a
 safe Clojure interpreter (sci). No model loading, no Python.
 
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-service"}
+obneyai/orc-service {:git/url "https://github.com/ObneyAI/orc.git"
+                     :git/sha "..." :deps/root "projects/orc-service"}
 ```
 
 ## orc-evaluation
@@ -52,8 +66,8 @@ Living-Description gate is resolved lazily, so **judges run with zero ontology,
 zero DJL, zero Python**.
 
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-evaluation"}
+obneyai/orc-evaluation {:git/url "https://github.com/ObneyAI/orc.git"
+                        :git/sha "..." :deps/root "projects/orc-evaluation"}
 ```
 
 ## orc-gepa
@@ -63,8 +77,8 @@ The engine plus evaluation plus GEPA instruction optimization. Optimizes the
 reflective mutation, scored by the evaluation judges. No ontology, no Python.
 
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-gepa"}
+obneyai/orc-gepa {:git/url "https://github.com/ObneyAI/orc.git"
+                  :git/sha "..." :deps/root "projects/orc-gepa"}
 ```
 
 ## orc-ontology
@@ -78,8 +92,8 @@ embeddings** — no Python. ColBERT is resolved lazily; add `orc-colbert` for th
 third signal.
 
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-ontology"}
+obneyai/orc-ontology {:git/url "https://github.com/ObneyAI/orc.git"
+                      :git/sha "..." :deps/root "projects/orc-ontology"}
 ```
 
 ## orc-colbert
@@ -89,9 +103,15 @@ Add it **alongside** `orc-ontology` to light up the third signal in
 `hybrid-search`. This is the one package that requires a Python environment
 (`.venv-colbert`).
 
+Because you pull *two* packages here, give them distinct lib names so the keys
+don't collide:
+
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-colbert"}
+;; ontology + colbert together — distinct keys, same repo + sha
+obneyai/orc-ontology {:git/url "https://github.com/ObneyAI/orc.git"
+                      :git/sha "..." :deps/root "projects/orc-ontology"}
+obneyai/orc-colbert  {:git/url "https://github.com/ObneyAI/orc.git"
+                      :git/sha "..." :deps/root "projects/orc-colbert"}
 ```
 
 ## orc-mcp-sheet-builder
@@ -101,8 +121,8 @@ analyze its schemas, and generate an ORC behavior tree. Standalone — no ontolo
 no ColBERT, no Python.
 
 ```clojure
-obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
-             :git/sha "..." :deps/root "projects/orc-mcp-sheet-builder"}
+obneyai/orc-mcp-sheet-builder {:git/url "https://github.com/ObneyAI/orc.git"
+                               :git/sha "..." :deps/root "projects/orc-mcp-sheet-builder"}
 ```
 
 ## orc (umbrella)

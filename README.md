@@ -4,44 +4,63 @@
 
 ORC provides composable primitives for building, executing, optimizing, and evaluating LLM-powered workflows. It's designed as a library that consumers pull in as a git dependency.
 
+![ORC workflows are behavior trees — and any tree can be composed as a subbehavior inside a bigger one](docs/images/bt-compose-delegate.svg)
+
+*An ORC workflow **is** a behavior tree. Composites (`sequence`, `fallback`, `parallel`, `map-each`) shape control flow; leaves (`llm`, `code`, `condition`, `repl-researcher`) do the work — and any whole tree can be dropped into a bigger one as a subbehavior via `:delegate`. That's the entire mental model.*
+
 > **Early-stage software.** ORC is under active development. Expect sharp edges and breaking changes — APIs, event schemas, and conventions may shift between commits. Pin to a specific `:git/sha` and review the diff before updating. Expect incomplete docs, use at your own peril!
 
 ## New here?
 
-Start with **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — a progressive contract-analysis walkthrough from bare behavior tree through judges, GEPA, ontology, and self-improvement. _(Written by DOC-04; link active once that lands.)_
+Start with **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** — a progressive contract-analysis walkthrough from bare behavior tree through judges, GEPA, ontology, and self-improvement.
 
-## Pick your layer
+## Pick your package
 
-ORC is opt-in by layer. Most consumers only need Layer 0. See **[docs/COMPONENT-MAP.md](docs/COMPONENT-MAP.md)** for the full dependency graph and known issues.
+ORC ships as standalone packages — **you pull in exactly ONE package and it
+bundles every component that capability needs** (transitively). You don't
+assemble components by hand. Find the row that matches what you want, then add
+one dependency: give it the lib name shown and point `:deps/root` at the project.
 
-| Layer | Capability | Component(s) | Python? |
-|------:|-----------|------------|:-------:|
-| 0 | Core execution — behavior tree DSL, workflow execution, event-sourced state | `orc-service` | No |
-| 1 | LLM judges — grounding, reasoning, completeness, instruction-following | `evaluation` | No |
-| 2 | Observability — Langfuse trace forwarding | `langfuse` | No |
-| 3 | Prompt optimization — GEPA Pareto-frontier instruction evolution | `gepa` + `evaluation` | No |
-| 4 | DJL embeddings — dense vector embeddings, semantic concept search | `ontology` | No |
-| 5 | ColBERT retrieval — late-interaction scoring, PLAID indexing | `colbert` | **Yes** |
-| 6 | Evolutionary ontology builder — ingest CSV/JSON/SQL/text, auto-discover concepts | `ontology` + ORC sheets | No |
-| 7 | Self-improving loop — auto-classify executions, pattern evolution, behavior minting | `orc-service` + `evaluation` + `ontology` + `colbert` | **Yes** |
-| 8 | MCP Sheet Builder — dynamic workflow generation from MCP tool schemas | `mcp-sheet-builder` | No |
+| I want… | Pull this package | Heavy deps |
+|---|---|:--:|
+| Just run behavior trees (the engine) | `obneyai/orc-service` → `projects/orc-service` | — |
+| …plus LLM-as-judge evaluation | `obneyai/orc-evaluation` → `projects/orc-evaluation` | — |
+| …plus GEPA prompt optimization | `obneyai/orc-gepa` → `projects/orc-gepa` | — |
+| …plus concept graph + DJL embeddings | `obneyai/orc-ontology` → `projects/orc-ontology` | DJL (JVM) |
+| …plus ColBERT retrieval (added to ontology) | also `obneyai/orc-colbert` → `projects/orc-colbert` | Python |
+| …plus MCP-driven tree generation | `obneyai/orc-mcp-sheet-builder` → `projects/orc-mcp-sheet-builder` | — |
+| **Everything** / the full self-improving loop | `obneyai/orc` → `projects/orc` | DJL + Python |
 
-> **Slim ORC:** To use only behavior tree execution, depend on `components/orc-service` directly and skip the `projects/orc` umbrella — this eliminates DJL, all Python subprocess machinery, GEPA, evaluation, langfuse, ontology, and mcp-sheet-builder. `orc-service` brings in exactly three libraries: DSCloj, mulog, and sci.
->
-> ```clojure
-> ;; in your project's deps.edn
-> orc/orc-service {:git/url "https://github.com/ObneyAI/orc.git"
->                  :git/sha "<sha>"
->                  :deps/root "components/orc-service"}
-> ```
+```clojure
+;; deps.edn — pick ONE row above; use its lib name + :deps/root
+obneyai/orc-evaluation {:git/url "https://github.com/ObneyAI/orc.git"
+                        :git/sha "..."                    ;; pin to a reviewed commit
+                        :deps/root "projects/orc-evaluation"}
+```
 
-> **Self-improving loop is alpha-stage.** Layer 7 (`:auto-classify?` + `:recursive?`) works end-to-end on workflows that align with the shipped seed corpus, but force-fit classifications appear on out-of-distribution tasks. It requires Python (via the `colbert` component's subprocess bridge). See [docs/SELF-IMPROVING-LOOP.md](docs/SELF-IMPROVING-LOOP.md) for an honest current-state breakdown.
+Every non-leaf package bundles the engine (`orc-service`) transitively, so the
+require namespaces are the same whichever you pick. The only time you add a
+*second* package is ColBERT (pull `orc-ontology` **and** `orc-colbert` — distinct
+lib names so the keys don't collide). Full per-package detail and the
+ontology+colbert combination live in **[docs/PACKAGES.md](docs/PACKAGES.md)**; the
+layer → internal-component mapping and dependency graph live in
+**[docs/COMPONENT-MAP.md](docs/COMPONENT-MAP.md)**.
 
-> **RLM recursive mode is now the default.** `:repl-researcher` nodes default to `{:rlm {:recursive? true}}`; terminal mode (`:rlm true` / `:rlm {:recursive? false}`) is deprecated and will be removed.
+> **Self-improving loop is alpha-stage.** The full loop (`:auto-classify?` +
+> `:recursive?`) works end-to-end on workflows that align with the shipped seed
+> corpus, but force-fit classifications appear on out-of-distribution tasks. It
+> needs the ColBERT Python bridge. See [docs/SELF-IMPROVING-LOOP.md](docs/SELF-IMPROVING-LOOP.md)
+> for an honest current-state breakdown.
+
+> **RLM recursive mode is now the default.** `:repl-researcher` nodes default to
+> `{:rlm {:recursive? true}}`; terminal mode (`:rlm true` / `:rlm {:recursive? false}`)
+> is deprecated and will be removed.
 
 ## Quick Start
 
-Add to your `deps.edn`:
+Add the package you picked above to your `deps.edn`. The umbrella (`obneyai/orc`
+→ `projects/orc`) gives you everything to start experimenting; swap it for a
+leaner package (e.g. `obneyai/orc-service`) once you know which layers you need:
 
 ```clojure
 obneyai/orc {:git/url "https://github.com/ObneyAI/orc.git"
@@ -144,6 +163,16 @@ Commands -> Events -> Read Models -> Queries
 | `orc/llm-condition` | Leaf | Branch based on LLM yes/no judgment. |
 | `orc/repl-researcher` | Leaf | Iterative: generate code, call MCP tools, refine. |
 | `orc/delegate` | Leaf | Execute another workflow with isolated blackboard. |
+
+These compose into real control flow. A `fallback` with a `condition` is if/else; an `llm-condition` inside a `fallback` is LLM-driven routing:
+
+![A fallback with a condition gives if/else branching](docs/images/bt-fallback-condition.svg)
+
+![An llm-condition inside a fallback routes on an LLM yes/no judgment](docs/images/bt-llm-routing.svg)
+
+And the flagship leaf, `repl-researcher`, is a whole two-phase reasoning loop that drops into a tree like any other node — see the [RLM Guide](docs/RLM-GUIDE.md):
+
+![A repl-researcher node composed inside a larger tree](docs/images/bt-repl-researcher-composed.svg)
 
 ## Development Setup
 

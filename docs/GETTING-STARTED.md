@@ -1,11 +1,9 @@
 # Getting Started with ORC
 
-> **Phases 1–3** of the progressive getting-started guide. Each phase adds one
-> capability. By the end of Phase 3 you have a judged, domain-scored contract
-> analysis workflow running in production.
->
-> **Phases 4–6** (prompt optimization, ontology memory, self-improving loop) are in a
-> separate doc — see [GETTING-STARTED-PHASES-4-6.md](GETTING-STARTED-PHASES-4-6.md) once DOC-05 lands.
+> A progressive getting-started guide in **six phases** — each adds one
+> capability to the same workflow: core behavior tree → LLM judges → custom
+> judges → GEPA prompt optimization → ontology memory → the self-improving loop.
+> Start at Phase 1 and stop wherever you have what you need.
 
 ---
 
@@ -19,6 +17,13 @@ that guarantees the steps run and owns the contracts between them. The leverage
 is not "call an LLM" — it is composing the right nodes and sub-behaviors so
 your methodology is *structural*, guaranteed by the tree, rather than crammed
 into one prompt and hoped for.
+
+![ORC workflows are behavior trees, and any tree composes as a subbehavior in a bigger one](images/bt-compose-delegate.svg)
+
+*Keep this picture in mind as you read: every phase below adds capability to this
+same tree — judges on its leaves, GEPA tuning its prompts, an ontology giving it
+memory, and finally a `repl-researcher` leaf that designs its own subtree at
+runtime.*
 
 ---
 
@@ -223,6 +228,14 @@ The `:status` field is one of `:success`, `:failure`, or `:timeout`.
   ├── [leaf] impact (ai) model=google/gemini-2.5-flash
   ├── [leaf] summarize (ai) model=google/gemini-2.5-flash
 ```
+
+Right now it's the simplest shape — a flat `sequence`. The same nodes compose
+into real control flow as the workflow grows. A `fallback` wrapping a `condition`
+is if/else; an `llm-condition` inside a `fallback` is LLM-driven routing:
+
+![A fallback with a condition gives if/else branching](images/bt-fallback-condition.svg)
+
+![An llm-condition inside a fallback routes on an LLM yes/no judgment](images/bt-llm-routing.svg)
 
 ### Key concepts
 
@@ -1142,6 +1155,13 @@ knowledge-work phase:
 
 Terminal mode is the deprecated opt-out. Every `:repl-researcher` is recursive unless
 you explicitly disable it.
+
+![The recursive RLM execution cycle — Phase 1 reasons, emits a tree, Phase 2 runs it, results flow back to Phase 1](images/bt-phase1-phase2-loop.svg)
+
+*In recursive mode the researcher loops: Phase 1 (the model) inspects state and
+`emit-tree!`s a subtree, Phase 2 executes it, and the outputs flow back into
+Phase 1 — so the leaf keeps designing and running new subtrees until it calls
+`final!`.*
 
 **Source-verified — `executor.clj:2172-2176` verbatim comment + binding:**
 
