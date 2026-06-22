@@ -18,7 +18,32 @@ is not "call an LLM" — it is composing the right nodes and sub-behaviors so
 your methodology is *structural*, guaranteed by the tree, rather than crammed
 into one prompt and hoped for.
 
-![ORC workflows are behavior trees, and any tree composes as a subbehavior in a bigger one](images/bt-compose-delegate.svg)
+```mermaid
+flowchart TB
+  root["<b>analyze-document</b><br/>SEQUENCE · all steps in order"]:::seq
+  root --> extract["<b>extract</b><br/>LLM leaf<br/><i>pull raw clauses</i><hr/>▸ reads&nbsp;&nbsp;document<br/>◂ writes&nbsp;&nbsp;clauses"]:::llm
+  root --> reviewRef[["<b>delegate → clause-review</b><br/>reusable subbehavior"]]:::sub
+  root --> riskRef[["<b>delegate → risk-scoring</b><br/>reusable subbehavior"]]:::sub
+  reviewRef -. expands to .-> CR
+  riskRef -. expands to .-> RS
+
+  subgraph CR["clause-review · its own tree"]
+    direction TB
+    crRoot["<b>clause-review</b><br/>SEQUENCE"]:::seq
+    crRoot --> c1["<b>classify</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;clauses<br/>◂ writes&nbsp;&nbsp;classes"]:::llm
+    crRoot --> c2["<b>flag risky terms</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;clauses<br/>◂ writes&nbsp;&nbsp;flags"]:::code
+  end
+  subgraph RS["risk-scoring · its own tree"]
+    direction TB
+    rsRoot["<b>risk-scoring</b><br/>SEQUENCE"]:::seq
+    rsRoot --> r1["<b>score severity</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;flags, classes<br/>◂ writes&nbsp;&nbsp;risk"]:::llm
+  end
+
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 *Keep this picture in mind as you read: every phase below adds capability to this
 same tree — judges on its leaves, GEPA tuning its prompts, an ontology giving it
@@ -229,13 +254,51 @@ The `:status` field is one of `:success`, `:failure`, or `:timeout`.
   ├── [leaf] summarize (ai) model=google/gemini-2.5-flash
 ```
 
+The same tree as a labelled behavior tree — each leaf is a card showing its kind and the blackboard keys it **reads** and **writes**:
+
+```mermaid
+flowchart TB
+  main["<b>main</b><br/>SEQUENCE · in order, stop on failure"]:::seq
+  main --> survey["<b>survey</b><br/>LLM · leaf 1<br/><i>structure & key provisions</i><hr/>▸ reads&nbsp;&nbsp;contract-v2, contract-v3<br/>◂ writes&nbsp;&nbsp;reasoning, document-survey"]:::llm
+  main --> diff["<b>diff</b><br/>LLM · leaf 2<br/><i>clause-by-clause differences</i><hr/>▸ reads&nbsp;&nbsp;…, document-survey<br/>◂ writes&nbsp;&nbsp;reasoning, section-diffs"]:::llm
+  main --> classify["<b>classify</b><br/>LLM · leaf 3<br/><i>material vs minor</i><hr/>▸ reads&nbsp;&nbsp;section-diffs<br/>◂ writes&nbsp;&nbsp;reasoning, major-changes"]:::llm
+  main --> impact["<b>impact</b><br/>LLM · leaf 4<br/><i>business impact</i><hr/>▸ reads&nbsp;&nbsp;major-changes, section-diffs<br/>◂ writes&nbsp;&nbsp;reasoning, impact-analysis"]:::llm
+  main --> summarize["<b>summarize</b><br/>LLM · leaf 5<br/><i>exec summary</i><hr/>▸ reads&nbsp;&nbsp;document-survey, major-changes, impact-analysis<br/>◂ writes&nbsp;&nbsp;reasoning, summary"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
+
 Right now it's the simplest shape — a flat `sequence`. The same nodes compose
 into real control flow as the workflow grows. A `fallback` wrapping a `condition`
 is if/else; an `llm-condition` inside a `fallback` is LLM-driven routing:
 
-![A fallback with a condition gives if/else branching](images/bt-fallback-condition.svg)
+```mermaid
+flowchart TB
+  route["<b>handle clause</b><br/>FALLBACK · if/else"]:::fb
+  route --> s["<b>standard path</b><br/>SEQUENCE"]:::seq
+  s --> cond(["<b>is it boilerplate?</b><br/>CONDITION · code predicate"]):::cond
+  s --> auto["<b>auto-accept</b><br/>CODE leaf"]:::code
+  route --> review["<b>send to review</b><br/>LLM leaf"]:::llm
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef cond fill:#713f12,stroke:#facc15,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
 
-![An llm-condition inside a fallback routes on an LLM yes/no judgment](images/bt-llm-routing.svg)
+```mermaid
+flowchart TB
+  route["<b>route by risk</b><br/>FALLBACK"]:::fb
+  route --> s["<b>high-risk path</b><br/>SEQUENCE"]:::seq
+  s --> q{{"<b>is it high-risk?</b><br/>LLM-CONDITION · yes/no"}}:::llmc
+  s --> esc["<b>escalate to counsel</b><br/>LLM leaf"]:::llm
+  route --> note["<b>note & continue</b><br/>CODE leaf"]:::code
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+```
 
 ### Key concepts
 
@@ -1149,14 +1212,32 @@ knowledge-work phase:
              :timeout-ms 900000)
 ```
 
-![The three-node composed tree — researcher embedded between two static LLM nodes](images/bt-repl-researcher-composed.svg)
+```mermaid
+flowchart TB
+  seq["<b>analysis pipeline</b><br/>SEQUENCE"]:::seq
+  seq --> pre["<b>prepare</b><br/>LLM · leaf<br/><i>static prompt</i><hr/>▸ reads&nbsp;&nbsp;contract-v2, contract-v3<br/>◂ writes&nbsp;&nbsp;brief"]:::llm
+  seq --> rlm["<b>investigate</b> &#9662;<br/>REPL-RESEARCHER · leaf<br/><i>designs + runs its own subtree (Phase 1 ↔ 2)</i><hr/>▸ reads&nbsp;&nbsp;brief<br/>◂ writes&nbsp;&nbsp;findings"]:::rlm
+  seq --> post["<b>summarize</b><br/>LLM · leaf<br/><i>static prompt</i><hr/>▸ reads&nbsp;&nbsp;findings<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+```
 
 ### Recursive is the default
 
 Terminal mode is the deprecated opt-out. Every `:repl-researcher` is recursive unless
 you explicitly disable it.
 
-![The recursive RLM execution cycle — Phase 1 reasons, emits a tree, Phase 2 runs it, results flow back to Phase 1](images/bt-phase1-phase2-loop.svg)
+```mermaid
+flowchart TB
+  p1["<b>Phase 1 — reason</b><br/>model inspects sandbox-vars,<br/>runs (llm …) / (code …), drills into prior trees"]:::rlm
+  p1 -->|"emit-tree!"| p2["<b>Phase 2 — execute</b><br/>run the emitted subtree<br/>sequence / parallel / llm / code …"]:::seq
+  p2 -->|"outputs merge into sandbox-vars"| p1
+  p1 -->|"final!"| done(["<b>return result</b>"]):::done
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef done fill:#0f766e,stroke:#5eead4,color:#fff;
+```
 
 *In recursive mode the researcher loops: Phase 1 (the model) inspects state and
 `emit-tree!`s a subtree, Phase 2 executes it, and the outputs flow back into

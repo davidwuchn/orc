@@ -440,7 +440,24 @@ Execute another workflow (sheet) with isolated blackboard. Useful for composing 
 
 This tutorial builds a complete lead qualification and nurturing workflow, demonstrating all DSL features.
 
-![Delegate composition: lead-processor → lead-enrichment](images/bt-delegate-example.svg)
+```mermaid
+flowchart TB
+  root["<b>lead-processor</b><br/>SEQUENCE"]:::seq
+  root --> intake["<b>intake</b><br/>LLM · leaf<hr/>▸ reads&nbsp;&nbsp;raw-lead<br/>◂ writes&nbsp;&nbsp;lead"]:::llm
+  root --> enrichRef[["<b>delegate → lead-enrichment</b><br/>reusable subbehavior · isolated blackboard"]]:::sub
+  root --> score["<b>score</b><br/>CODE · leaf<hr/>▸ reads&nbsp;&nbsp;enriched<br/>◂ writes&nbsp;&nbsp;grade"]:::code
+  enrichRef -. "reads lead → writes enriched" .-> ENR
+  subgraph ENR["lead-enrichment · its own tree, own blackboard"]
+    direction TB
+    er["<b>lead-enrichment</b><br/>SEQUENCE"]:::seq
+    er --> e1["<b>company lookup</b><br/>LLM · leaf"]:::llm
+    er --> e2["<b>fit analysis</b><br/>LLM · leaf"]:::llm
+  end
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 ### Overview
 
@@ -739,7 +756,16 @@ Combine parallel tracks with parallel processing within each track:
 
 ### Error Handling with Fallback
 
-![3-tier fallback: try primary → try secondary → deterministic default](images/bt-fallback-condition.svg)
+```mermaid
+flowchart TB
+  fb["<b>resolve address</b><br/>FALLBACK · first child that succeeds wins"]:::fb
+  fb --> primary["<b>1 · geocode API</b><br/>CODE · leaf<br/><i>fast path</i>"]:::code
+  fb --> secondary["<b>2 · LLM extract</b><br/>LLM · leaf<br/><i>tried only if #1 fails</i>"]:::llm
+  fb --> default["<b>3 · mark unknown</b><br/>CODE · leaf<br/><i>deterministic default — always succeeds</i>"]:::code
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
 
 Gracefully handle failures with fallback alternatives:
 
@@ -768,7 +794,18 @@ Gracefully handle failures with fallback alternatives:
 
 ### LLM-Driven Routing
 
-![LLM-condition routing: fallback tries each branch, first success wins](images/bt-llm-routing.svg)
+```mermaid
+flowchart TB
+  route["<b>route lead</b><br/>FALLBACK · first success wins"]:::fb
+  route --> hot["<b>sales-ready path</b><br/>SEQUENCE"]:::seq
+  hot --> q{{"<b>is it sales-ready?</b><br/>LLM-CONDITION · model judges yes/no<hr/>▸ reads&nbsp;&nbsp;lead, grade"}}:::llmc
+  hot --> book["<b>book a call</b><br/>LLM · leaf<hr/>◂ writes&nbsp;&nbsp;meeting"]:::llm
+  route --> nurture["<b>nurture</b><br/>LLM · leaf<br/><i>default branch when not sales-ready</i><hr/>◂ writes&nbsp;&nbsp;drip-campaign"]:::llm
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
 
 Use `llm-condition` for intelligent routing:
 

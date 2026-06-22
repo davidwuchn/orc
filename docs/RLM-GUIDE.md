@@ -59,7 +59,17 @@ A useful test: *would two different inputs to this step want two structurally di
 
 A common pattern is **pre-process → research → post-process**, using the high-level DSL:
 
-![repl-researcher inside a 3-node sequence — the Phase 1↔Phase 2 loop runs inside the researcher node](images/bt-repl-researcher-composed.svg)
+```mermaid
+flowchart TB
+  seq["<b>pipeline</b><br/>SEQUENCE"]:::seq
+  seq --> pre["<b>pre-process</b><br/>LLM · leaf<br/><i>clean / normalize input</i><hr/>▸ reads&nbsp;&nbsp;raw<br/>◂ writes&nbsp;&nbsp;clean"]:::llm
+  seq --> rlm["<b>research</b> &#9662;<br/>REPL-RESEARCHER · leaf<br/><i>Phase 1 ↔ Phase 2 loop runs inside this node</i><hr/>▸ reads&nbsp;&nbsp;clean<br/>◂ writes&nbsp;&nbsp;findings"]:::rlm
+  seq --> post["<b>post-process</b><br/>CODE · leaf<br/><i>package the output</i><hr/>▸ reads&nbsp;&nbsp;findings<br/>◂ writes&nbsp;&nbsp;report"]:::code
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+```
 
 ```clojure
 (require '[ai.obney.orc.orc-service.interface :as orc])
@@ -123,7 +133,16 @@ The simplest case: a workflow whose root is a single `repl-researcher` node.
 
 > **Prefer the composed pattern** — a pre-process node cleans the input, the researcher explores, a post-process node packages the output. See the "Composition" section above for the three-node pattern.
 
-![Phase 1 ↔ Phase 2 recursive loop — what happens inside the researcher node](images/bt-phase1-phase2-loop.svg)
+```mermaid
+flowchart TB
+  p1["<b>Phase 1 — reason</b><br/>model inspects sandbox-vars,<br/>runs (llm …) / (code …), drills into prior trees"]:::rlm
+  p1 -->|"emit-tree!"| p2["<b>Phase 2 — execute</b><br/>run the emitted subtree<br/>sequence / parallel / llm / code …"]:::seq
+  p2 -->|"outputs merge into sandbox-vars"| p1
+  p1 -->|"final!"| done(["<b>return result</b>"]):::done
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef done fill:#0f766e,stroke:#5eead4,color:#fff;
+```
 
 ```clojure
 (require '[ai.obney.orc.orc-service.interface :as orc])

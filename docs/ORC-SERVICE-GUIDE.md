@@ -272,11 +272,51 @@ Use an LLM for yes/no decisions.
 
 A primary tree composing two reusable subbehaviors via `:delegate`:
 
-![A primary behavior tree delegating to two reusable subbehavior sheets](images/bt-compose-delegate.svg)
+```mermaid
+flowchart TB
+  root["<b>primary</b><br/>SEQUENCE"]:::seq
+  root --> a["<b>prepare</b><br/>LLM · leaf"]:::llm
+  root --> subA[["<b>delegate → enrich</b><br/>subbehavior sheet"]]:::sub
+  root --> subB[["<b>delegate → score</b><br/>subbehavior sheet"]]:::sub
+  root --> fin["<b>finalize</b><br/>CODE · leaf"]:::code
+  subA -. reusable .-> EA
+  subB -. reusable .-> EB
+  subgraph EA["enrich · own sheet + blackboard"]
+    direction TB
+    ea["<b>enrich</b><br/>SEQUENCE"]:::seq
+    ea --> ea1["<b>lookup</b><br/>LLM · leaf"]:::llm
+    ea --> ea2["<b>classify</b><br/>LLM · leaf"]:::llm
+  end
+  subgraph EB["score · own sheet + blackboard"]
+    direction TB
+    eb["<b>score</b><br/>SEQUENCE"]:::seq
+    eb --> eb1["<b>compute grade</b><br/>CODE · leaf"]:::code
+  end
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 Each `:delegate` is a clean seam — the child runs against its own isolated blackboard, and only the declared `:reads`/`:writes` cross the boundary:
 
-![The delegate seam: parent passes :reads in, child returns :writes out, across an isolated blackboard](images/bt-delegate-seam.svg)
+```mermaid
+flowchart TB
+  parent["<b>parent tree</b><br/>blackboard · { order, … , result }"]:::seq
+  parent --> del[["<b>delegate → fulfil-order</b><br/>only reads/writes cross the seam"]]:::sub
+  del -->|"reads: order ▸ copied IN"| child
+  child -->|"writes: result ◂ copied OUT"| del
+  subgraph CHILD["fulfil-order · ISOLATED blackboard { order, picked, packed, result }"]
+    direction TB
+    child["<b>fulfil-order</b><br/>SEQUENCE"]:::seq
+    child --> c1["<b>pick items</b><br/>LLM · leaf"]:::llm
+    child --> c2["<b>pack & label</b><br/>CODE · leaf"]:::code
+  end
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 Execute another workflow with isolated blackboard.
 
@@ -288,7 +328,17 @@ Execute another workflow with isolated blackboard.
   :timeout-ms 60000)             ;; Optional timeout
 ```
 
-![A single :delegate node wired into a parent sequence](images/bt-delegate-example.svg)
+```mermaid
+flowchart TB
+  seq["<b>parent</b><br/>SEQUENCE"]:::seq
+  seq --> a["<b>load</b><br/>CODE · leaf<hr/>◂ writes&nbsp;&nbsp;input-data"]:::code
+  seq --> del[["<b>run-subworkflow</b><br/>DELEGATE → child sheet<hr/>▸ reads&nbsp;&nbsp;input-data<br/>◂ writes&nbsp;&nbsp;result<br/>⏱ timeout 60s"]]:::sub
+  seq --> b["<b>use result</b><br/>LLM · leaf<hr/>▸ reads&nbsp;&nbsp;result"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 **Options:**
 

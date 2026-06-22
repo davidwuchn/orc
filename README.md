@@ -4,42 +4,45 @@
 
 ORC provides composable primitives for building, executing, optimizing, and evaluating LLM-powered workflows. It's designed as a library that consumers pull in as a git dependency.
 
+Behavior trees have run game NPCs and robots for decades. The tree ticks **top-down, root first**; every leaf **reads** the blackboard (sensor / world state) and **writes** an action or command. Here's a game AI deciding how to fight:
+
 ```mermaid
 flowchart TB
-  root["<b>contract-analysis</b><br/>FALLBACK"]:::fb
-  root --> main
-  root --> human["<b>escalate to human</b><br/>LLM · leaf<br/><i>hand off when unsure</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
-
-  subgraph MAIN["seq: analyze"]
+  brain["<b>combat brain</b><br/>FALLBACK · first child that works"]:::fb
+  brain --> engage
+  brain --> patrol["<b>patrol</b><br/>ACTION leaf<br/><i>walk the route</i><hr/>▸ reads&nbsp;&nbsp;waypoints<br/>◂ writes&nbsp;&nbsp;move_cmd"]:::act
+  subgraph ENGAGE["seq: engage"]
     direction TB
-    main["<b>analyze</b><br/>SEQUENCE"]:::seq
-    main --> survey["<b>survey</b><br/>LLM · leaf 1<br/><i>extract key clauses</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;survey"]:::llm
-    main --> diff["<b>diff vs prior</b><br/>LLM · leaf 2<br/><i>find changed terms</i><hr/>▸ reads&nbsp;&nbsp;survey<br/>◂ writes&nbsp;&nbsp;diff"]:::llm
-    main --> route["<b>route by type</b><br/>FALLBACK · leaf 3"]:::fb
-    main --> risk["<b>quantify risk</b> &#9662;<br/>REPL-RESEARCHER · leaf 4<br/><i>RLM designs + runs a subtree</i><hr/>▸ reads&nbsp;&nbsp;diff, survey<br/>◂ writes&nbsp;&nbsp;risk_class"]:::rlm
-    main --> persist["<b>persist findings</b><br/>CODE · leaf 5<br/><i>write record via sci</i><hr/>▸ reads&nbsp;&nbsp;summary, risk_class<br/>◂ writes&nbsp;&nbsp;record"]:::code
-
-    route --> isNDA{{"<b>is it an NDA?</b><br/>LLM-CONDITION<br/><i>route on yes / no</i><hr/>▸ reads&nbsp;&nbsp;contract"}}:::llmc
-    isNDA --> NDA
-    route --> summarize["<b>summarize clauses</b><br/>LLM · leaf<br/><i>plain-language brief</i><hr/>▸ reads&nbsp;&nbsp;diff<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
-
-    subgraph NDA["delegate → NDA review&nbsp;(peek inside) &#9662;"]
-      direction TB
-      ndaRoot["<b>NDA review</b><br/>SEQUENCE"]:::seq
-      ndaRoot --> parties["<b>extract parties</b><br/>LLM · leaf<br/><i>who is bound</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;parties"]:::llm
-      ndaRoot --> conf["<b>confidentiality check</b><br/>CODE · leaf<br/><i>required clauses present?</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;conf_ok"]:::code
-    end
+    engage["<b>engage</b><br/>SEQUENCE · all must pass"]:::seq
+    engage --> see(["<b>enemy visible?</b><br/>CONDITION<br/><i>check line of sight</i><hr/>▸ reads&nbsp;&nbsp;vision"]):::cond
+    engage --> swing["<b>swing sword</b><br/>ACTION leaf<br/><i>strike the target</i><hr/>▸ reads&nbsp;&nbsp;enemy_pos, stamina<br/>◂ writes&nbsp;&nbsp;attack_cmd"]:::act
   end
-
   classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
   classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
-  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
-  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
-  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
-  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+  classDef cond fill:#713f12,stroke:#facc15,color:#fff;
+  classDef act fill:#0f766e,stroke:#5eead4,color:#fff;
 ```
 
-*An ORC workflow **is** a behavior tree (illustrative). Composites (`sequence`, `fallback`, `parallel`, `map-each`) shape control flow; leaves (`llm`, `code`, `condition`, `repl-researcher`) do the work, each declaring the blackboard keys it **reads** and **writes**. Any whole tree can be dropped into a bigger one as a subbehavior via `:delegate` — here "NDA review" is shown peeked-inside. That's the entire mental model.*
+**ORC is the same machine for LLM work** — same composites, same top-down tick, same reads/writes contracts. The leaves just call an LLM or sandboxed code, and the blackboard holds *your* data instead of joint angles. Same tree shape, one-to-one:
+
+```mermaid
+flowchart TB
+  triage["<b>support triage</b><br/>FALLBACK · first child that works"]:::fb
+  triage --> urgent
+  triage --> auto["<b>auto-reply</b><br/>LLM leaf<br/><i>draft a normal response</i><hr/>▸ reads&nbsp;&nbsp;ticket<br/>◂ writes&nbsp;&nbsp;reply"]:::llm
+  subgraph URGENT["seq: urgent path"]
+    direction TB
+    urgent["<b>urgent path</b><br/>SEQUENCE · all must pass"]:::seq
+    urgent --> isUrgent{{"<b>is it urgent?</b><br/>LLM-CONDITION<br/><i>model judges yes / no</i><hr/>▸ reads&nbsp;&nbsp;ticket"}}:::llmc
+    urgent --> esc["<b>escalate</b><br/>LLM leaf<br/><i>page a human + summarize</i><hr/>▸ reads&nbsp;&nbsp;ticket<br/>◂ writes&nbsp;&nbsp;escalation"]:::llm
+  end
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
+
+*Game `condition` → ORC `llm-condition`; game `ACTION` → an `llm`/`code` leaf; game sensors/commands → blackboard keys you **read** and **write**. If you can read the game tree, you can read the ORC one. Composites (`sequence`, `fallback`, `parallel`, `map-each`) shape control flow; any whole tree drops into a bigger one as a subbehavior via `:delegate`. That's the entire mental model — see the [full contract-analysis walkthrough](docs/GETTING-STARTED.md).*
 
 > **Early-stage software.** ORC is under active development. Expect sharp edges and breaking changes — APIs, event schemas, and conventions may shift between commits. Pin to a specific `:git/sha` and review the diff before updating. Expect incomplete docs, use at your own peril!
 

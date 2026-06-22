@@ -80,7 +80,17 @@ a validate/diagnose step) so one bad step self-corrects or fails *with a diagnos
 before poisoning downstream. See also: `docs/ORC-SERVICE-GUIDE.md`,
 `docs/DSL-REFERENCE.md`.
 
-![Subbehavior composition via :delegate](images/bt-compose-delegate.svg)
+```mermaid
+flowchart TB
+  main["<b>main</b><br/>SEQUENCE"]:::seq
+  main --> survey["<b>survey</b><br/>LLM · leaf<hr/>▸ reads&nbsp;&nbsp;document<br/>◂ writes&nbsp;&nbsp;document-survey"]:::llm
+  main --> risk[["<b>risk-check</b><br/>DELEGATE → risk-analysis<hr/>▸ reads&nbsp;&nbsp;document-survey<br/>◂ writes&nbsp;&nbsp;risk-summary"]]:::sub
+  main --> comp[["<b>compliance</b><br/>DELEGATE → compliance-check<hr/>▸ reads&nbsp;&nbsp;document-survey<br/>◂ writes&nbsp;&nbsp;compliance-status"]]:::sub
+  main --> synth["<b>synthesize</b><br/>LLM · leaf<hr/>▸ reads&nbsp;&nbsp;risk-summary, compliance-status<br/>◂ writes&nbsp;&nbsp;final-report"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 ```clojure
 ;; The central tree delegates to independently-versioned sub-sheets
@@ -127,7 +137,23 @@ assuming. Getting a *map* to arrive **parsed** across the seam is node-type-spec
 — see Principle 10. See also: `docs/ORC-SERVICE-GUIDE.md`, `docs/STREAMING.md`
 (lineage/observability across delegated ticks).
 
-![Isolated blackboard seam](images/bt-delegate-seam.svg)
+```mermaid
+flowchart TB
+  parent["<b>analysis-pipeline</b><br/>blackboard · { document, document-survey, risk-summary, … }"]:::seq
+  parent --> del[["<b>delegate → risk-analysis</b>"]]:::sub
+  del -->|"reads: document-survey ▸ IN"| child
+  child -->|"writes: risk-summary ◂ OUT"| del
+  subgraph CHILD["risk-analysis · ISOLATED blackboard — its own keys, its own lineage"]
+    direction TB
+    child["<b>risk-analysis</b><br/>SEQUENCE"]:::seq
+    child --> c1["<b>identify risks</b><br/>LLM · leaf"]:::llm
+    child --> c2["<b>severity score</b><br/>CODE · leaf"]:::code
+  end
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef sub fill:#1f2937,stroke:#94a3b8,color:#e5e7eb,stroke-dasharray:4 3;
+```
 
 ## 4. Subbehaviors can evolve
 
