@@ -18,6 +18,41 @@ is not "call an LLM" — it is composing the right nodes and sub-behaviors so
 your methodology is *structural*, guaranteed by the tree, rather than crammed
 into one prompt and hoped for.
 
+Here's the contract-analysis workflow you'll build, drawn as a behavior tree — each leaf is a card declaring the blackboard keys it **reads** and **writes**. *(Illustrative of the full shape: you start with the flat sequence in Phase 1 and grow into routing, a `:delegate` subbehavior, and an RLM leaf.)*
+
+```mermaid
+flowchart TB
+  root["<b>contract-analysis</b><br/>FALLBACK"]:::fb
+  root --> main
+  root --> human["<b>escalate to human</b><br/>LLM · leaf<br/><i>hand off when unsure</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
+  subgraph MAIN["seq: analyze"]
+    direction TB
+    main["<b>analyze</b><br/>SEQUENCE"]:::seq
+    main --> survey["<b>survey</b><br/>LLM · leaf 1<br/><i>extract key clauses</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;survey"]:::llm
+    main --> diff["<b>diff vs prior</b><br/>LLM · leaf 2<br/><i>find changed terms</i><hr/>▸ reads&nbsp;&nbsp;survey<br/>◂ writes&nbsp;&nbsp;diff"]:::llm
+    main --> route["<b>route by type</b><br/>FALLBACK · leaf 3"]:::fb
+    main --> risk["<b>quantify risk</b> &#9662;<br/>REPL-RESEARCHER · leaf 4<br/><i>RLM designs + runs a subtree</i><hr/>▸ reads&nbsp;&nbsp;diff, survey<br/>◂ writes&nbsp;&nbsp;risk_class"]:::rlm
+    main --> persist["<b>persist findings</b><br/>CODE · leaf 5<br/><i>write record via sci</i><hr/>▸ reads&nbsp;&nbsp;summary, risk_class<br/>◂ writes&nbsp;&nbsp;record"]:::code
+    route --> isNDA{{"<b>is it an NDA?</b><br/>LLM-CONDITION<br/><i>route on yes / no</i><hr/>▸ reads&nbsp;&nbsp;contract"}}:::llmc
+    isNDA --> NDA
+    route --> summarize["<b>summarize clauses</b><br/>LLM · leaf<br/><i>plain-language brief</i><hr/>▸ reads&nbsp;&nbsp;diff<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
+    subgraph NDA["delegate → NDA review&nbsp;(peek inside) &#9662;"]
+      direction TB
+      ndaRoot["<b>NDA review</b><br/>SEQUENCE"]:::seq
+      ndaRoot --> parties["<b>extract parties</b><br/>LLM · leaf<br/><i>who is bound</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;parties"]:::llm
+      ndaRoot --> conf["<b>confidentiality check</b><br/>CODE · leaf<br/><i>required clauses present?</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;conf_ok"]:::code
+    end
+  end
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+```
+
+And because any tree can be a **subbehavior** in a bigger one (via `:delegate`), you factor reusable methodology into its own sheet — `analyze-document` below delegates to independent `clause-review` and `risk-scoring` trees:
+
 ```mermaid
 flowchart TB
   root["<b>analyze-document</b><br/>SEQUENCE · all steps in order"]:::seq
