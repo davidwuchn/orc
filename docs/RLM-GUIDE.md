@@ -135,13 +135,33 @@ The simplest case: a workflow whose root is a single `repl-researcher` node.
 
 ```mermaid
 flowchart TB
-  p1["<b>Phase 1 — reason</b><br/>model inspects sandbox-vars,<br/>runs (llm …) / (code …), drills into prior trees"]:::rlm
-  p1 -->|"emit-tree!"| p2["<b>Phase 2 — execute</b><br/>run the emitted subtree<br/>sequence / parallel / llm / code …"]:::seq
-  p2 -->|"outputs merge into sandbox-vars"| p1
-  p1 -->|"final!"| done(["<b>return result</b>"]):::done
-  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+  start(["repl-researcher leaf begins · goal in"]):::io --> orch
+  orch["🧠 PHASE 1 · ORCHESTRATOR (the model)<br/>inspects sandbox-vars · runs (llm …)/(code …) probes<br/>decides what to build next"]:::rlm
+  orch -->|"emit-tree! · round 1"| T1
+  subgraph T1["⚙️ PHASE 2 · emitted tree #1 — gather"]
+    direction TB
+    g["<b>gather</b><br/>PARALLEL"]:::par
+    g --> g1["<b>fetch filings</b><br/>CODE leaf<hr/>◂ writes&nbsp;&nbsp;filings"]:::code
+    g --> g2["<b>summarize each</b><br/>MAP-EACH → LLM<hr/>▸ reads&nbsp;&nbsp;filings<br/>◂ writes&nbsp;&nbsp;summaries"]:::me
+  end
+  T1 ==>|"results merge → sandbox-vars"| orch
+  orch -->|"not enough yet · emit-tree! · round 2"| T2
+  subgraph T2["⚙️ PHASE 2 · emitted tree #2 — assess"]
+    direction TB
+    a["<b>assess risk</b><br/>SEQUENCE"]:::seq
+    a --> a1["<b>flag risky clauses</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;summaries<br/>◂ writes&nbsp;&nbsp;flags"]:::llm
+    a --> a2["<b>score severity</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;flags<br/>◂ writes&nbsp;&nbsp;risk"]:::code
+  end
+  T2 ==>|"results merge → sandbox-vars"| orch
+  orch -->|"satisfied · final!"| done(["✅ final result returned"]):::done
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:3px;
+  classDef par fill:#0f766e,stroke:#2dd4bf,color:#fff,stroke-width:2px;
   classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
-  classDef done fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef me fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef io fill:#334155,stroke:#94a3b8,color:#fff;
+  classDef done fill:#166534,stroke:#86efac,color:#fff,stroke-width:2px;
 ```
 
 ```clojure
