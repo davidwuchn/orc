@@ -4,9 +4,42 @@
 
 ORC provides composable primitives for building, executing, optimizing, and evaluating LLM-powered workflows. It's designed as a library that consumers pull in as a git dependency.
 
-![ORC workflows are behavior trees — and any tree can be composed as a subbehavior inside a bigger one](docs/images/bt-compose-delegate.svg)
+```mermaid
+flowchart TB
+  root["<b>contract-analysis</b><br/>FALLBACK"]:::fb
+  root --> main
+  root --> human["<b>escalate to human</b><br/>LLM · leaf<br/><i>hand off when unsure</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
 
-*An ORC workflow **is** a behavior tree. Composites (`sequence`, `fallback`, `parallel`, `map-each`) shape control flow; leaves (`llm`, `code`, `condition`, `repl-researcher`) do the work — and any whole tree can be dropped into a bigger one as a subbehavior via `:delegate`. That's the entire mental model.*
+  subgraph MAIN["seq: analyze"]
+    direction TB
+    main["<b>analyze</b><br/>SEQUENCE"]:::seq
+    main --> survey["<b>survey</b><br/>LLM · leaf 1<br/><i>extract key clauses</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;survey"]:::llm
+    main --> diff["<b>diff vs prior</b><br/>LLM · leaf 2<br/><i>find changed terms</i><hr/>▸ reads&nbsp;&nbsp;survey<br/>◂ writes&nbsp;&nbsp;diff"]:::llm
+    main --> route["<b>route by type</b><br/>FALLBACK · leaf 3"]:::fb
+    main --> risk["<b>quantify risk</b> &#9662;<br/>REPL-RESEARCHER · leaf 4<br/><i>RLM designs + runs a subtree</i><hr/>▸ reads&nbsp;&nbsp;diff, survey<br/>◂ writes&nbsp;&nbsp;risk_class"]:::rlm
+    main --> persist["<b>persist findings</b><br/>CODE · leaf 5<br/><i>write record via sci</i><hr/>▸ reads&nbsp;&nbsp;summary, risk_class<br/>◂ writes&nbsp;&nbsp;record"]:::code
+
+    route --> isNDA{{"<b>is it an NDA?</b><br/>LLM-CONDITION<br/><i>route on yes / no</i><hr/>▸ reads&nbsp;&nbsp;contract"}}:::llmc
+    isNDA --> NDA
+    route --> summarize["<b>summarize clauses</b><br/>LLM · leaf<br/><i>plain-language brief</i><hr/>▸ reads&nbsp;&nbsp;diff<br/>◂ writes&nbsp;&nbsp;summary"]:::llm
+
+    subgraph NDA["delegate → NDA review&nbsp;(peek inside) &#9662;"]
+      direction TB
+      ndaRoot["<b>NDA review</b><br/>SEQUENCE"]:::seq
+      ndaRoot --> parties["<b>extract parties</b><br/>LLM · leaf<br/><i>who is bound</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;parties"]:::llm
+      ndaRoot --> conf["<b>confidentiality check</b><br/>CODE · leaf<br/><i>required clauses present?</i><hr/>▸ reads&nbsp;&nbsp;contract<br/>◂ writes&nbsp;&nbsp;conf_ok"]:::code
+    end
+  end
+
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+```
+
+*An ORC workflow **is** a behavior tree (illustrative). Composites (`sequence`, `fallback`, `parallel`, `map-each`) shape control flow; leaves (`llm`, `code`, `condition`, `repl-researcher`) do the work, each declaring the blackboard keys it **reads** and **writes**. Any whole tree can be dropped into a bigger one as a subbehavior via `:delegate` — here "NDA review" is shown peeked-inside. That's the entire mental model.*
 
 > **Early-stage software.** ORC is under active development. Expect sharp edges and breaking changes — APIs, event schemas, and conventions may shift between commits. Pin to a specific `:git/sha` and review the diff before updating. Expect incomplete docs, use at your own peril!
 
@@ -164,15 +197,49 @@ Commands -> Events -> Read Models -> Queries
 | `orc/repl-researcher` | Leaf | Iterative: generate code, call MCP tools, refine. |
 | `orc/delegate` | Leaf | Execute another workflow with isolated blackboard. |
 
-These compose into real control flow. A `fallback` with a `condition` is if/else; an `llm-condition` inside a `fallback` is LLM-driven routing:
+These compose into real control flow. A `fallback` that tries a guarded `sequence` first and falls back to a default sibling is classic if/else:
 
-![A fallback with a condition gives if/else branching](docs/images/bt-fallback-condition.svg)
+```mermaid
+flowchart TB
+  route["<b>handle request</b><br/>FALLBACK · if/else"]:::fb
+  route --> s["<b>premium path</b><br/>SEQUENCE"]:::seq
+  s --> cond["<b>is premium?</b><br/>CONDITION · code predicate"]:::cond
+  s --> act["<b>priority reply</b><br/>LLM · leaf"]:::llm
+  route --> default["<b>default reply</b><br/>LLM · leaf"]:::llm
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef cond fill:#713f12,stroke:#facc15,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
 
-![An llm-condition inside a fallback routes on an LLM yes/no judgment](docs/images/bt-llm-routing.svg)
+Swap the code `condition` for an `llm-condition` and the same shape becomes LLM-driven routing:
+
+```mermaid
+flowchart TB
+  route["<b>route by urgency</b><br/>FALLBACK"]:::fb
+  route --> s["<b>urgent path</b><br/>SEQUENCE"]:::seq
+  s --> q["<b>is it urgent?</b><br/>LLM-CONDITION · yes/no"]:::llmc
+  s --> esc["<b>escalate</b><br/>LLM · leaf"]:::llm
+  route --> normal["<b>normal handling</b><br/>LLM · leaf"]:::llm
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llmc fill:#5b21b6,stroke:#ddd6fe,color:#fff;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
 
 And the flagship leaf, `repl-researcher`, is a whole two-phase reasoning loop that drops into a tree like any other node — see the [RLM Guide](docs/RLM-GUIDE.md):
 
-![A repl-researcher node composed inside a larger tree](docs/images/bt-repl-researcher-composed.svg)
+```mermaid
+flowchart TB
+  seq["<b>pipeline</b><br/>SEQUENCE"]:::seq
+  seq --> prep["<b>prep input</b><br/>LLM · leaf<br/><i>normalize the request</i>"]:::llm
+  seq --> rlm["<b>investigate</b> &#9662;<br/>REPL-RESEARCHER · leaf<br/><i>two-phase: designs + runs its own subtree</i>"]:::rlm
+  seq --> fin["<b>finalize</b><br/>CODE · leaf<br/><i>assemble the answer</i>"]:::code
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#0f766e,stroke:#5eead4,color:#fff;
+  classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:2px;
+```
 
 ## Development Setup
 
