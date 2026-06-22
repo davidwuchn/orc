@@ -262,55 +262,73 @@ This makes `build-workflow!` safe to call on every application startup — uncha
 ## Node Execution Behaviors
 
 ### Sequence
+
+```mermaid
+flowchart TB
+  s["<b>sequence</b><br/>run left → right · FAIL FAST"]:::seq
+  s --> a["A"]:::leaf
+  s --> b["B"]:::leaf
+  s --> c["C"]:::leaf
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef leaf fill:#334155,stroke:#94a3b8,color:#fff;
 ```
-[A] → [B] → [C]
-  │
-  ├─ Run children left-to-right
-  ├─ FAIL FAST: Stop on first failure
-  └─ Return final blackboard on success
-```
+
+- Run children left-to-right
+- **Fail fast** — stop on first failure
+- Return the final blackboard on success
 
 ### Fallback
+
+```mermaid
+flowchart TB
+  f["<b>fallback</b><br/>try left → right · SUCCEED FAST"]:::fb
+  f --> a["A"]:::leaf
+  f --> b["B"]:::leaf
+  f --> c["C"]:::leaf
+  classDef fb fill:#7c2d12,stroke:#fb923c,color:#fff,stroke-width:2px;
+  classDef leaf fill:#334155,stroke:#94a3b8,color:#fff;
 ```
-[A] ⟿ [B] ⟿ [C]
-  │
-  ├─ Try children left-to-right
-  ├─ SUCCEED FAST: Stop on first success
-  └─ Return failure only if ALL children fail
-```
+
+- Try children left-to-right
+- **Succeed fast** — stop on first success
+- Return failure only if ALL children fail
 
 ### Parallel
-```
-    ┌─[A]─┐
-────┤     ├────
-    └─[B]─┘
 
-  ├─ Launch all children as futures
-  ├─ Wait for all to complete
-  ├─ Merge blackboards by version (highest wins)
-  └─ Evaluate policies:
-      success-policy: :all | :any | :majority
-      failure-policy: :any | :all
+```mermaid
+flowchart TB
+  p["<b>parallel</b><br/>launch all as futures, wait for all"]:::par
+  p --> a["A"]:::leaf
+  p --> b["B"]:::leaf
+  classDef par fill:#0f766e,stroke:#2dd4bf,color:#fff,stroke-width:2px;
+  classDef leaf fill:#334155,stroke:#94a3b8,color:#fff;
 ```
+
+- Launch all children as futures; wait for all to complete
+- Merge blackboards by version (highest wins)
+- Policies — `success-policy: :all | :any | :majority`, `failure-policy: :any | :all`
 
 ### Map-Each
-```
-items: [x, y, z]
-         │
-    ┌────┼────┐
-    ▼    ▼    ▼
-   [A]  [A]  [A]
-    │    │    │
-    └────┴────┘
-         │
-    results: [...]
 
-  ├─ Iterate over source-key collection
-  ├─ Set item-key for each iteration
-  ├─ Execute child subtree per item
-  ├─ Collect outputs into output-key
-  └─ Respects :max-concurrency (batch parallel)
+```mermaid
+flowchart TB
+  m["<b>map-each</b><br/>run the child subtree once per item"]:::me
+  src(["source: [x, y, z]"]):::io
+  src --> m
+  m --> a1["child · item x"]:::leaf
+  m --> a2["child · item y"]:::leaf
+  m --> a3["child · item z"]:::leaf
+  a1 --> out(["output: [ … ]"]):::io
+  a2 --> out
+  a3 --> out
+  classDef me fill:#4c1d95,stroke:#c4b5fd,color:#fff,stroke-width:2px;
+  classDef leaf fill:#334155,stroke:#94a3b8,color:#fff;
+  classDef io fill:#713f12,stroke:#facc15,color:#fff;
 ```
+
+- Iterate over the `source-key` collection; set `item-key` per iteration
+- Execute the child subtree per item; collect outputs into `output-key`
+- Respects `:max-concurrency` (batched parallel)
 
 ---
 
