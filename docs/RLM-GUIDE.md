@@ -133,36 +133,52 @@ The simplest case: a workflow whose root is a single `repl-researcher` node.
 
 > **Prefer the composed pattern** — a pre-process node cleans the input, the researcher explores, a post-process node packages the output. See the "Composition" section above for the three-node pattern.
 
+The researcher runs as a loop: a Phase-1 **orchestrator** (the model) designs a full behavior tree, emits it (Phase 2 runs it), reasons over the results, and either emits another tree or finishes:
+
 ```mermaid
-flowchart TB
-  start(["repl-researcher leaf begins · goal in"]):::io --> orch
-  orch["🧠 PHASE 1 · ORCHESTRATOR (the model)<br/>inspects sandbox-vars · runs (llm …)/(code …) probes<br/>decides what to build next"]:::rlm
-  orch -->|"emit-tree! · round 1"| T1
-  subgraph T1["⚙️ PHASE 2 · emitted tree #1 — gather"]
-    direction TB
-    g["<b>gather</b><br/>PARALLEL"]:::par
-    g --> g1["<b>fetch filings</b><br/>CODE leaf<hr/>◂ writes&nbsp;&nbsp;filings"]:::code
-    g --> g2["<b>summarize each</b><br/>MAP-EACH → LLM<hr/>▸ reads&nbsp;&nbsp;filings<br/>◂ writes&nbsp;&nbsp;summaries"]:::me
-  end
-  T1 ==>|"results merge → sandbox-vars"| orch
-  orch -->|"not enough yet · emit-tree! · round 2"| T2
-  subgraph T2["⚙️ PHASE 2 · emitted tree #2 — assess"]
-    direction TB
-    a["<b>assess risk</b><br/>SEQUENCE"]:::seq
-    a --> a1["<b>flag risky clauses</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;summaries<br/>◂ writes&nbsp;&nbsp;flags"]:::llm
-    a --> a2["<b>score severity</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;flags<br/>◂ writes&nbsp;&nbsp;risk"]:::code
-  end
-  T2 ==>|"results merge → sandbox-vars"| orch
-  orch -->|"satisfied · final!"| done(["✅ final result returned"]):::done
+flowchart LR
+  r["🧠 repl-researcher<br/>ORCHESTRATOR (Phase 1)"]:::rlm
+  r -->|"round 1 · emit-tree!"| t1(["Tree #1 · gather + extract"]):::t
+  t1 -->|"results + reasoning →"| r
+  r -->|"round 2 · emit-tree!"| t2(["Tree #2 · deepen penalties"]):::t
+  t2 -->|"results + reasoning →"| r
+  r -->|"satisfied · final!"| done(["✅ result"]):::done
   classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:3px;
-  classDef par fill:#0f766e,stroke:#2dd4bf,color:#fff,stroke-width:2px;
-  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
-  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
-  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
-  classDef me fill:#5b21b6,stroke:#ddd6fe,color:#fff;
-  classDef io fill:#334155,stroke:#94a3b8,color:#fff;
+  classDef t fill:#1e3a8a,stroke:#60a5fa,color:#fff;
   classDef done fill:#166534,stroke:#86efac,color:#fff,stroke-width:2px;
 ```
+
+**Round 1 — the orchestrator designs and emits a full tree.** Faced with a 280K-token RFP, it composes a chunk → parallel-extract → aggregate → synthesize pipeline (this is a real shape from the [generalization benchmark](../development/bench/RESULTS.md)):
+
+```mermaid
+flowchart TB
+  root["<b>analyze RFP</b><br/>SEQUENCE"]:::seq
+  root --> chunk["<b>chunk-document</b><br/>split 280K → 12K windows<hr/>▸ reads&nbsp;&nbsp;rfp<br/>◂ writes&nbsp;&nbsp;chunks"]:::code
+  root --> map["<b>map-each</b> · over chunks · max-concurrency 5<br/><i>run the child subtree per chunk</i>"]:::me
+  map --> child["<b>extract obligations</b><br/>LLM leaf<br/><i>per-chunk extraction</i><hr/>▸ reads&nbsp;&nbsp;chunk<br/>◂ writes&nbsp;&nbsp;analysis"]:::llm
+  root --> agg["<b>aggregate</b><br/>merge per-chunk analyses<hr/>▸ reads&nbsp;&nbsp;extracted[]<br/>◂ writes&nbsp;&nbsp;combined"]:::code
+  root --> syn["<b>synthesize report</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;combined<br/>◂ writes&nbsp;&nbsp;obligations, penalties, risk_matrix"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
+  classDef me fill:#5b21b6,stroke:#ddd6fe,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
+
+**Phase 2 runs that tree; its outputs merge back into sandbox-vars and the orchestrator reasons over `:tree-results`.** The obligations extracted cleanly, but the penalty analysis is thin (and had a leaf surface in `:failed-leaves`). Rather than rebuild the pipeline, it emits a **second, focused tree** that reads the *surviving* sandbox-vars and drills in:
+
+```mermaid
+flowchart TB
+  root["<b>deepen penalties</b><br/>SEQUENCE<br/><i>focused follow-up — reads surviving sandbox-vars</i>"]:::seq
+  root --> ex["<b>re-extract penalty clauses</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;combined, chunks<br/>◂ writes&nbsp;&nbsp;penalty_detail"]:::llm
+  root --> score["<b>build severity matrix</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;penalty_detail<br/>◂ writes&nbsp;&nbsp;risk_matrix"]:::code
+  root --> fin(["<b>final!</b> · return obligations, penalties, risk_matrix, summary"]):::done
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
+  classDef done fill:#166534,stroke:#86efac,color:#fff,stroke-width:2px;
+```
+
+Each round is a fresh, full tree — the model composes whatever topology the moment needs (`sequence`, `parallel`, `map-each`, `delegate`), executes it, and lets the results steer the next round until it calls `final!`.
 
 ```clojure
 (require '[ai.obney.orc.orc-service.interface :as orc])

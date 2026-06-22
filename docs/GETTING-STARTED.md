@@ -1264,40 +1264,47 @@ Terminal mode is the deprecated opt-out. Every `:repl-researcher` is recursive u
 you explicitly disable it.
 
 ```mermaid
-flowchart TB
-  start(["repl-researcher leaf begins · goal in"]):::io --> orch
-  orch["🧠 PHASE 1 · ORCHESTRATOR (the model)<br/>inspects sandbox-vars · runs (llm …)/(code …) probes<br/>decides what to build next"]:::rlm
-  orch -->|"emit-tree! · round 1"| T1
-  subgraph T1["⚙️ PHASE 2 · emitted tree #1 — gather"]
-    direction TB
-    g["<b>gather</b><br/>PARALLEL"]:::par
-    g --> g1["<b>fetch filings</b><br/>CODE leaf<hr/>◂ writes&nbsp;&nbsp;filings"]:::code
-    g --> g2["<b>summarize each</b><br/>MAP-EACH → LLM<hr/>▸ reads&nbsp;&nbsp;filings<br/>◂ writes&nbsp;&nbsp;summaries"]:::me
-  end
-  T1 ==>|"results merge → sandbox-vars"| orch
-  orch -->|"not enough yet · emit-tree! · round 2"| T2
-  subgraph T2["⚙️ PHASE 2 · emitted tree #2 — assess"]
-    direction TB
-    a["<b>assess risk</b><br/>SEQUENCE"]:::seq
-    a --> a1["<b>flag risky clauses</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;summaries<br/>◂ writes&nbsp;&nbsp;flags"]:::llm
-    a --> a2["<b>score severity</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;flags<br/>◂ writes&nbsp;&nbsp;risk"]:::code
-  end
-  T2 ==>|"results merge → sandbox-vars"| orch
-  orch -->|"satisfied · final!"| done(["✅ final result returned"]):::done
+flowchart LR
+  r["🧠 repl-researcher<br/>ORCHESTRATOR (Phase 1)"]:::rlm
+  r -->|"round 1 · emit-tree!"| t1(["Tree #1 · gather + extract"]):::t
+  t1 -->|"results + reasoning →"| r
+  r -->|"round 2 · emit-tree!"| t2(["Tree #2 · deepen penalties"]):::t
+  t2 -->|"results + reasoning →"| r
+  r -->|"satisfied · final!"| done(["✅ result"]):::done
   classDef rlm fill:#9d174d,stroke:#f9a8d4,color:#fff,stroke-width:3px;
-  classDef par fill:#0f766e,stroke:#2dd4bf,color:#fff,stroke-width:2px;
-  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
-  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
-  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
-  classDef me fill:#5b21b6,stroke:#ddd6fe,color:#fff;
-  classDef io fill:#334155,stroke:#94a3b8,color:#fff;
+  classDef t fill:#1e3a8a,stroke:#60a5fa,color:#fff;
   classDef done fill:#166534,stroke:#86efac,color:#fff,stroke-width:2px;
 ```
 
-*In recursive mode the researcher loops: Phase 1 (the model) inspects state and
-`emit-tree!`s a subtree, Phase 2 executes it, and the outputs flow back into
-Phase 1 — so the leaf keeps designing and running new subtrees until it calls
-`final!`.*
+In recursive mode the researcher *is* an orchestrator. **Round 1**, it designs and emits a full tree — for a 280K-token RFP, a chunk → parallel-extract → aggregate → synthesize pipeline:
+
+```mermaid
+flowchart TB
+  root["<b>analyze RFP</b><br/>SEQUENCE"]:::seq
+  root --> chunk["<b>chunk-document</b><br/>split 280K → 12K windows<hr/>▸ reads&nbsp;&nbsp;rfp<br/>◂ writes&nbsp;&nbsp;chunks"]:::code
+  root --> map["<b>map-each</b> · over chunks · max-concurrency 5<br/><i>run the child subtree per chunk</i>"]:::me
+  map --> child["<b>extract obligations</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;chunk<br/>◂ writes&nbsp;&nbsp;analysis"]:::llm
+  root --> agg["<b>aggregate</b><br/>merge per-chunk analyses<hr/>▸ reads&nbsp;&nbsp;extracted[]<br/>◂ writes&nbsp;&nbsp;combined"]:::code
+  root --> syn["<b>synthesize report</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;combined<br/>◂ writes&nbsp;&nbsp;obligations, penalties, risk_matrix"]:::llm
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
+  classDef me fill:#5b21b6,stroke:#ddd6fe,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+```
+
+Phase 2 runs it; outputs merge into sandbox-vars. The orchestrator reasons over the results — obligations look good, but penalties came back thin — and emits a **second, focused tree** reading the surviving sandbox-vars, then calls `final!`:
+
+```mermaid
+flowchart TB
+  root["<b>deepen penalties</b><br/>SEQUENCE<br/><i>focused follow-up — reads surviving sandbox-vars</i>"]:::seq
+  root --> ex["<b>re-extract penalty clauses</b><br/>LLM leaf<hr/>▸ reads&nbsp;&nbsp;combined, chunks<br/>◂ writes&nbsp;&nbsp;penalty_detail"]:::llm
+  root --> score["<b>build severity matrix</b><br/>CODE leaf<hr/>▸ reads&nbsp;&nbsp;penalty_detail<br/>◂ writes&nbsp;&nbsp;risk_matrix"]:::code
+  root --> fin(["<b>final!</b> · return obligations, penalties, risk_matrix, summary"]):::done
+  classDef seq fill:#1e3a8a,stroke:#60a5fa,color:#fff,stroke-width:2px;
+  classDef llm fill:#4c1d95,stroke:#c4b5fd,color:#fff;
+  classDef code fill:#134e4a,stroke:#5eead4,color:#fff;
+  classDef done fill:#166534,stroke:#86efac,color:#fff,stroke-width:2px;
+```
 
 **Source-verified — `executor.clj:2172-2176` verbatim comment + binding:**
 
