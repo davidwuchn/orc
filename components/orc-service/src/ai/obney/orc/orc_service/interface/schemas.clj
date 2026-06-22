@@ -153,6 +153,7 @@
     [:item-key {:optional true} :keyword]          ;; Blackboard key for current item
     [:output-key {:optional true} :keyword]        ;; Blackboard key for collected results
     [:max-concurrency {:optional true} :int]       ;; Max parallel iterations (nil = sequential)
+    [:preserve-failures? {:optional true} :boolean] ;; Slice O: write aligned vector (keep failure markers) to :into
     ;; Repl-researcher-only fields
     [:mcp-tools {:optional true} [:vector :string]] ;; Available MCP tool names for research
     [:max-iterations {:optional true} :int]         ;; Max research iterations (default 10)
@@ -382,7 +383,8 @@
     [:source-key :keyword]
     [:item-key :keyword]
     [:output-key :keyword]
-    [:max-concurrency {:optional true} :int]]
+    [:max-concurrency {:optional true} :int]
+    [:preserve-failures? {:optional true} :boolean]]
 
    :sheet/set-llm-condition-config
    [:map
@@ -817,6 +819,7 @@
     [:item-key :keyword]
     [:output-key :keyword]
     [:max-concurrency {:optional true} :int]
+    [:preserve-failures? {:optional true} :boolean]
     [:previous-source-key {:optional true} :keyword]
     [:previous-item-key {:optional true} :keyword]
     [:previous-output-key {:optional true} :keyword]

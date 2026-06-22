@@ -429,7 +429,8 @@
                  :source-key (:from opts)
                  :item-key (:as opts)
                  :output-key (:into opts)}
-          (:max-concurrency opts) (assoc :max-concurrency (:max-concurrency opts))))
+          (:max-concurrency opts) (assoc :max-concurrency (:max-concurrency opts))
+          (some? (:preserve-failures? opts)) (assoc :preserve-failures? (:preserve-failures? opts))))
       ;; Compile the child node under map-each (child is at index 0)
       (let [child-result (compile-tree-node context sheet-id child-node map-each-id :index 0)]
         {:node-id map-each-id

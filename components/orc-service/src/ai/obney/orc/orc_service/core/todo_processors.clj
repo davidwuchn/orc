@@ -2146,6 +2146,15 @@
               (let [[status summary output]
                     (classify-map-each-outcome
                       {:results (:results act) :item-count total-items})
+                    ;; Slice O opt-in: when the map-each parent node has
+                    ;; :preserve-failures? truthy, write the ALIGNED full-length
+                    ;; results vector (with {:__status :failure …} markers at
+                    ;; failed slots) instead of the successes-only `output`.
+                    ;; Flag absent/false → write `output` exactly as before.
+                    preserve-failures? (boolean
+                                         (:preserve-failures?
+                                          (get nodes-by-id map-each-parent-id)))
+                    into-value (if preserve-failures? (:results act) output)
                     completion-body (cond-> {:sheet-id sheet-id
                                              :tick-id tick-id
                                              :node-id map-each-parent-id
@@ -2157,7 +2166,7 @@
                     :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
                     :body {:sheet-id sheet-id :tick-id tick-id :node-id map-each-parent-id
                            :item-index (:completed-count act) :total-items total-items}})
-                  (make-bb-write-event event-store sheet-id tick-id output-key output blackboard)
+                  (make-bb-write-event event-store sheet-id tick-id output-key into-value blackboard)
                   (->event
                    {:type :sheet/node-execution-completed
                     :tags #{[:sheet sheet-id] [:node map-each-parent-id] [:tick tick-id]}
@@ -2805,7 +2814,9 @@
                                                                 :item-key (:item-key snapshot-node)
                                                                 :output-key (:output-key snapshot-node)}
                                                          (:max-concurrency snapshot-node)
-                                                         (assoc :max-concurrency (:max-concurrency snapshot-node)))}))])
+                                                         (assoc :max-concurrency (:max-concurrency snapshot-node))
+                                                         (some? (:preserve-failures? snapshot-node))
+                                                         (assoc :preserve-failures? (:preserve-failures? snapshot-node)))}))])
 
                                    :delegate
                                    (filterv some?

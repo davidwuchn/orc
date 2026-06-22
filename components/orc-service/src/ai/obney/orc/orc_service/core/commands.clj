@@ -509,7 +509,7 @@
 (defcommand :sheet set-map-each-config
   {:authorized? authenticated?}
   "Set configuration for a map-each node."
-  [{{:keys [sheet-id node-id source-key item-key output-key max-concurrency]} :command
+  [{{:keys [sheet-id node-id source-key item-key output-key max-concurrency preserve-failures?]} :command
     :as ctx}]
   (let [node (rm/get-node ctx sheet-id node-id)
         blackboard (rm/get-blackboard-by-key ctx sheet-id)]
@@ -546,6 +546,7 @@
                          :item-key item-key
                          :output-key output-key}
                   max-concurrency (assoc :max-concurrency max-concurrency)
+                  (some? preserve-failures?) (assoc :preserve-failures? preserve-failures?)
                   (:source-key node) (assoc :previous-source-key (:source-key node))
                   (:item-key node) (assoc :previous-item-key (:item-key node))
                   (:output-key node) (assoc :previous-output-key (:output-key node))
@@ -1266,7 +1267,8 @@
                    (:source-key node) (assoc :source-key (:source-key node))
                    (:item-key node) (assoc :item-key (:item-key node))
                    (:output-key node) (assoc :output-key (:output-key node))
-                   (:max-concurrency node) (assoc :max-concurrency (:max-concurrency node))))
+                   (:max-concurrency node) (assoc :max-concurrency (:max-concurrency node))
+                   (some? (:preserve-failures? node)) (assoc :preserve-failures? (:preserve-failures? node))))
           ;; Children for composite nodes
           (seq (:children-ids node))
           (assoc :children

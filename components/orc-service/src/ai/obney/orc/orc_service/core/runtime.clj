@@ -82,6 +82,7 @@
                        :item-key (:item-key snapshot-node)
                        :output-key (:output-key snapshot-node)
                        :max-concurrency (:max-concurrency snapshot-node)
+                       :preserve-failures? (:preserve-failures? snapshot-node)
                        ;; Repl-researcher fields
                        :mcp-tools (or (:mcp-tools snapshot-node) [])
                        :max-iterations (:max-iterations snapshot-node)
