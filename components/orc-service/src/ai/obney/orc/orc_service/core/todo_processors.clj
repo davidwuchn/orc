@@ -441,6 +441,36 @@
           (get-description ctx :tree-class uuid-target))
         (catch Exception _ nil)))))
 
+(defn- fetch-behavioral-body
+  "Pull a behavioral-subtree description body via ontology/get-description.
+
+   E3 Part-1 (scope fix): behavioral seed bodies — and minted children —
+   land in the Living-Description read-model under the :tree-fingerprint
+   granularity, NOT :tree-class. Both emission paths stamp
+   :target-type :tree-fingerprint on the description-updated event:
+     - seed-baseline-corpus! emits behavioral seeds via
+       :ontology/record-tree-description (commands.clj record-tree-
+       description → :target-type :tree-fingerprint)
+     - :ontology/mint-behavioral-subtree emits the same event with
+       :target-type :tree-fingerprint, keyed by the derived stable id.
+   (Structural tree-class seeds are DUAL-emitted under :tree-class for the
+   structural read path — behavioral ones are not, so a behavioral id read
+   against :tree-class misses → rich body nil → no strengths rendered.)
+
+   This is the behavioral counterpart of fetch-tree-body: same UUID
+   coercion + best-effort nil-on-failure semantics, but reads the
+   :tree-fingerprint scope where behavioral bodies actually live. The
+   structural fetch-tree-body path is deliberately left reading
+   :tree-class (C-Loop-1) and is NOT changed."
+  [ctx target-id]
+  (when-let [uuid-target (->uuid target-id)]
+    (let [get-description (requiring-resolve
+                            'ai.obney.orc.ontology.interface/get-description)]
+      (try
+        (when get-description
+          (get-description ctx :tree-fingerprint uuid-target))
+        (catch Exception _ nil)))))
+
 (defn- derive-seed-name
   "Extract a human-readable seed name from the start of a `:summary`
    string. Most seeds begin with their own name followed by a stative
@@ -599,7 +629,7 @@
            "minting, a genuinely novel pattern is LOST when this task completes.\n\n"
            "   If (a) — the task fits an existing category by your judgement — no mint "
            "is needed; designing the tree using known patterns is the right call.\n")
-      (let [body (fetch-tree-body ctx behavior-id)
+      (let [body (fetch-behavioral-body ctx behavior-id)
             summary (:summary body)
             rich (format-seed-body body traits-per-seed-cap)
             seed-name (derive-seed-name summary)

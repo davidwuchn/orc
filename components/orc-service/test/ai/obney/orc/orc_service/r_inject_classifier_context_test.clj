@@ -786,3 +786,130 @@
           "References block header present on not-found path too")
       (is (re-find #"(?i)\bspecialize\b" instruction)
           "specialize option present even when nothing cleared threshold"))))
+
+;; =============================================================================
+;; E3 Part 1 — behavioral body fetch reads the :tree-fingerprint scope
+;;
+;; ROOT CAUSE (verified live): a FOUND behavioral entry rendered NO
+;; strengths/weaknesses in the live R-Inject prepend — only the reranker
+;; reasoning. The FOUND branch of format-behavioral-entry called
+;; `fetch-tree-body`, which is hardcoded to read the :tree-class scope (the
+;; structural Living-Description read path, C-Loop-1). But behavioral bodies
+;; are NOT under :tree-class — they are emitted via :ontology/record-tree-
+;; description (seed-baseline-corpus!) and :ontology/mint-behavioral-subtree,
+;; BOTH of which stamp :target-type :tree-fingerprint on the description-
+;; updated event (commands.clj record-tree-description:705 + mint-behavioral-
+;; subtree:1012). So get-description keys the behavioral body under
+;; (:tree-fingerprint, behavior-id). A read against :tree-class MISSES → the
+;; body is nil → format-seed-body returns nil → no strengths section.
+;;
+;; The existing E2/happy-path tests masked this because their get-description
+;; stub IGNORES the granularity argument ((fn [_ _ id] ...)), so the body came
+;; back regardless of which scope was requested. These tests use a
+;; granularity-DISCRIMINATING stub (body only under :tree-fingerprint, nil for
+;; :tree-class) — the production read-model semantics — so they fail RED on the
+;; bug and prove the fix reads the correct scope WITHOUT disturbing the
+;; structural :tree-class path.
+;; =============================================================================
+
+(def ^:private e3-behavioral-body
+  "A rich behavioral body as record-tree-description / mint-behavioral-subtree
+   land it. :summary resolves to seed name 'Code-building'."
+  {:summary "Code-building turns a typed spec into executable code with imports and a file path."
+   :scope :behavioral-subtree
+   :capabilities ["write executable code from a spec"]
+   :strengths [{:trait "separate the spec read from the code emit"
+                :good-when "the task names an explicit signature or schema"
+                :recommended-pattern "[:sequence [:llm {:writes [:plan]}] [:code {:writes [:impl]}]]"
+                :confidence 0.9
+                :evidence-count 3}]
+   :weaknesses [{:trait "single-pass emit skips the failing-test reproduction"
+                 :avoid-when "the task is a bug fix with an existing repro"
+                 :recommended-alternative "reproduce first in a :code stage, then fix"
+                 :confidence 0.8
+                 :evidence-count 2}]
+   :representative-uses ["add a pure helper to a namespace"]
+   :avoid-when ["the task is pure analysis with no code emit"]
+   :version 1
+   :consolidated-from-event-count 0})
+
+(deftest behavioral-body-fetched-under-tree-fingerprint-scope
+  ;; RED before E3 Part 1: the FOUND branch read :tree-class, where the
+  ;; behavioral body does NOT live, so a granularity-discriminating stub
+  ;; returns nil and no strengths render.
+  (testing "a FOUND behavioral entry fetches its body under :tree-fingerprint and renders its strengths"
+    (let [b-id (random-uuid)
+          captured-calls (atom [])
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.92
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 structural."
+                                :top-candidates [(mk-structural-candidate
+                                                   (random-uuid) "ok" "structural summary" 0.92)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors [(mk-behavioral-entry
+                                              b-id 0.88
+                                              "Code-building is the clearest behavioral fit.")]
+                                :rerank-fallback? false}}
+          node (mk-node "Implement summarize-line-items from the spec." payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ctx granularity target-id]
+                                 (swap! captured-calls conj [granularity target-id])
+                                 ;; Production read-model semantics: the
+                                 ;; behavioral body lives ONLY under
+                                 ;; :tree-fingerprint. Reading it under
+                                 ;; :tree-class (the structural path) misses.
+                                 (when (and (= granularity :tree-fingerprint)
+                                            (= target-id b-id))
+                                   e3-behavioral-body))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+
+      (testing "the behavioral body is read under :tree-fingerprint (the scope it actually lands under)"
+        (is (some (fn [[g id]] (and (= g :tree-fingerprint) (= id b-id)))
+                  @captured-calls)
+            "fetch-behavioral-body calls get-description with :tree-fingerprint for the behavior-id"))
+
+      (testing "the behavioral body is NOT read under :tree-class for the behavior-id (that scope holds structural bodies only)"
+        (is (not-any? (fn [[g id]] (and (= g :tree-class) (= id b-id)))
+                      @captured-calls)
+            "the behavioral fetch does not request :tree-class for the behavior-id"))
+
+      (testing "with production read-model semantics, the matched behavioral seed's strengths render"
+        (is (re-find #"(?m)^   Strengths \(proven|(?m)^Strengths \(proven" instruction)
+            "Behavioral strengths section renders in the prepend (was empty before the scope fix)")
+        (is (str/includes? instruction "separate the spec read from the code emit")
+            "The strength trait text renders")
+        (is (str/includes? instruction "single-pass emit skips the failing-test reproduction")
+            "The weakness trait text renders")))))
+
+(deftest structural-body-fetch-still-reads-tree-class-scope
+  ;; Guard: the Part-1 fix must NOT disturb the structural read path. A
+  ;; structural candidate's body must still be fetched under :tree-class
+  ;; (C-Loop-1), where the Living-Description consolidator + dual-emitted
+  ;; seeds write it. A discriminating stub (body only under :tree-class)
+  ;; proves the structural path is untouched.
+  (testing "a structural candidate's body is still fetched under :tree-class"
+    (let [s-id (random-uuid)
+          captured-calls (atom [])
+          payload {:structural {:assigned-tree-id s-id
+                                :confidence 0.92
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 structural."
+                                :top-candidates [(mk-structural-candidate
+                                                   s-id "Top-1" "structural summary" 0.92)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors [] :rerank-fallback? false}}
+          node (mk-node "Some task" payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ctx granularity target-id]
+                                 (swap! captured-calls conj [granularity target-id])
+                                 (when (and (= granularity :tree-class)
+                                            (= target-id s-id))
+                                   rich-body-with-strengths))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+      (is (some (fn [[g id]] (and (= g :tree-class) (= id s-id))) @captured-calls)
+          "structural body still read under :tree-class")
+      (is (re-find #"(?m)^Strengths \(proven" instruction)
+          "structural strengths still render via the :tree-class path"))))
