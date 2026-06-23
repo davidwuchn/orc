@@ -584,6 +584,11 @@
            "                        :version 1\n"
            "                        :consolidated-from-event-count 0}\n"
            "                       :parent nil)\n\n"
+           "   SPECIALIZE vs ROOT-MINT: `:parent nil` mints a NEW root behavior. If, instead, one "
+           "of the nearest references listed above is a broad-but-related parent (it shares the "
+           "task's shape even though it fell below threshold), prefer specializing a CHILD of it — "
+           "pass that reference's behavior-id as `:parent <id>` so the new behavior accrues evidence "
+           "under the proven parent rather than scattering as an unrelated root.\n\n"
            "   CRITICAL: :strengths and :weaknesses are VECTORS OF MAPS, not vectors of "
            "strings. Each entry is principle-shaped — :trait + context-guard + concrete "
            "recommended action + confidence + evidence-count. A vector of bare strings "
@@ -609,7 +614,48 @@
              "   Why this fits: " (or reasoning "(no reasoning recorded)") "\n\n"
              "   Guidance (seed `:summary`):\n"
              "   " (or summary reasoning "(no guidance recorded)") "\n\n"
-             (or rich ""))))))
+             (or rich "")
+             ;; E2 (ADR 0014, RG-3): references INFORM, they do not GATE. A
+             ;; match clearing threshold is NOT a reason to suppress the
+             ;; specialize/mint invitation — that gate is exactly why the
+             ;; corpus stays shape-broad (mint fired 1/21: a "good enough"
+             ;; parent is almost always found, so the not-found mint branch
+             ;; never fired and no coding CHILD was ever born). The strengths/
+             ;; weaknesses above are the EVIDENCE that informs the four-way
+             ;; choice; :avoid-when in particular lets the model self-detect a
+             ;; shape-over-match (a broad parent matching on shape, not domain).
+             "\n   Adopt / adapt / SPECIALIZE / mint-adjacent — use the evidence above, not the score alone:\n"
+             "   - ADOPT this pattern as-is if it is an EXACT fit for your task.\n"
+             "   - ADAPT it (keep the shape, override the specifics) if it mostly fits.\n"
+             "   - SPECIALIZE — if this is a BROAD fit rather than an exact one (its `:summary`/strengths"
+             " describe a more general shape than your task, or its `:avoid-when` flags your context),"
+             " mint a domain-specialized CHILD of THIS behavior. The child keeps the parent's proven shape"
+             " but pins your domain, gets a STABLE derived id, and ACCRUES evidence under the parent"
+             " (it is retrievable on subsequent classify-behaviors calls):\n\n"
+             "       (mint-behavior! \"<short-kebab-name>\"\n"
+             "                       {:capabilities [\"<concrete action verb + object>\"]\n"
+             "                        :strengths [{:trait \"<what works AND why>\"\n"
+             "                                     :good-when \"<context guard>\"\n"
+             "                                     :recommended-pattern \"<concrete DSL snippet>\"\n"
+             "                                     :confidence 0.7\n"
+             "                                     :evidence-count 1}]\n"
+             "                        :weaknesses [{:trait \"<what fails AND why>\"\n"
+             "                                      :avoid-when \"<context guard>\"\n"
+             "                                      :recommended-alternative \"<concrete fix>\"\n"
+             "                                      :confidence 0.7\n"
+             "                                      :evidence-count 1}]\n"
+             "                        :representative-uses [\"<concrete task this child shipped on>\"]\n"
+             "                        :avoid-when [\"<concrete anti-context>\"]\n"
+             "                        :summary \"<2-3 sentences naming the domain + load-bearing trait + when to prefer this over the parent>\"\n"
+             "                        :version 1\n"
+             "                        :consolidated-from-event-count 0}\n"
+             "                       :parent " behavior-id ")\n\n"
+             "   - MINT-ADJACENT — if your task is related-but-DISTINCT (not a child of this behavior),"
+             " mint an adjacent behavior the same way with `:parent nil` (or under whichever listed"
+             " reference is the true nearest parent).\n"
+             "   :strengths/:weaknesses are VECTORS OF MAPS (principle-shaped: :trait + context-guard +"
+             " concrete recommended action + :confidence + :evidence-count) — a vector of bare strings"
+             " fails schema validation and the mint is dropped silently.\n")))))
 
 (defn- format-behavioral-section [ctx behavioral]
   (let [{:keys [behaviors rerank-fallback?]} behavioral
@@ -650,7 +696,15 @@
                        "  - Proven STRENGTHS — traits observed to work, each with a worked-example DSL snippet you can adapt\n"
                        "  - Observed WEAKNESSES — failure modes others hit, with the recommended fix\n"
                        "  - Representative uses where this pattern has shipped\n\n"
-                       "Mimic what works, modify what's risky for your task, OR design from scratch. They are not mandates — your job is to design the RIGHT tree for THIS task, using the corpus as evidence not gospel.\n\n"
+                       ;; E2 (ADR 0014, RG-3): the four moves are ALWAYS available —
+                       ;; finding a match never removes specialize/mint. References
+                       ;; inform the choice with evidence; they do not gate it.
+                       "You always have FOUR moves, and the references below are EVIDENCE for choosing — not a mandate:\n"
+                       "  - ADOPT — use a reference as-is when it is an EXACT fit.\n"
+                       "  - ADAPT — keep a reference's pattern, override the specifics, when it mostly fits.\n"
+                       "  - SPECIALIZE — mint a CHILD of the nearest reference (`mint-behavior!` with `:parent <that behavior-id>`) when the top hit is a BROAD shape rather than an exact fit; the child keeps the proven shape, pins your domain, and accrues evidence under the parent. This is the RECOMMENDED move when a match cleared threshold only on shape.\n"
+                       "  - MINT — mint a fresh behavior (`:parent nil`) when the task is genuinely novel and no reference is a true parent.\n"
+                       "A match clearing threshold does NOT mean adopt/adapt is your only option — weigh each reference's strengths AND its `:avoid-when` against THIS task, then pick the right move. Your job is the RIGHT tree for THIS task; the corpus is evidence, not gospel.\n\n"
                        (format-structural-section ctx structural)
                        "\n"
                        (format-behavioral-section ctx behavioral)

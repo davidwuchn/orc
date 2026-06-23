@@ -109,8 +109,11 @@
     (testing "block contains an honest framing line (examples, not mandates)"
       (is (re-find #"(?i)examples retrieved from the seed corpus" instruction)
           "Explicit 'examples' framing")
-      (is (re-find #"(?i)not mandates" instruction)
-          "Explicit non-mandate framing"))
+      ;; E2 reframed the block copy from "not mandates" to the explicit
+      ;; four-way menu, but the honest non-mandate framing is preserved
+      ;; ("not a mandate" + "evidence, not gospel"). Assert on the intent.
+      (is (re-find #"(?i)not a mandate|not mandates|not gospel" instruction)
+          "Explicit non-mandate framing preserved"))
 
     (testing "structural section appears with confidence + reasoning verbatim + content verbatim"
       (is (re-find #"### Structural pattern" instruction))
@@ -633,3 +636,153 @@
           "No body found → no strengths section rendered")
       (is (re-find #"Pattern guidance" instruction)
           "Summary-driven 'Pattern guidance' section still renders from the candidate's :content"))))
+
+;; =============================================================================
+;; E2 — Decouple R-Inject: references INFORM, not GATE (ADR 0014, RG-3)
+;;
+;; The defeat condition is ANY branch that suppresses the specialize/mint
+;; invitation when a match is found. Before E2 the FOUND behavioral branch
+;; offered only adopt/adapt (no specialize-a-child, no mint-adjacent), and the
+;; block copy said "Mimic / modify / design from scratch" — so a coding task
+;; matching a shape-broad parent at >= threshold was never invited to deepen
+;; the corpus. These tests pin the always-available adopt/adapt/specialize/mint
+;; menu on BOTH branches, asserting on the rendered string (pure fns, no mocks
+;; beyond the description-body read stub the existing tests already use).
+;; =============================================================================
+
+(def ^:private e2-found-body
+  "A rich body for a FOUND (above-threshold) behavioral match — the shape the
+   consolidator writes. Its :summary resolves to seed name 'Code-building'."
+  {:summary "Code-building turns a typed spec into executable code with imports and a file path."
+   :capabilities ["write executable code from a spec"]
+   :strengths [{:trait "separate the spec read from the code emit"
+                :good-when "the task names an explicit signature or schema"
+                :recommended-pattern "[:sequence [:llm {:writes [:plan]}] [:code {:writes [:impl]}]]"
+                :confidence 0.9
+                :evidence-count 3}]
+   :weaknesses [{:trait "single-pass emit skips the failing-test reproduction"
+                 :avoid-when "the task is a bug fix with an existing repro"
+                 :recommended-alternative "reproduce first in a :code stage, then fix"
+                 :confidence 0.8
+                 :evidence-count 2}]
+   :representative-uses ["add a pure helper to a namespace"]
+   :avoid-when ["the task is pure analysis with no code emit"]
+   :version 3
+   :consolidated-from-event-count 7})
+
+(deftest e2-found-entry-offers-specialize-and-mint-invitation
+  ;; RED before E2: the FOUND branch rendered adopt/adapt only. This asserts the
+  ;; invitation to specialize a CHILD of the matched behavior (mint-behavior!
+  ;; with :parent <matched id>) and to mint an adjacent behavior is present even
+  ;; when a match cleared threshold.
+  (testing "an above-threshold (FOUND) behavioral match still surfaces a specialize/mint invitation"
+    (let [b-id (random-uuid)
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.92
+                                :was-fresh-mint? false
+                                :reasoning "Top-1 high-confidence."
+                                :top-candidates [(mk-structural-candidate
+                                                   (random-uuid) "ok" "..." 0.92)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors [(mk-behavioral-entry
+                                              b-id 0.88
+                                              "Code-building is a broad fit for this add-function task.")]
+                                :rerank-fallback? false}}
+          node (mk-node "Add a function summarize-line-items ..." payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ _ id] (when (= id b-id) e2-found-body))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+
+      (testing "FOUND entry still renders the matched seed (references inform)"
+        (is (re-find #"Behavioral: Code-building" instruction)
+            "Matched seed surfaced by name")
+        (is (str/includes? instruction "Code-building is a broad fit")
+            "Matched reasoning verbatim")
+        (is (re-find #"(?m)^Strengths \(proven" instruction)
+            "Matched seed's strengths render as evidence that informs the choice"))
+
+      (testing "FOUND entry offers SPECIALIZE — a child of THIS matched behavior"
+        (is (re-find #"(?i)specialize" instruction)
+            "Found path mentions specializing")
+        (is (re-find #"mint-behavior!" instruction)
+            "Found path offers the mint affordance (specialize/mint), not adopt/adapt only")
+        (is (str/includes? instruction (str ":parent " b-id))
+            "The specialize affordance names the matched behavior-id as :parent (the waterfall hook)"))
+
+      (testing "FOUND entry offers MINT-ADJACENT for a related-but-distinct task"
+        (is (re-find #"(?i)adjacent" instruction)
+            "Found path invites minting an adjacent behavior when the task is related-but-distinct")))))
+
+(deftest e2-not-found-entry-still-mints
+  ;; The not-found path must NOT regress: it still surfaces the BEHAVIORALLY-
+  ;; NOVEL signal + the mint-behavior! affordance.
+  (testing "the not-found (fresh-mint) behavioral branch still invites mint-behavior!"
+    (let [b-mint-id (random-uuid)
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.0
+                                :was-fresh-mint? true
+                                :reasoning "minting fresh"
+                                :top-candidates []
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors [(mk-behavioral-entry
+                                              b-mint-id 0.0
+                                              "No candidate above threshold; minting fresh"
+                                              :reranker true)]
+                                :rerank-fallback? false}}
+          node (mk-node "Task: novel OOD" payload)
+          result (tp/apply-r05-classifier-context node {})
+          instruction (:instruction result)]
+      (is (re-find #"(?i)no candidate above threshold" instruction)
+          "Not-found branch still signals the fresh-mint condition")
+      (is (re-find #"mint-behavior!" instruction)
+          "Not-found branch still offers the mint affordance")
+      (is (re-find #":parent" instruction)
+          "Not-found branch still mentions :parent (now can specialize under nearest, not only root)"))))
+
+(deftest e2-both-branches-render-references-block
+  ;; No suppression: BOTH the found and not-found paths render the references
+  ;; block (the "## Suggested patterns from corpus" header + the always-present
+  ;; 4-way adopt/adapt/specialize/mint menu in the block copy).
+  (testing "FOUND path renders references block + 4-way menu"
+    (let [b-id (random-uuid)
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.92 :was-fresh-mint? false
+                                :reasoning "ok"
+                                :top-candidates [(mk-structural-candidate
+                                                   (random-uuid) "ok" "..." 0.92)]
+                                :rerank-fallback? false}
+                   :behavioral {:behaviors [(mk-behavioral-entry b-id 0.88 "Code-building fits.")]
+                                :rerank-fallback? false}}
+          node (mk-node "Add a function ..." payload)
+          result (with-redefs [ontology/get-description
+                               (fn [_ _ id] (when (= id b-id) e2-found-body))]
+                   (tp/apply-r05-classifier-context node {}))
+          instruction (:instruction result)]
+      (is (str/starts-with? instruction "## Suggested patterns from corpus")
+          "References block header present")
+      (is (re-find #"(?i)\badopt\b" instruction) "menu: adopt")
+      (is (re-find #"(?i)\badapt\b" instruction) "menu: adapt")
+      (is (re-find #"(?i)\bspecialize\b" instruction) "menu: specialize")
+      (is (re-find #"(?i)\bmint\b" instruction) "menu: mint")
+      (is (not (re-find #"(?i)design from scratch" instruction))
+          "Old 'design from scratch' framing replaced by the explicit 4-way choice")))
+
+  (testing "NOT-found path renders references block + 4-way menu"
+    (let [b-mint-id (random-uuid)
+          payload {:structural {:assigned-tree-id (random-uuid)
+                                :confidence 0.0 :was-fresh-mint? true
+                                :reasoning "minting fresh"
+                                :top-candidates [] :rerank-fallback? false}
+                   :behavioral {:behaviors [(mk-behavioral-entry
+                                              b-mint-id 0.0
+                                              "No candidate above threshold; minting fresh"
+                                              :reranker true)]
+                                :rerank-fallback? false}}
+          node (mk-node "Task: novel OOD" payload)
+          result (tp/apply-r05-classifier-context node {})
+          instruction (:instruction result)]
+      (is (str/starts-with? instruction "## Suggested patterns from corpus")
+          "References block header present on not-found path too")
+      (is (re-find #"(?i)\bspecialize\b" instruction)
+          "specialize option present even when nothing cleared threshold"))))
