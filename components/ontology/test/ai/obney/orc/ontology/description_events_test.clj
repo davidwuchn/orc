@@ -402,6 +402,11 @@
     (with-test-ctx [ctx]
       (let [results (seeds/seed-all! ctx)
             tree-fp-count (count seeds/all-tree-fingerprint-seeds)
+            ;; E3 (ADR 0014): seed-all! / seed-baseline-corpus! now also mints
+            ;; the durable coding SUBBEHAVIORS (children) via
+            ;; mint-behavioral-subtree — one dispatch each.
+            child-count (count (:behavioral-subtree-children
+                                 (ontology/baseline-seeds)))
             expected (+ (count seeds/all-node-type-seeds)
                         tree-fp-count
                         ;; C-Loop-1: each tree-fingerprint seed is also
@@ -410,10 +415,12 @@
                         ;; consolidator has a non-nil current-description
                         ;; on its first cycle.
                         tree-fp-count
-                        (count seeds/all-behavioral-subtree-seeds))]
+                        (count seeds/all-behavioral-subtree-seeds)
+                        child-count)]
         (is (= expected (count results))
             (str "seed-all! should emit " expected
-                 " commands (10 node-type + 23 tree-fingerprint + 23 tree-class duplicates + 12 behavioral-subtree). Got "
+                 " commands (10 node-type + 23 tree-fingerprint + 23 tree-class duplicates + 12 behavioral-subtree + "
+                 child-count " behavioral-children). Got "
                  (count results))))
       (Thread/sleep 200)
       (doseq [{:keys [target-id body]} seeds/all-node-type-seeds]

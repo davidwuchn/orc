@@ -549,9 +549,13 @@
         (is (= 23 (count (get by-scope :tree-class)))
             "R02 stays unchanged — 23 tree-class concepts after seed-all!"))
 
-      (testing "12 behavioral-subtree concepts created (R05a's 11 + R07 Investigation)"
-        (is (= 12 (count (get by-scope :behavioral-subtree)))
-            "12 behavioral-subtree concepts — R05a's 11 top-level competencies + R07's Investigation"))
+      (testing "17 behavioral-subtree concepts created (12 abstract parents + 5 E3 coding children)"
+        ;; 12 abstract behaviors (R05a's 11 + R07 Investigation) are now the
+        ;; repurposed PARENTS; E3 (ADR 0014) adds 5 durable coding SUBBEHAVIORS
+        ;; (children) via mint-behavioral-subtree, each projected as a
+        ;; behavioral-subtree concept by the same R05a processor.
+        (is (= 17 (count (get by-scope :behavioral-subtree)))
+            "17 behavioral-subtree concepts — 12 abstract parents + 5 E3 coding children"))
 
       (testing "behavior:composes-into edges exist on every behavioral seed"
         (require 'ai.obney.orc.ontology.test-support.seed-descriptions)
