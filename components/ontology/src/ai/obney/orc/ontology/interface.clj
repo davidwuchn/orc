@@ -297,11 +297,97 @@
   [k]
   (min rerank-hard-cap (max k (* rerank-over-fetch-multiplier k))))
 
+;; =============================================================================
+;; EL-2 (ADR 0015, emergence loop): candidate evidence enrichment
+;;
+;; The reranker decision must READ the judge-grounded evidence the flywheel
+;; writes (`:avoid-when`/strengths) — closing the link that exists-but-is-
+;; ignored today. ColBERT hands the reranker only each candidate's `:content`
+;; (the description SUMMARY) + score + metadata, so a strong shape/summary
+;; match force-fits a wrong-domain behavior even when its `:avoid-when` says
+;; "not this case". We enrich each candidate map, BEFORE rerank!, with its
+;; body's `:avoid-when` (the top-level domain guards + the per-weakness guards)
+;; and compact strengths/weaknesses. The reranker output contract
+;; ({:document-id :reasoning :fitness-score}) is UNCHANGED — this is purely
+;; input-side.
+;;
+;; SCOPE (the E3.5 wrong-scope trap, root-caused not assumed): minted
+;; behavioral-subtree bodies AND minted tree-class bodies are recorded under
+;; :target-type :tree-fingerprint (see mint-behavioral-subtree /
+;; record-tree-description in commands.clj), while the candidate's
+;; :document-metadata :granularity reads :behavioral-subtree / :tree-class.
+;; A get-description keyed naively on the candidate's stated granularity
+;; returns nil and ships a silent no-op. We therefore try the candidate's
+;; stated scope FIRST, then fall back to :tree-fingerprint (the universal
+;; store for minted/seeded bodies; tree-class seeds are dual-emitted there).
+;; =============================================================================
+
+(def ^:private evidence-max-entries
+  "Keep the enrichment compact: cap how many strengths/weaknesses ride along
+   so the structured-output prompt stays small."
+  3)
+
+(defn- coerce-evidence-target-id
+  "A candidate's :document-metadata :target-id round-trips through ColBERT's
+   JSON bridge as a string; coerce to UUID when it parses as one (minted
+   bodies key the descriptions read-model by UUID). Non-UUID strings (e.g.
+   seed fingerprints like \"seed:tree:ChunkedExtraction\") pass through."
+  [tid]
+  (cond
+    (uuid? tid) tid
+    (string? tid) (try (java.util.UUID/fromString tid) (catch Exception _ tid))
+    :else tid))
+
+(defn- fetch-evidence-body
+  "Return the candidate's Living Description body, fetched from the RIGHT
+   read-model scope. Tries the candidate's stated granularity, then
+   :tree-fingerprint, then :tree-class (deduped). Returns nil if no body."
+  [ctx granularity target-id]
+  (let [tid (coerce-evidence-target-id target-id)]
+    (some (fn [scope] (when scope (get-description ctx scope tid)))
+          (distinct [granularity :tree-fingerprint :tree-class]))))
+
+(defn- compact-strengths [strengths]
+  (->> strengths
+       (take evidence-max-entries)
+       (mapv (fn [e] (cond-> {:trait (:trait e)}
+                       (:good-when e) (assoc :good-when (:good-when e))
+                       (:recommended-pattern e) (assoc :recommended-pattern (:recommended-pattern e)))))))
+
+(defn- compact-weaknesses [weaknesses]
+  (->> weaknesses
+       (take evidence-max-entries)
+       (mapv (fn [e] (cond-> {:trait (:trait e)}
+                       (:avoid-when e) (assoc :avoid-when (:avoid-when e))
+                       (:recommended-alternative e) (assoc :recommended-alternative (:recommended-alternative e)))))))
+
+(defn- enrich-candidate-evidence
+  "Add :avoid-when (top-level body guards + per-weakness guards) and compact
+   :strengths/:weaknesses from the candidate's body to the candidate map.
+   No-op (returns the candidate unchanged) when no body is found — the
+   reranker simply sees the summary, as before."
+  [ctx c]
+  (let [{:keys [granularity target-id]} (:document-metadata c)
+        body (fetch-evidence-body ctx granularity target-id)
+        weaknesses (:weaknesses body)
+        per-weakness-guards (into [] (keep :avoid-when) weaknesses)
+        avoid-when (vec (distinct (concat (:avoid-when body) per-weakness-guards)))]
+    (cond-> c
+      (seq avoid-when)        (assoc :avoid-when avoid-when)
+      (seq (:strengths body)) (assoc :strengths (compact-strengths (:strengths body)))
+      (seq weaknesses)        (assoc :weaknesses (compact-weaknesses weaknesses)))))
+
 (defn- apply-rerank
   "JOIN the reranker's delta output back to the original ColBERT
    candidates on :document-id, returning the top-N in the reranker's
    order. Each result carries the original ColBERT fields PLUS
    :reasoning, :fitness-score, and :rerank-source from the reranker.
+
+   EL-2: before reranking, each candidate is enriched with its body's
+   judge-grounded evidence (:avoid-when + compact strengths/weaknesses) so
+   the reranker can weight DOMAIN fit, not just structural shape. The JOIN
+   below still keys on the ORIGINAL candidates, so the enrichment is
+   input-only — the returned result shape is unchanged.
 
    R01: each result is stamped with :rerank-source. On the success
    path the value is :reranker. On the fallback path (reranker threw,
@@ -310,11 +396,12 @@
    `(or (:fitness-score x) 0.0)` short-circuits don't mask the
    absence."
   [ctx candidates rerank-intent query k]
-  (let [reranked (try
+  (let [enriched (mapv #(enrich-candidate-evidence ctx %) candidates)
+        reranked (try
                    (reranker/rerank! ctx
                      {:query query
                       :intent rerank-intent
-                      :candidates candidates})
+                      :candidates enriched})
                    (catch Throwable t
                      (u/log ::rerank-failed
                             :query query

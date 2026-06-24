@@ -55,8 +55,10 @@
    reasons about structural fit rather than free-form relevance."
   (str "I'm classifying a task to find the best-matching tree-class. "
        "Return the candidate whose recommended pattern best fits the "
-       "task's structural shape and inputs/outputs. Higher fitness = "
-       "better tree-class match."))
+       "task's structural shape and inputs/outputs. Weight domain / "
+       "subject-matter fit, not only structural shape: if a candidate's "
+       "avoid-when matches what the task is doing, down-rank it even if its "
+       "shape fits. Higher fitness = better tree-class match."))
 
 (def behavioral-classifier-intent
   "R05b: text passed as :rerank-with-intent when classify-behaviors
@@ -71,8 +73,10 @@
        "competencies (analysis / validation / research / design / etc.) "
        "— that compose into the structural shape this task needs. Return "
        "candidates whose recommended-pattern best fits what the task "
-       "ACCOMPLISHES, not just what shape it has. Higher fitness = "
-       "better behavioral match."))
+       "ACCOMPLISHES, not just what shape it has. Weight domain / "
+       "subject-matter fit, not only structural shape: if a candidate's "
+       "avoid-when matches what the task is doing, down-rank it even if its "
+       "shape fits. Higher fitness = better behavioral match."))
 
 ;; =============================================================================
 ;; Opts schema (validated at function entry)
