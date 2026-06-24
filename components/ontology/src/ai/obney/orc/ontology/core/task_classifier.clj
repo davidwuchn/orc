@@ -45,6 +45,17 @@
   ((requiring-resolve 'ai.obney.orc.ontology.interface/search-descriptions)
    ctx opts))
 
+;; EL-1b (ADR 0015): the evidence function for the retrieval gate. Lifetime
+;; occurrence count of a target on the consolidation-delta-counter read-model
+;; (the SAME counter the threshold-tracking consolidator reads). Resolved at
+;; call time (no compile-time cyclic dep) and named so tests can with-redefs it
+;; to drive the gate deterministically. NOT private — it is the injected
+;; evidence seam.
+(defn get-consolidation-total*
+  [ctx target-type target-id]
+  ((requiring-resolve 'ai.obney.orc.ontology.core.read-models/get-consolidation-total)
+   ctx target-type target-id))
+
 ;; =============================================================================
 ;; Classifier intent (the constant text passed to the reranker)
 ;; =============================================================================
@@ -92,7 +103,17 @@
    ;; defaults to 0.9 (top-1 above this is trusted as-is; below triggers walk).
    [:walk-down?             {:optional true} :boolean]
    [:specificity-threshold  {:optional true}
-                            [:and number? [:>= 0.0] [:<= 1.0]]]])
+                            [:and number? [:>= 0.0] [:<= 1.0]]]
+   ;; EL-1b (ADR 0015) — convergence-capture knobs (both optional; defaults
+   ;; below). :bundle-threshold is the LOWER edge of the bundle band
+   ;; [bundle-threshold, threshold): a confident-no-match (:novel) whose best
+   ;; :tree-class candidate's fitness lands in that band is BUNDLED onto that
+   ;; existing class instead of scattering a fresh random-uuid. :retrieval-gate
+   ;; is the SEPARATE evidence gate (a count, not a [0,1] score): a :tree-class
+   ;; is only a retrievable candidate once its consolidation total >= the gate.
+   [:bundle-threshold       {:optional true}
+                            [:and number? [:>= 0.0] [:<= 1.0]]]
+   [:retrieval-gate         {:optional true} [:and int? [:>= 0]]]])
 
 ;; =============================================================================
 ;; Walk-down configuration
@@ -100,6 +121,28 @@
 
 (def ^:private default-walk-down? true)
 (def ^:private default-specificity-threshold 0.9)
+
+;; EL-1b (ADR 0015) — convergence-capture defaults, started CONSERVATIVE.
+;;
+;; default-bundle-threshold: the lower edge of the bundle band. Set close to
+;; the match threshold (0.7) so only a STRONG near-miss — a candidate the
+;; grounded reranker rated nearly a match — converges onto an existing class.
+;; A weak / distinct candidate (the over-merge risk; the E4 OOD + refactor
+;; cases score well below this) stays a fresh provisional class. The prototype
+;; (development/bench/el1b_convergence_capture_proto.clj) showed junk topping
+;; out ~0.6 against unrelated classes while a true variant of a recurring class
+;; matches outright (>= 0.7) — so the bundle band primarily catches strong
+;; sub-threshold near-misses, converging them rather than scattering.
+(def ^:private default-bundle-threshold 0.6)
+
+;; default-retrieval-gate: a :tree-class must have recurred this many times
+;; (lifetime consolidation total) before it is a retrievable candidate. A
+;; SEPARATE knob from the consolidation threshold (default 10) — started
+;; conservative at 3 so a class that has genuinely recurred a few times
+;; surfaces, while a one-off (total 1) is filtered as junk. Below-gate classes
+;; STILL accrue (the counter keeps ticking) — the gate only governs
+;; candidacy, never accrual.
+(def ^:private default-retrieval-gate 3)
 (def ^:private max-walk-depth
   "Hard depth cap on walk-down recursion (R-C2d-2 mitigation). At
    this depth we stop walking even if more children would fit and log
@@ -292,6 +335,118 @@
                    (:target-id current))))))))
 
 ;; =============================================================================
+;; EL-1b (ADR 0015) — convergence-capture helpers (pure)
+;; =============================================================================
+
+(defn- tree-class-candidate? [c]
+  (= :tree-class (-> c :document-metadata :granularity)))
+
+(defn- candidate-class-id
+  "Stable tree-class id for a candidate — reuses coerce-to-uuid so a seed
+   tree-class with a string target-id (e.g. 'seed:tree:SequentialPipeline')
+   is a valid bundle target rather than being silently dropped (a real
+   prototype finding)."
+  [c]
+  (some-> c :document-metadata :target-id coerce-to-uuid))
+
+(def ^:private rrf-k
+  "RRF constant, mirrored from graph/compute-rrf-scores (the fusion primitive
+   we mirror here rather than fork, to keep classify-task free of a graph dep)."
+  60)
+
+(defn- rrf-fuse
+  "Mirror of graph/compute-rrf-scores: Reciprocal Rank Fusion over several
+   ranked signal-batches. Each batch is a seq of [id score]; higher score =
+   better rank within its batch. Returns [[id fused-score] ...] sorted desc.
+   Used to FUSE the multi-signal candidate evidence (reranker fitness +
+   ColBERT semantic score) into one ranking — its correct role is fusion, NOT
+   an absolute-similarity gate (the bundle DECISION gates on absolute fitness,
+   see bundle-decision)."
+  [batches]
+  (let [ranked (for [batch batches]
+                 (->> batch
+                      (sort-by second >)
+                      (map-indexed (fn [rank [id _]] [id rank]))))
+        scores (reduce
+                 (fn [acc rl]
+                   (reduce (fn [a [id rank]]
+                             (update a id (fnil + 0.0) (/ 1.0 (+ rrf-k (inc rank)))))
+                           acc rl))
+                 {} ranked)]
+    (->> scores (sort-by val >) vec)))
+
+(defn- bundle-decision
+  "EL-1b Part 1. Given the retrieved candidates, decide whether a confident
+   no-match (:novel) should BUNDLE onto an existing tree-class instead of
+   scattering a fresh random-uuid.
+
+   Multi-signal: RRF-fuses the :tree-class candidates' reranker fitness
+   (intent fit, EL-2-grounded) with their ColBERT raw score (semantic /
+   description match) to pick the single best :tree-class candidate, then
+   gates that winner on ABSOLUTE fitness in the bundle band
+   [bundle-threshold, threshold). (RRF chooses; the absolute fitness gates —
+   pure rank-RRF cannot separate a variant from junk, a prototype finding.)
+
+   Returns the existing class's id to bundle onto, or nil to mint fresh.
+   Only :tree-class candidates are considered — convergence rides the
+   instruction-aware axis, never :tree-fingerprint."
+  [candidates bundle-threshold threshold]
+  (let [tcs (filterv tree-class-candidate? candidates)
+        fit-by-id (into {} (keep (fn [c] (when-let [id (candidate-class-id c)]
+                                           [id (or (:fitness-score c) 0.0)]))
+                                 tcs))
+        sem-by-id (into {} (keep (fn [c] (when-let [id (candidate-class-id c)]
+                                           [id (or (:score c) 0.0)]))
+                                 tcs))
+        intent-batch (seq fit-by-id)
+        sem-batch    (seq sem-by-id)
+        batches (filterv seq [intent-batch sem-batch])
+        fused (when (seq batches) (rrf-fuse batches))
+        [top-id _] (first fused)
+        fit (get fit-by-id top-id 0.0)]
+    (when (and top-id
+               (>= fit bundle-threshold)
+               (< fit threshold))
+      top-id)))
+
+(defn- gate-candidates
+  "EL-1b Part 2 — EVIDENCE GATE. Filter the candidate set so a RUNTIME-EMERGENT
+   :tree-class is only a retrievable candidate once it has RECURRED past the
+   retrieval gate.
+
+   The discriminator is the lifetime consolidation total on the
+   instruction-aware :tree-class axis (the SAME counter the consolidator reads,
+   ticked on every :ontology/task-classified). The filter band is the half-open
+   interval (0, retrieval-gate):
+
+     total = 0            → NOT a runtime-accrued class. Either a curated
+                            baseline SEED (recorded description, never runtime-
+                            classified) or a brand-new mint about to be assigned
+                            this tick. Curated baseline is trusted → PASS. (A
+                            count-only >= gate filter would wrongly demote every
+                            seed, which has total 0 — verified breaking baseline
+                            matching in dev; this band keeps seeds reachable.)
+     0 < total < gate     → a runtime fresh-mint / bundle that has occurred but
+                            NOT yet recurred enough — a possible one-off junk
+                            class → FILTER from candidacy. It STILL accrues (the
+                            counter keeps ticking); it just doesn't surface as
+                            noise. PROVEN: it surfaces once it recurs to >= gate.
+     total >= gate        → recurring, established → PASS.
+
+   :tree-fingerprint (and any non-tree-class) candidates pass through untouched
+   — the gate rides only the instruction-aware axis the emergence loop accrues
+   on."
+  [ctx candidates retrieval-gate]
+  (filterv (fn [c]
+             (if (tree-class-candidate? c)
+               (if-let [id (candidate-class-id c)]
+                 (let [total (get-consolidation-total* ctx :tree-class id)]
+                   (or (zero? total) (>= total retrieval-gate)))
+                 false)
+               true))
+           candidates))
+
+;; =============================================================================
 ;; Task signature builder — pure
 ;; =============================================================================
 
@@ -360,9 +515,12 @@
                     {:explain err
                      :opts opts})))
   (let [{:keys [task-signature parent-summary threshold
-                walk-down? specificity-threshold]
+                walk-down? specificity-threshold
+                bundle-threshold retrieval-gate]
          :or {walk-down? default-walk-down?
-              specificity-threshold default-specificity-threshold}} opts
+              specificity-threshold default-specificity-threshold
+              bundle-threshold default-bundle-threshold
+              retrieval-gate default-retrieval-gate}} opts
         signature (build-effective-signature task-signature parent-summary)
         ;; EL-1a (ADR 0015, emergence loop): retrieve BOTH the
         ;; :tree-fingerprint axis (exact canonical shape) AND the
@@ -376,11 +534,22 @@
         ;; matches the recorded class (coerce-to-uuid of the winner's
         ;; target-id already handles either axis; walk-down + thresholds
         ;; unchanged).
-        candidates (search-descriptions ctx
-                     {:query signature
-                      :granularity #{:tree-fingerprint :tree-class}
-                      :rerank-with-intent classifier-intent
-                      :k 5})
+        raw-candidates (search-descriptions ctx
+                         {:query signature
+                          :granularity #{:tree-fingerprint :tree-class}
+                          :rerank-with-intent classifier-intent
+                          :k 5})
+        ;; EL-1b (ADR 0015) Part 2 — EVIDENCE GATE. A :tree-class is only a
+        ;; retrievable CANDIDATE once it has recurred past the retrieval gate
+        ;; (lifetime consolidation total >= gate). A one-off (junk) is filtered
+        ;; from candidacy here — it STILL accrues (the counter ticks on every
+        ;; assign), it just doesn't surface as noise. :tree-fingerprint
+        ;; candidates pass through untouched (the gate rides only the
+        ;; instruction-aware axis). The fallback flag below is read from the
+        ;; RAW top-1 (pre-gate) so reranker-fallback uncertainty is detected
+        ;; regardless of the gate.
+        rerank-fallback?-raw (= :colbert-fallback (:rerank-source (first raw-candidates)))
+        candidates (gate-candidates ctx raw-candidates retrieval-gate)
         top-1 (first candidates)
         top-score (or (:fitness-score top-1) 0.0)
         matched? (and top-1 (>= top-score threshold))
@@ -391,7 +560,11 @@
         ;; so downstream consumers (event body, dashboard, operator
         ;; alerts) can distinguish a legitimate low-confidence match
         ;; from a silent reranker failure that looks identical.
-        rerank-fallback? (= :colbert-fallback (:rerank-source top-1))]
+        ;; EL-1b: a reranker fallback stamps EVERY candidate, so it is detected
+        ;; on the RAW (pre-gate) top-1 — gating must never turn an :uncertain
+        ;; fallback into a confident :novel by removing the fallback candidate.
+        rerank-fallback? (or rerank-fallback?-raw
+                             (= :colbert-fallback (:rerank-source top-1)))]
     (cond
       ;; EL-3 (ADR 0015): the reranker FELL BACK to raw ColBERT — we do NOT
       ;; KNOW the fit. De-conflate uncertainty from novelty: this is NOT a
@@ -413,20 +586,42 @@
        :rerank-fallback? true}
 
       ;; No match (confident — reranker succeeded, top-1 below threshold) →
-      ;; :novel: keep the legacy fresh-mint novelty marker at root (EL-1b
-      ;; later turns this into the emitted-tree capture; EL-3 just labels it).
+      ;; :novel. EL-1b Part 1 — CONVERGENCE CAPTURE. Before scattering a fresh
+      ;; random-uuid, probe the (gated) :tree-class candidates with a
+      ;; multi-signal fusion (reranker fitness + ColBERT semantic, RRF-fused)
+      ;; and, if the best :tree-class candidate's absolute fitness lands in the
+      ;; bundle band [bundle-threshold, threshold), BUNDLE onto that existing
+      ;; class (accrue on it) instead of minting a fresh id. This converges
+      ;; variants onto ONE stable identity — the random-uuid-per-variant
+      ;; scatter is exactly the FAIL this removes. Detect-and-defer holds: a
+      ;; bundle ASSIGNS to an existing tree-class, it does NOT create a
+      ;; behavioral-subtree at runtime (that is EL-4 harvest). Below the band
+      ;; (or no in-band :tree-class candidate) → the legacy fresh-mint, so a
+      ;; genuinely-new specialization still gets its own provisional class and
+      ;; distinct tasks are NOT over-merged.
       (not matched?)
-      {:assigned-tree-id (random-uuid)
-       :confidence       top-score
-       :top-candidates   (vec candidates)
-       :reasoning        (or (:reasoning top-1)
-                             (if (seq candidates)
-                               "Top candidate did not pass confidence threshold; minting fresh task class."
-                               "No candidates returned; minting fresh task class."))
-       :was-fresh-mint?  true
-       :outcome          :novel
-       :parent-tree-id   nil
-       :rerank-fallback? rerank-fallback?}
+      (if-let [bundle-id (bundle-decision candidates bundle-threshold threshold)]
+        {:assigned-tree-id bundle-id
+         :confidence       top-score
+         :top-candidates   (vec candidates)
+         :reasoning        (or (:reasoning top-1)
+                               "Below the match threshold but a strong near-miss to an existing tree-class; bundling onto it (convergence) rather than scattering a fresh class.")
+         :was-fresh-mint?  false
+         :bundled?         true
+         :outcome          :novel
+         :parent-tree-id   nil
+         :rerank-fallback? rerank-fallback?}
+        {:assigned-tree-id (random-uuid)
+         :confidence       top-score
+         :top-candidates   (vec candidates)
+         :reasoning        (or (:reasoning top-1)
+                               (if (seq candidates)
+                                 "Top candidate did not pass confidence threshold; minting fresh task class."
+                                 "No candidates returned; minting fresh task class."))
+         :was-fresh-mint?  true
+         :outcome          :novel
+         :parent-tree-id   nil
+         :rerank-fallback? rerank-fallback?})
 
       ;; Walk-down disabled → legacy match (no walk, no parent)
       (not walk-down?)
