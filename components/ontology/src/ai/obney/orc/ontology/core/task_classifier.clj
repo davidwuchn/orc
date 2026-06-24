@@ -360,9 +360,21 @@
          :or {walk-down? default-walk-down?
               specificity-threshold default-specificity-threshold}} opts
         signature (build-effective-signature task-signature parent-summary)
+        ;; EL-1a (ADR 0015, emergence loop): retrieve BOTH the
+        ;; :tree-fingerprint axis (exact canonical shape) AND the
+        ;; :tree-class axis (the instruction-aware identity the classifier
+        ;; assigns + the consolidator records descriptions under). Querying
+        ;; :tree-fingerprint alone left every recorded :tree-class
+        ;; indexed-but-UNREACHABLE — so a second similar task could never
+        ;; match the first's class and fresh-minted a new random-uuid
+        ;; instead → the semantic axis scattered one identity per
+        ;; occurrence. With the :tree-class axis reachable, a repeat task
+        ;; matches the recorded class (coerce-to-uuid of the winner's
+        ;; target-id already handles either axis; walk-down + thresholds
+        ;; unchanged).
         candidates (search-descriptions ctx
                      {:query signature
-                      :granularity :tree-fingerprint
+                      :granularity #{:tree-fingerprint :tree-class}
                       :rerank-with-intent classifier-intent
                       :k 5})
         top-1 (first candidates)

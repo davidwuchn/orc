@@ -353,7 +353,10 @@
      opts - options map:
        :query              - natural-language query string (REQUIRED)
        :granularity        - filter to one of :node-type, :node-instance,
-                             :tree-fingerprint; or :all (default :all)
+                             :tree-fingerprint, :tree-class,
+                             :behavioral-subtree; OR a SET of those
+                             (membership filter, retrieve across axes);
+                             or :all (no filter; default :all)
        :k                  - top-K to return (default 10)
        :rerank-with-intent - optional string. When provided, the
                              ColBERT top-(2k or capped 50) is run
@@ -385,13 +388,24 @@
                               {:query query
                                :index-id (:index-id index)
                                :k fetch-k}))
-          filtered (if (= granularity :all)
+          ;; EL-1a: granularity may be :all (no filter), a single granularity
+          ;; keyword (equality, legacy), OR a SET of granularities
+          ;; (membership) so a caller can retrieve across more than one axis
+          ;; in one query — e.g. classify-task pulling BOTH :tree-fingerprint
+          ;; and :tree-class so a previously-recorded tree-class is reachable
+          ;; (it was indexed-but-unreachable when only :tree-fingerprint was
+          ;; queried). Compare by name because granularity round-trips through
+          ;; the ColBERT JSON bridge as a string.
+          allowed-names (cond
+                          (= granularity :all) nil ;; nil => no filter
+                          (set? granularity)   (into #{} (map granularity-name) granularity)
+                          :else                #{(granularity-name granularity)})
+          filtered (if (nil? allowed-names)
                      raw-results
-                     (let [g-name (granularity-name granularity)]
-                       (filterv #(= g-name
-                                    (granularity-name
-                                      (-> % :document-metadata :granularity)))
-                                raw-results)))]
+                     (filterv #(contains? allowed-names
+                                          (granularity-name
+                                            (-> % :document-metadata :granularity)))
+                              raw-results))]
       (if rerank-with-intent
         (apply-rerank ctx filtered rerank-with-intent query k)
         (vec (take k filtered))))
