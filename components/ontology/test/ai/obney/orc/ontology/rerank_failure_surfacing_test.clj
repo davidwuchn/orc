@@ -331,13 +331,20 @@
                         :walk-down? false})]
           (is (true? (:rerank-fallback? result))
               ":rerank-fallback? is true on the classify-task result")
-          ;; Under fallback the top-1 :fitness-score is nil → top-score = 0.0
-          ;; → not matched → fresh-mint at root via the legacy path. The
-          ;; flag distinguishes this from a real low-confidence match.
-          (is (true? (:was-fresh-mint? result))
-              "Fresh-mint still happens (nil fitness → 0.0 → below threshold)")
+          ;; EL-3 (ADR 0015) — DE-CONFLATION: this test previously asserted
+          ;; that a reranker fallback fresh-mints (nil fitness → 0.0 → below
+          ;; threshold → no-match → fresh-mint). That WAS the conflation
+          ;; (the 8/8 fallback-mint): a fallback is uncertainty, not novelty.
+          ;; EL-3 short-circuits a fallback to :outcome :uncertain BEFORE the
+          ;; no-match branch — detect-and-defer: create NOTHING.
+          (is (= :uncertain (:outcome result))
+              "Reranker fallback → :outcome :uncertain (uncertainty, not novelty)")
+          (is (not (true? (:was-fresh-mint? result)))
+              "EL-3: a fallback NO LONGER fresh-mints (de-conflation)")
+          (is (nil? (:assigned-tree-id result))
+              "EL-3: :uncertain assigns NO class (no fresh random-uuid)")
           (is (nil? (:parent-tree-id result))
-              ":parent-tree-id stays nil (legacy not-matched path)"))))))
+              ":parent-tree-id stays nil (deferred, not matched)"))))))
 
 ;; =============================================================================
 ;; RED #6 — classify-task reports :rerank-fallback? false under success

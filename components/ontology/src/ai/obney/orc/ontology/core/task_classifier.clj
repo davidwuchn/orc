@@ -393,7 +393,28 @@
         ;; from a silent reranker failure that looks identical.
         rerank-fallback? (= :colbert-fallback (:rerank-source top-1))]
     (cond
-      ;; No match → legacy fresh-mint at root (no parent)
+      ;; EL-3 (ADR 0015): the reranker FELL BACK to raw ColBERT — we do NOT
+      ;; KNOW the fit. De-conflate uncertainty from novelty: this is NOT a
+      ;; confident no-match. Detect-and-defer — return :outcome :uncertain
+      ;; and create NOTHING (no fresh random-uuid, no :was-fresh-mint? true).
+      ;; This must come BEFORE the (not matched?) branch: a fallback's
+      ;; :fitness-score is nil → top-score 0.0 → it would otherwise take the
+      ;; no-match branch and fresh-mint exactly like a confident novelty (the
+      ;; 8/8 fallback-mint conflation). :rerank-fallback? stays true so the
+      ;; R-Inject caution still surfaces.
+      rerank-fallback?
+      {:assigned-tree-id nil
+       :confidence       top-score
+       :top-candidates   (vec candidates)
+       :reasoning        (or (:reasoning top-1)
+                             "Reranker fell back to raw ColBERT; classification deferred (uncertain).")
+       :outcome          :uncertain
+       :parent-tree-id   nil
+       :rerank-fallback? true}
+
+      ;; No match (confident — reranker succeeded, top-1 below threshold) →
+      ;; :novel: keep the legacy fresh-mint novelty marker at root (EL-1b
+      ;; later turns this into the emitted-tree capture; EL-3 just labels it).
       (not matched?)
       {:assigned-tree-id (random-uuid)
        :confidence       top-score
@@ -403,6 +424,7 @@
                                "Top candidate did not pass confidence threshold; minting fresh task class."
                                "No candidates returned; minting fresh task class."))
        :was-fresh-mint?  true
+       :outcome          :novel
        :parent-tree-id   nil
        :rerank-fallback? rerank-fallback?}
 
@@ -414,6 +436,7 @@
        :top-candidates   (vec candidates)
        :reasoning        (or (:reasoning top-1) "")
        :was-fresh-mint?  false
+       :outcome          :matched
        :parent-tree-id   nil
        :rerank-fallback? rerank-fallback?}
 
@@ -427,10 +450,12 @@
            :top-candidates   (vec candidates)
            :reasoning        (or (:reasoning top-1) "")
            :was-fresh-mint?  false
+           :outcome          :matched
            :parent-tree-id   nil
            :rerank-fallback? rerank-fallback?}
           ;; Moderate-confidence top-1 → walk-down to find a tighter
-          ;; descendant. walk-down-from carries no parent at depth 0.
+          ;; descendant. walk-down-from carries no parent at depth 0. A
+          ;; walk-down result is a (deeper) match → :outcome :matched.
           (let [walk-result (walk-down-from ctx classifier-intent
                                             {:target-id top-1-id
                                              :fitness-score top-score
@@ -440,6 +465,7 @@
                                             nil)]
             (-> walk-result
                 (assoc :top-candidates (vec candidates))
+                (assoc :outcome :matched)
                 (assoc :rerank-fallback? rerank-fallback?))))))))
 
 ;; =============================================================================
@@ -558,7 +584,32 @@
                                    (>= s threshold))
                                 filtered)
         kept (take top-n above-threshold)]
-    (if (seq kept)
+    (cond
+      ;; EL-3 (ADR 0015): the behavioral reranker FELL BACK to raw ColBERT —
+      ;; we do NOT know the fit. De-conflate uncertainty from novelty:
+      ;; detect-and-defer → :outcome :uncertain, create NOTHING. This must be
+      ;; checked BEFORE the empty-kept branch: under fallback the per-result
+      ;; :fitness-score is nil → nothing passes threshold → kept is empty →
+      ;; it would otherwise emit a :was-fresh-mint? true marker exactly like a
+      ;; confident novelty (the 8/8 fallback-mint conflation the E4 harness
+      ;; measures off (:was-fresh-mint? top)). Return the top candidates for
+      ;; few-shot context WITHOUT any mint marker; keep :rerank-fallback? for
+      ;; the caution.
+      rerank-fallback?
+      {:behaviors
+       (mapv (fn [c]
+               {:behavior-id (coerce-to-uuid
+                               (-> c :document-metadata :target-id))
+                :confidence (or (:fitness-score c) 0.0)
+                :was-fresh-mint? false
+                :reasoning (or (:reasoning c) "")
+                :rerank-source (:rerank-source c)})
+             (take top-n filtered))
+       :outcome :uncertain
+       :rerank-fallback? true}
+
+      ;; Confident match — at least one behavior above threshold.
+      (seq kept)
       {:behaviors
        (mapv (fn [c]
                {:behavior-id (coerce-to-uuid
@@ -568,7 +619,12 @@
                 :reasoning (or (:reasoning c) "")
                 :rerank-source (:rerank-source c)})
              kept)
+       :outcome :matched
        :rerank-fallback? rerank-fallback?}
+
+      ;; Confident no-match (reranker succeeded, nothing above threshold) →
+      ;; :novel: keep the single fresh-mint novelty marker (EL-1b capture).
+      :else
       {:behaviors
        [{:behavior-id (random-uuid)
          :confidence 0.0
@@ -577,4 +633,5 @@
                       "No candidate above threshold; minting fresh"
                       "No behavioral candidates returned; minting fresh")
          :rerank-source (:rerank-source top-1)}]
+       :outcome :novel
        :rerank-fallback? rerank-fallback?})))

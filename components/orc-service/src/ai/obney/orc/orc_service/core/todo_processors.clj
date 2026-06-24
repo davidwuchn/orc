@@ -213,40 +213,58 @@
                                  ;; section can surface up to 5 candidates
                                  ;; (matches behavioral-cap downstream).
                                  :top-n 5})
-            behaviors (:behaviors behavioral-result)]
-        (cp/process-command
-          (assoc context :command
-                 (cond-> {:command/name :ontology/assign-task-class
-                          :command/id (random-uuid)
-                          :command/timestamp (time/now)
-                          :source-sheet-id (:sheet-id context)
-                          :source-tick-id (:tick-id context)
-                          :source-node-id (:id node)
-                          :assigned-tree-id (:assigned-tree-id result)
-                          :confidence (:confidence result)
-                          :top-candidates (:top-candidates result)
-                          :reasoning (or (:reasoning result) "")
-                          :was-fresh-mint? (:was-fresh-mint? result)}
-                   ;; C-2d-2: forward :parent-tree-id when walk-down returned
-                   ;; one. Nil means top-level match or walk-down disabled.
-                   (some? (:parent-tree-id result))
-                   (assoc :parent-tree-id (:parent-tree-id result))
-                   ;; R01: forward :rerank-fallback? as :rerank-failed?
-                   ;; when classify-task observed a reranker fallback.
-                   ;; Omit when false (legacy event shape preserved).
-                   (true? (:rerank-fallback? result))
-                   (assoc :rerank-failed? true)
-                   ;; R05b: forward behavioral classification when present.
-                   ;; Omit when nil/empty so the legacy event shape is
-                   ;; preserved on opt-out / failure paths.
-                   (seq behaviors)
-                   (assoc :behavioral-subtrees behaviors))))
-        (println (format "[DEBUG RLM] node '%s' auto-classified → %s (confidence %.2f, was-fresh-mint? %s, behavioral-count %d)"
-                         (or (:name node) (str (:id node)))
-                         (:assigned-tree-id result)
-                         (double (or (:confidence result) 0.0))
-                         (:was-fresh-mint? result)
-                         (count (:behaviors behavioral-result))))
+            behaviors (:behaviors behavioral-result)
+            ;; EL-3 (ADR 0015): detect-and-defer. When the structural OR
+            ;; behavioral classification :outcome is :uncertain (a reranker
+            ;; fallback — we do NOT know the class), SKIP the
+            ;; :ontology/assign-task-class dispatch entirely: no fresh-mint
+            ;; event, no class creation/accrual. We still set the node
+            ;; :context below so the R-Inject reranker-fallback caution
+            ;; surfaces to the model. :matched / :novel dispatch as today.
+            ;; The defeat condition (ADR 0015) is an :uncertain outcome that
+            ;; still mints/assigns — so the dispatch is gated here, not via a
+            ;; schema throw on a nil :assigned-tree-id.
+            uncertain? (or (= :uncertain (:outcome result))
+                           (= :uncertain (:outcome behavioral-result)))]
+        (if uncertain?
+          (println (format "[DEBUG RLM] node '%s' auto-classify DEFERRED (outcome :uncertain — struct=%s behav=%s) — NO assign-task-class dispatched"
+                           (or (:name node) (str (:id node)))
+                           (:outcome result)
+                           (:outcome behavioral-result)))
+          (do
+            (cp/process-command
+              (assoc context :command
+                     (cond-> {:command/name :ontology/assign-task-class
+                              :command/id (random-uuid)
+                              :command/timestamp (time/now)
+                              :source-sheet-id (:sheet-id context)
+                              :source-tick-id (:tick-id context)
+                              :source-node-id (:id node)
+                              :assigned-tree-id (:assigned-tree-id result)
+                              :confidence (:confidence result)
+                              :top-candidates (:top-candidates result)
+                              :reasoning (or (:reasoning result) "")
+                              :was-fresh-mint? (:was-fresh-mint? result)}
+                       ;; C-2d-2: forward :parent-tree-id when walk-down returned
+                       ;; one. Nil means top-level match or walk-down disabled.
+                       (some? (:parent-tree-id result))
+                       (assoc :parent-tree-id (:parent-tree-id result))
+                       ;; R01: forward :rerank-fallback? as :rerank-failed?
+                       ;; when classify-task observed a reranker fallback.
+                       ;; Omit when false (legacy event shape preserved).
+                       (true? (:rerank-fallback? result))
+                       (assoc :rerank-failed? true)
+                       ;; R05b: forward behavioral classification when present.
+                       ;; Omit when nil/empty so the legacy event shape is
+                       ;; preserved on opt-out / failure paths.
+                       (seq behaviors)
+                       (assoc :behavioral-subtrees behaviors))))
+            (println (format "[DEBUG RLM] node '%s' auto-classified → %s (confidence %.2f, was-fresh-mint? %s, behavioral-count %d)"
+                             (or (:name node) (str (:id node)))
+                             (:assigned-tree-id result)
+                             (double (or (:confidence result) 0.0))
+                             (:was-fresh-mint? result)
+                             (count (:behaviors behavioral-result))))))
         ;; R-Inject: stash the full classifier payload on :context so
         ;; apply-r05-classifier-context can prepend it to the model's
         ;; Phase 1 prompt. :tree-id stays at the top level for downstream
