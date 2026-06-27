@@ -933,6 +933,24 @@
               (and (map? v) (every? nil? (vals v)))))
         (vals outputs)))
 
+(defn- strip-nil-optional-writes
+  "Drop declared-OPTIONAL writes that parsed to nil, so a node can mark a
+   best-effort output (e.g. an evidence array the model legitimately omits under
+   prompt load) as droppable. A stripped (absent) value neither fails the nil-gate
+   below NOR is written to the blackboard as nil — downstream code reads it as
+   absent and defaults it. Opt in via the node's `:options :optional-writes`
+   (a coll of write keywords); `:options` already round-trips to execution, so this
+   needs no new persisted node field. `outputs` may be nil (error path) — pass it
+   through untouched."
+  [outputs optional-writes]
+  (if (and (map? outputs) (seq optional-writes))
+    (into {} (remove (fn [[k v]]
+                       (and (contains? optional-writes k)
+                            (or (nil? v)
+                                (and (map? v) (every? nil? (vals v))))))
+                     outputs))
+    outputs))
+
 (defn execute-ai
   "Execute a leaf node using DSCloj AI.
 
@@ -956,6 +974,11 @@
    nested structure for the blackboard."
   [node blackboard provider & {:keys [options stream] :or {options {}}}]
   (let [start-time (System/currentTimeMillis)
+        ;; Best-effort writes the model may omit (e.g. evidence arrays under
+        ;; prompt load): capture them, then strip the marker from the options
+        ;; map so it never reaches DSCloj as a spurious request option.
+        optional-writes (set (:optional-writes options))
+        options (dissoc options :optional-writes)
         module (build-module node blackboard)
         inputs (gather-inputs node blackboard)
         output-mapping (:output-mapping module)
@@ -1058,7 +1081,10 @@
             (try
               (try-once attempt)
               (catch Exception e
-                {:error (.getMessage e)}))]
+                {:error (.getMessage e)}))
+            ;; Drop nil best-effort writes so an omitted evidence array is the
+            ;; node's declared-optional absence, not a nil-gate failure.
+            outputs (strip-nil-optional-writes outputs optional-writes)]
         (cond
           ;; Exception — retry with backoff (handles rate limits, transient errors)
           (and error (< attempt max-retries))
