@@ -1327,10 +1327,14 @@ Enabling `:auto-classify? true` on a `:repl-researcher` fires the following
 before the model starts Phase 1:
 
 1. **Classification**: the task signature runs through `classify-task` (structural
-   tree-class match) and `classify-behaviors` (behavioral-subtree match) against the
-   seeded corpus.
-2. **LLM reranker**: top-N matched patterns are reranked by an LLM against your task's
-   intent — each candidate receives a fitness-score and a reasoning string.
+   tree-class match, retrieving across BOTH the `:tree-fingerprint` and `:tree-class`
+   axes) and `classify-behaviors` (behavioral-subtree match) against the seeded corpus.
+   `classify-task` returns a three-state `:outcome` (`:matched`/`:novel`/`:uncertain`) —
+   detect-and-defer, no runtime creation of a durable behavior.
+2. **Grounded domain rank**: top-N matched patterns are reranked by an LLM that reads
+   each candidate's judge-grounded `:avoid-when`, then a deterministic contrastive
+   domain penalty (ADR 0016) enforces it after the rerank — each candidate receives a
+   fitness-score and a reasoning string.
 3. **Corpus prepend**: the top-fitting pattern's full body is prepended to the model's
    instruction — capabilities, worked-example DSL snippets, observed strengths with
    evidence-counts, observed weaknesses with recommended fixes, representative uses.
@@ -1345,25 +1349,34 @@ other. The corpus prepend improves tree **design**; recursive mode improves tree
 
 ### Alpha-state framing
 
-The self-improving loop is **alpha-stage**. The table below reflects the
-current state from a 21-task OOD evidence sweep, mirroring
-[`SELF-IMPROVING-LOOP.md § current capabilities`](SELF-IMPROVING-LOOP.md):
+The self-improving loop is **alpha-stage**. The earlier OOD symptom — a
+runtime that minted a task class on not-finding (and rarely did so, ~1 of
+21 OOD tasks) or force-fit the structurally-closest pattern — is the
+**resolved** symptom that the emergence loop addresses (ADRs
+0014,
+0015,
+0016); it is no
+longer the runtime's behavior. The table below reflects the current loop,
+mirroring [`SELF-IMPROVING-LOOP.md`](SELF-IMPROVING-LOOP.md#honest-status-today--solid-vs-rough):
 
 | Aspect | Today |
 |--------|-------|
 | **In-distribution classification** | **Solid** — tasks resembling shipped seed patterns (legal-issue-detection, contract-comparison, risk-analysis, chunked-extraction) match at confidence 1.00; prepend carries full worked-example DSL |
 | **Recursive RLM + drill-down** | **Solid** — `(tree-detail)`, `(tree-failures)`, `(node-output node-id)` work; model recovers mid-tree failures via focused single-node resume trees |
 | **Consolidator-driven body evolution** | **Solid** — repeated traffic on a pattern increments body version with new strengths grounded in observed execution; history is append-only |
-| **`mint-behavior!` mechanics** | **Solid** — defcommand path, persistence, ColBERT re-index, and same-iteration lookup all work as documented |
-| **Out-of-distribution classification** | **Rough** — OOD tasks force-fit to structurally-closest corpus pattern at confidence 0.85–0.95; reranker gives mechanically-plausible reasoning that misses domain specialization |
-| **`mint-behavior!` firing rate** | **Rough** — fired on 1 of 21 deliberately-OOD tasks; today's classifier does not surface "no good semantic match" as a strong signal; model treats top-N matches as coverage |
-| **Hierarchical seed gaps** | **Rough** — 12 abstract behavioral seeds describe shape but not domain (no "Analysis-of-legal-documents" or "Validation-of-schedule-constraints" specializations yet) |
+| **Detect-and-defer novelty handling** | **Solid** — `classify-task` retrieves on both `:tree-fingerprint` and `:tree-class`, returns a three-state `:outcome` (`:matched`/`:novel`/`:uncertain`); an uncertain (reranker-fallback) task skips assignment, a novel one bundles onto a near class or records a provisional one — no durable behavior is fabricated at runtime |
+| **Grounded domain rank** | **Solid** — the reranker reads each candidate's judge-grounded `:avoid-when`, and a deterministic contrastive penalty (ADR 0016) enforces it after the rerank so a strong shape match no longer overrides a firing domain guard |
+| **Harvest (durable promotion)** | **Designed, not yet shipped on this branch** — novel candidates accrue judge evidence on their `:tree-class` identity today; crystallizing a recurring, well-scored candidate into a named behavior is the next pulled step of the emergence loop |
 
-If your workflow aligns with the shipped seed corpus, the loop is useful from day one.
-If your tasks fall far outside the corpus, author your own seeds via
-`:ontology/record-tree-description` (structural) or `:ontology/mint-behavioral-subtree`
-(behavioral). The affordance works; it rarely fires autonomously today without curator
-involvement.
+Novelty is handled by **detect-and-defer**: the runtime detects that a
+task is novel/uncertain and accrues evidence rather than fabricating a
+durable behavior on the spot — durable creation is the evidence-grounded
+harvest path. If your workflow aligns with the shipped seed corpus, the
+loop is useful from day one. If your tasks fall far outside the corpus,
+you can still author your own seeds via `:ontology/record-tree-description`
+(structural), and the behavioral `mint-behavior!` primitive remains
+available for a model to contribute an adjacent behavior informed by the
+surfaced references (it *informs*, it does not gate).
 
 ### What you just added
 

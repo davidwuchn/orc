@@ -472,6 +472,22 @@ scripts/colbert_bridge.py            # JSON-RPC subprocess
    :k 3})
 ```
 
+**ColBERT is the default scorer for the ontology classifier's domain penalty.**
+Beyond ad-hoc reranking, `colbert/rerank` (in-memory MaxSim, no index) is the
+**default** backend for the self-learning classifier's contrastive **domain
+penalty** (ADR
+0016 amendment). After the
+LLM rerank, each candidate's judge-grounded `:avoid-when` guards and positive
+signals are scored against the task in **one batched `colbert/rerank` call per
+rerank** (the distinct guard set across all candidates), the MaxSim scores are
+mapped to `[0,1]` via `colbert/normalize-colbert-score`, and the contrastive
+penalty bites when the task matches a candidate's avoid-condition more than its
+use-case. The scorer is a pluggable injected capability — `:colbert` (default) or
+`:embedding` (model-swappable) — selected because ColBERT's token-level matching
+empirically separated the load-bearing case (a `refactor` task vs. a
+`rename-move-symbol` guard) where single-vector cosine did not. See
+[SELF-IMPROVING-LOOP.md § How novelty is handled](SELF-IMPROVING-LOOP.md#2-how-novelty-is-handled--detect-and-defer--the-emergence-loop).
+
 ### Training Domain Retriever
 
 ```clojure

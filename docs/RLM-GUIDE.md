@@ -419,10 +419,24 @@ end-to-end consumer walkthrough.
 
 ### Behavioral mints — contributing new patterns to the corpus
 
-When `classify-behaviors` returns a fresh-mint marker (no candidate
-scored above the confidence floor for the task's accomplishment shape),
-the model can contribute a new behavior via the sandbox primitive
-`(mint-behavior! ...)`:
+> **Detect-and-defer (ADRs
+> 0014,
+> 0015).**
+> Structural classification (`classify-task`) never creates a durable
+> behavior at runtime — it DETECTS novelty (a three-state `:outcome` of
+> `:matched`/`:novel`/`:uncertain`) and DEFERS: an uncertain task is
+> skipped, a novel one accrues evidence on a tree-class identity, and the
+> tree the model emits is itself the candidate. Durable named-behavior
+> creation is the evidence-grounded **harvest** path (the designed terminus
+> of the emergence loop; not yet shipped on this branch). The references
+> the corpus prepend surfaces **inform** the design — they do not gate it,
+> and a match clearing threshold is not a reason to suppress them.
+
+Within that frame the behavioral sandbox primitive `(mint-behavior! ...)`
+remains available: when the surfaced references show the task is novel or
+adjacent, the model can contribute a new behavioral subtree informed by
+them. The mint is the model's choice — it is *informed by* the references
+rather than *triggered by* a not-found result:
 
 ```clojure
 (mint-behavior!
@@ -742,7 +756,7 @@ When the model's Phase 1 code executes in the SCI sandbox, the following primiti
 | `(get-input :key)` | Read a declared input |
 | `(final! {...})` | **Terminate** with validated output |
 | `(emit-tree! [...])` | Emit a behavior tree for Phase 2 execution |
-| `(mint-behavior! "name" body)` / `(mint-behavior! "name" body :parent parent-id)` | Contribute a new behavioral subtree to the corpus. Returns the minted behavior's UUID-string. The minted body must validate against the description-body Malli schema (capabilities + principle-shaped strengths/weaknesses + representative-uses + summary). Persists for future `classify-behaviors` calls across all consumers — see [`SELF-IMPROVING-LOOP.md`](SELF-IMPROVING-LOOP.md#new-patterns-get-minted-when-the-model-encounters-genuinely-new-work). |
+| `(mint-behavior! "name" body)` / `(mint-behavior! "name" body :parent parent-id)` | Contribute a new behavioral subtree to the corpus. Returns the minted behavior's UUID-string. The minted body must validate against the description-body Malli schema (capabilities + principle-shaped strengths/weaknesses + representative-uses + summary). Persists for future `classify-behaviors` calls across all consumers — see [`SELF-IMPROVING-LOOP.md`](SELF-IMPROVING-LOOP.md#2-how-novelty-is-handled--detect-and-defer--the-emergence-loop). |
 
 The drill-down primitives `(tree-detail)`, `(tree-trajectory)`, `(tree-failures)`, `(node-output node-id)`, `(node-input-profile node-id)` are also bound in the sandbox when `:recursive? true` — see [Drill-down primitives](#drill-down-primitives-when-the-summary-isnt-enough).
 

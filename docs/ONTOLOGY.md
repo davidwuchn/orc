@@ -2335,7 +2335,19 @@ The fingerprint replaces every `:instruction` string with the canonical placehol
 
 Consequences:
 - LLM instruction A/B experiments within one tree shape collapse into a single fingerprint bucket in rolling-metrics aggregation.
-- Domain-specific specialist emergence — grouping trees by what they do, not just how they're shaped — requires a separate `:tree-class` axis that is **not yet auto-assigned**.
+- Domain-specific specialist emergence — grouping trees by what they do, not just how they're shaped — rides a separate **instruction-aware `:tree-class` axis**.
+
+**`:tree-class` is now auto-assigned and retrievable** (ADRs
+0014 /
+0015). `classify-task`
+assigns a `:tree-class` per R-Inject run and retrieves across BOTH axes — its
+`search-descriptions` call passes `:granularity #{:tree-fingerprint :tree-class}`.
+`search-descriptions` `:granularity` now accepts a **SET** of granularities
+(membership filter), in addition to a single keyword or `:all`; passing the set is
+what makes a previously-recorded `:tree-class` reachable for a later similar task
+(querying `:tree-fingerprint` alone left every recorded `:tree-class`
+indexed-but-unreachable, so the instruction-aware identity scattered one id per
+occurrence). See [SELF-IMPROVING-LOOP.md § How novelty is handled](SELF-IMPROVING-LOOP.md#2-how-novelty-is-handled--detect-and-defer--the-emergence-loop).
 
 ---
 
