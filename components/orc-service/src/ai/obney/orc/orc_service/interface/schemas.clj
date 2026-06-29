@@ -1126,7 +1126,7 @@
     [:started-at :any]
     [:completed-at :any]
     [:duration-ms :int]
-    [:status [:enum :success :failure :timeout]]
+    [:status [:enum :success :failure :timeout :partial]]
     [:input-snapshot :map]
     [:output-snapshot :map]
     [:node-traces [:vector :any]]                 ;; Vector of ::node-trace
@@ -1325,7 +1325,7 @@
    [:map
     [:sheet-id :uuid]
     [:version-number {:optional true} :int]       ;; Filter by version
-    [:status {:optional true} [:enum :success :failure :timeout]]
+    [:status {:optional true} [:enum :success :failure :timeout :partial]]
     [:node-id {:optional true} :uuid]             ;; Filter by node involvement
     [:since {:optional true} :any]                ;; Filter by time
     [:limit {:optional true} :int]]
@@ -1342,7 +1342,7 @@
    :sheet/runs-screen
    [:map
     [:trace-id {:optional true} :uuid]
-    [:status {:optional true} [:enum :success :failure :timeout]]
+    [:status {:optional true} [:enum :success :failure :timeout :partial]]
     [:limit {:optional true} :int]]
 
    :sheet/runs-screen-result
@@ -1357,7 +1357,7 @@
     [:trace-id :uuid]
     [:sheet-id :uuid]
     [:sheet-name :string]
-    [:status [:enum :success :failure :timeout]]
+    [:status [:enum :success :failure :timeout :partial]]
     [:started-at :any]
     [:duration-ms :int]
     [:node-count :int]

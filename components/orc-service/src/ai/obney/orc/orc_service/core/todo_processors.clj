@@ -1904,7 +1904,7 @@
                        :succeeded (- item-count failed-count)
                        :failed failed-count
                        :failure-indices (mapv first failed-pairs)
-                       :failure-reasons (into {} (map (fn [[i r]] [i (:__error r)]) failed-pairs))}
+                       :failure-reasons (into {} (map (fn [[i r]] [i (or (:__error r) "(no error reason — node timed out or returned nil)")]) failed-pairs))}
               status (if (= failed-count item-count) :failure :partial)
               output (mapv second successful-pairs)]
           [status summary output])))))
