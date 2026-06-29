@@ -30,6 +30,7 @@
             [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
             [ai.obney.orc.ontology.core.todo-processors :as todo-processors] ;; Register todo processors for auto-learning
             [ai.obney.orc.ontology.core.reranker :as reranker]
+            [ai.obney.orc.ontology.core.domain-penalty :as domain-penalty]
             [ai.obney.orc.ontology.core.task-classifier :as task-classifier]
             [ai.obney.orc.ontology.core.seeds :as seeds]
             [ai.obney.grain.event-store-v3.interface :as event-store]
@@ -394,7 +395,18 @@
    returned nil, or returned empty) the value is :colbert-fallback
    AND :fitness-score/:reasoning are explicitly nil so downstream
    `(or (:fitness-score x) 0.0)` short-circuits don't mask the
-   absence."
+   absence.
+
+   EL-5 (ADR 0016): AFTER the JOIN, the reranker's :fitness-score is
+   passed through the deterministic CONTRASTIVE domain penalty
+   (domain-penalty/penalize-candidates). The JOIN below keys back onto
+   the ENRICHED candidates (not the raw ColBERT ones) so the penalty
+   pass can read each candidate's :avoid-when (negative signal) +
+   :content/:good-when (positive signal) — the same EL-2 evidence — and
+   bite DETERMINISTICALLY where the LLM ignored the veto. The penalty
+   re-sorts by the new fitness BEFORE (take k …). Output contract
+   ({:document-id :reasoning :fitness-score}) is UNCHANGED (the extra
+   :domain-penalty/:cos-* keys are additive observability)."
   [ctx candidates rerank-intent query k]
   (let [enriched (mapv #(enrich-candidate-evidence ctx %) candidates)
         reranked (try
@@ -408,15 +420,23 @@
                             :error (.getMessage t))
                      nil))]
     (if (seq reranked)
-      (let [by-doc-id (into {} (map (juxt :document-id identity)) candidates)
+      (let [by-doc-id (into {} (map (juxt :document-id identity)) enriched)
             joined (keep (fn [r]
                            (when-let [orig (get by-doc-id (:document-id r))]
                              (-> orig
                                  (assoc :reasoning (:reasoning r))
                                  (assoc :fitness-score (:fitness-score r))
                                  (assoc :rerank-source :reranker))))
-                         reranked)]
-        (vec (take k joined)))
+                         reranked)
+            ;; EL-5: contrastive domain penalty + re-sort, then take k. The
+            ;; scorer is config-selected (ADR 0016 amendment): :colbert (DEFAULT)
+            ;; or :embedding. An operator overrides via ctx :domain-penalty-config
+            ;; (e.g. {:scorer :embedding :embedding-model "…"}); absent => the
+            ;; recalibrated :colbert defaults.
+            penalty-config (merge domain-penalty/default-penalty-config
+                                  (:domain-penalty-config ctx))
+            penalized (domain-penalty/penalize-candidates ctx joined query penalty-config)]
+        (vec (take k penalized)))
       (do
         (u/log ::rerank-failed
                :query query

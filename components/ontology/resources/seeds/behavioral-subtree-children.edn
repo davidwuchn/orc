@@ -278,7 +278,15 @@
     "move a shared helper from the request handler into a pure pricing namespace and repoint every import"]
    :avoid-when
    ["the task changes behavior or adds functionality — that is code-building, not a behavior-preserving rename/move"
-    "the change is a data reshape rather than an identity refactor of code symbols — that is the Transformation behavior"]
+    "the change is a data reshape rather than an identity refactor of code symbols — that is the Transformation behavior"
+    ;; EL-5 (ADR 0016) guard sharpen: the load-bearing distinction is PURE RENAME
+    ;; vs EXTRACT/REFACTOR. Extracting a helper from a handler, pulling out a
+    ;; function, or restructuring code is NOT a pure identity rename even though
+    ;; it 'moves' code and preserves behavior — that is code-building/refactor.
+    ;; Without this, the contrastive penalty can't tell extract-helper (the 9/10
+    ;; force-fit) from a rename. Exactly what the C-3 judge loop converges to
+    ;; after a refactor->rename run scores badly. See ADR 0016.
+    "the task is to extract a helper, pull out a function, or otherwise refactor/restructure code — that is code-building/refactor, NOT a pure identity rename or move of an existing symbol"]
    :summary
    "Rename-move-symbol is a behavior-preserving, EXHAUSTIVE cross-file identity refactor — rename a function everywhere, move a symbol to another namespace — changing NOTHING else. The load-bearing traits are enumerating EVERY reference (definition, callers, tests, docs) before editing so the change is exhaustive (a missed reference is a compile/runtime break) and gating on a compile/test run to confirm exhaustiveness and behavior preservation. Prefer this child of Code-building whenever the task is a pure rename/move with behavior preserved: the parent's spec->emit instinct stops at the first file and leaves stale references, and sneaking a logic change in destroys the refactor's no-op safety. Avoid when the task adds/changes behavior (code-building) or is a data reshape (Transformation)."
    :scope :behavioral-subtree
