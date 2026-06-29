@@ -384,6 +384,170 @@
   (let [low (clojure.string/lower-case (or s ""))]
     (mapv (fn [w] (if (clojure.string/includes? low w) 1.0 0.0)) vocab)))
 
+;; =============================================================================
+;; 8. EL-5.1 — BATCH the ColBERT scorer: ONE bridge call per rerank, NOT N.
+;;    The headline guardrail (mirrors obney-ops-workshop semantic_index_test's
+;;    "1 batched call, 0 per-item") + the results-neutral proof (batch cosines ==
+;;    per-candidate cosines) + fail-open on the single batched call.
+;; =============================================================================
+
+(def ^:private el51-cfg
+  {:scorer :colbert :penalty-scale 2.0 :margin 0.05 :penalty-cap 0.6
+   :colbert-norm {:max-score 40.0 :method :linear}})
+
+;; Three real-shaped candidates with OVERLAPPING + distinct guards (C shares a
+;; positive guard with A — so the distinct doc-set is smaller than the naive sum).
+(def ^:private batch-candidates
+  [{:document-id "A" :fitness-score 0.95
+    :avoid-when ["extract or refactor, not a pure rename"]
+    :content "behavior-preserving pure rename of a symbol"
+    :strengths [{:good-when "a pure rename across files"}]}
+   {:document-id "B" :fitness-score 0.80
+    :avoid-when ["a one-line config tweak"]
+    :content "build/extract/refactor code structure into a helper"
+    :strengths [{:good-when "extract a pure helper from a handler"}]}
+   {:document-id "C" :fitness-score 0.70
+    :avoid-when ["extract or refactor, not a pure rename"]   ; shares with A
+    :content "rename a local variable"
+    :strengths [{:good-when "a pure rename across files"}]}]) ; shares with A
+
+;; A deterministic content-only fake ColBERT score: per-doc, INDEPENDENT of the
+;; other docs in the call (mirrors the SAFETY property — MaxSim is per-doc). Token
+;; overlap with the task * 5.0. Identical scores regardless of how docs are grouped.
+(def ^:private batch-task "refactor: extract a pure helper from the request handler")
+
+(defn- fake-colbert-score [content]
+  (let [t-tokens (set (clojure.string/split (clojure.string/lower-case batch-task) #"\W+"))
+        c-tokens (clojure.string/split (clojure.string/lower-case content) #"\W+")]
+    (* 5.0 (count (filter t-tokens c-tokens)))))
+
+(defn- counting-rerank-fn [calls]
+  (fn [{:keys [documents]}]
+    (swap! calls inc)
+    (mapv (fn [c] {:content c :score (fake-colbert-score c)}) documents)))
+
+(defn- norm-40 [score & {:keys [max-score] :or {max-score 40.0}}]
+  (min 1.0 (max 0.0 (/ (double score) max-score))))
+
+(deftest el51-penalize-candidates-makes-exactly-one-bridge-call
+  (testing "EL-5.1 HEADLINE: penalize-candidates over M candidates makes EXACTLY 1
+            colbert/rerank call (the batched pass), NOT M — locked against regression"
+    (let [calls (atom 0)]
+      (with-redefs [colbert/rerank (let [rf (counting-rerank-fn calls)]
+                                     (fn [_ctx opts] (rf opts)))]
+        (let [out (dp/penalize-candidates nil batch-candidates batch-task el51-cfg)]
+          (is (= 1 @calls)
+              (str "exactly ONE bridge round-trip for " (count batch-candidates)
+                   " candidates (not " (count batch-candidates) "); calls=" @calls))
+          (is (= (count batch-candidates) (count out)) "all candidates survive")
+          (is (every? #(contains? % :domain-penalty) out)
+              "every candidate is stamped with its penalty"))))))
+
+(deftest el51-one-call-passes-distinct-guard-set
+  (testing "the single batched rerank call receives the DISTINCT union of all
+            candidates' guards (deduped — C's shared guards collapse onto A's)"
+    (let [captured (atom nil)
+          calls (atom 0)]
+      (with-redefs [colbert/rerank (fn [_ctx {:keys [documents] :as opts}]
+                                     (swap! calls inc)
+                                     (reset! captured documents)
+                                     (mapv (fn [c] {:content c :score (fake-colbert-score c)})
+                                           documents))]
+        (dp/penalize-candidates nil batch-candidates batch-task el51-cfg)
+        (is (= 1 @calls) "still exactly one call")
+        ;; Distinct guards: A avoid + A content + A good ; B avoid + B content + B good ;
+        ;; C avoid(=A) + C content + C good(=A). The two shared strings dedupe.
+        (let [docs @captured
+              expected (distinct
+                        (concat (mapcat dp/avoid-strings batch-candidates)
+                                (mapcat dp/positive-strings batch-candidates)))]
+          (is (= (count (distinct docs)) (count docs)) "no duplicate documents in the call")
+          (is (= (set docs) (set expected)) "exactly the distinct union of guards")
+          (is (< (count docs) (reduce + (map (fn [c] (+ (count (dp/avoid-strings c))
+                                                        (count (dp/positive-strings c))))
+                                             batch-candidates)))
+              "the distinct set is SMALLER than the naive per-candidate sum (dedup works)"))))))
+
+(deftest el51-batch-cosines-identical-to-per-candidate
+  (testing "RESULTS-NEUTRAL: the BATCH path's per-candidate {:cos-avoid :cos-good}
+            are IDENTICAL to the N-call per-candidate path's (only the call count
+            differs — per-doc MaxSim is set-independent under a shared query)"
+    (let [;; N-call reference: build each candidate's cosines via colbert-rerank-scores
+          n-calls (atom 0)
+          n-rerank (counting-rerank-fn n-calls)
+          per-cand (into {}
+                         (map (fn [c]
+                                [(:document-id c)
+                                 (dp/colbert-rerank-scores n-rerank norm-40
+                                                           (dp/avoid-strings c)
+                                                           (dp/positive-strings c)
+                                                           batch-task)]))
+                         batch-candidates)
+          ;; Batch path via penalize-candidates (1 call) — read back :cos-avoid/:cos-good.
+          b-calls (atom 0)
+          batch-out (with-redefs [colbert/rerank (let [rf (counting-rerank-fn b-calls)]
+                                                   (fn [_ctx opts] (rf opts)))]
+                      (dp/penalize-candidates nil batch-candidates batch-task el51-cfg))
+          batch-cand (into {} (map (juxt :document-id #(select-keys % [:cos-avoid :cos-good]))) batch-out)]
+      (is (= (count batch-candidates) @n-calls) "the reference path made N calls (one per candidate)")
+      (is (= 1 @b-calls) "the batch path made exactly 1 call")
+      (doseq [c batch-candidates
+              :let [id (:document-id c)
+                    p (get per-cand id)
+                    b (get batch-cand id)]]
+        (is (approx? (:cos-avoid p) (:cos-avoid b))
+            (str id ": cos-avoid identical batch vs per-candidate"))
+        (is (approx? (:cos-good p) (:cos-good b))
+            (str id ": cos-good identical batch vs per-candidate"))))))
+
+(deftest el51-no-guards-anywhere-makes-zero-bridge-calls
+  (testing "candidates with NO guards at all => zero bridge round-trips, all penalty 0"
+    (let [calls (atom 0)
+          no-guards [{:document-id "x" :fitness-score 0.6}
+                     {:document-id "y" :fitness-score 0.4}]]
+      (with-redefs [colbert/rerank (fn [_ _] (swap! calls inc) [])]
+        (let [out (dp/penalize-candidates nil no-guards batch-task el51-cfg)]
+          (is (= 0 @calls) "empty distinct-guard set => no bridge call")
+          (is (every? #(= 0.0 (:domain-penalty %)) out))
+          (is (= ["x" "y"] (mapv :document-id out)) "order preserved (all penalty 0)"))))))
+
+(deftest el51-fails-open-on-batched-call-throw
+  (testing "EL-5.1 fail-open: if the SINGLE batched colbert/rerank throws, EVERY
+            candidate => penalty 0 and the LLM order is UNTOUCHED (never a crash,
+            never a fabricated penalty) — matching the per-candidate fail-open"
+    (with-redefs [colbert/rerank (fn [_ _] (throw (ex-info "bridge down" {})))]
+      (let [out (dp/penalize-candidates nil batch-candidates batch-task el51-cfg)]
+        (is (= ["A" "B" "C"] (mapv :document-id out)) "untouched LLM order on fail-open")
+        (is (every? #(= 0.0 (:domain-penalty %)) out) "every candidate penalty 0")
+        (is (approx? 0.95 (:fitness-score (first out))) "fitness unchanged on fail-open")))))
+
+(deftest el51-embedding-batch-embeds-task-and-distinct-guards-once
+  (testing "the :embedding BATCH backend embeds the task ONCE and each DISTINCT
+            guard ONCE across all candidates (no per-candidate re-embed); still
+            selectable end-to-end"
+    (let [embed-calls (atom [])
+          ;; bag-of-words fake embed over a tiny vocab — deterministic, no DJL.
+          vocab ["extract" "refactor" "rename" "pure" "helper" "handler" "build" "config"]
+          bow (fn [s] (let [low (clojure.string/lower-case (or s ""))]
+                        (mapv (fn [w] (if (clojure.string/includes? low w) 1.0 0.0)) vocab)))
+          fake-embed (fn ([s] (swap! embed-calls conj s) (bow s))
+                       ([s _] (swap! embed-calls conj s) (bow s)))]
+      (with-redefs [embedding/embed-text fake-embed]
+        (let [cfg (assoc el51-cfg :scorer :embedding)
+              out (dp/penalize-candidates nil batch-candidates batch-task cfg)
+              guard-embed-calls (remove #{batch-task} @embed-calls)
+              distinct-guards (distinct (concat (mapcat dp/avoid-strings batch-candidates)
+                                                (mapcat dp/positive-strings batch-candidates)))]
+          (is (= (count batch-candidates) (count out)) "all candidates survive the embedding batch")
+          (is (= 1 (count (filter #{batch-task} @embed-calls)))
+              "the task is embedded EXACTLY once for the whole batch")
+          (is (= (count (distinct guard-embed-calls)) (count guard-embed-calls))
+              "each guard string is embedded at most once (distinct set, no per-candidate re-embed)")
+          (is (= (set distinct-guards) (set guard-embed-calls))
+              "exactly the distinct guard union is embedded")
+          (is (every? #(contains? % :domain-penalty) out)
+              ":embedding backend still produces penalties (selectable)"))))))
+
 (deftest integration-apply-rerank-penalizes-and-resorts
   (testing "apply-rerank: the shape-winner (higher LLM fitness) is penalized + drops below the correct candidate (with the :embedding scorer + fake embed-fn)"
     (with-test-ctx [base-ctx]

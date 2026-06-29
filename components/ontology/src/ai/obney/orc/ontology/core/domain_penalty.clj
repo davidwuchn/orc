@@ -177,10 +177,23 @@
                          (keep :good-when (:strengths candidate))))))
 
 ;; =============================================================================
-;; SCORERS — the injected capability (ADR 0016 amendment). A scorer is a fn
+;; SCORERS — the injected capability (ADR 0016 amendment + EL-5.1 batching).
+;;
+;; A PER-CANDIDATE scorer is a fn
 ;;   (scorer candidate task) -> {:cos-avoid <[0,1]> :cos-good <[0,1]>}
-;; computing the MAX-over-guards contrast cosines for ONE candidate against the
-;; task. Default to the real backend; inject a fake in tests. The two adapters:
+;; computing the MAX-over-guards contrast cosines for ONE candidate. Retained for
+;; score-candidate's pure-given-a-scorer contract + the unit/proto seams.
+;;
+;; EL-5.1 (one bridge call per rerank, NOT N — the obney-ops-workshop discipline):
+;; the HOT PATH (penalize-candidates) now uses a BATCH scorer factory
+;;   (batch-scorer candidates task) -> (fn [candidate] {:cos-avoid :cos-good})
+;; which gathers the DISTINCT set of all guard strings across ALL candidates,
+;; makes ONE rerank/embed call, builds a single content->normalized-score map,
+;; and serves every candidate's {:cos-avoid :cos-good} from that SHARED map. This
+;; is RESULTS-NEUTRAL: a guard's MaxSim/cosine vs the (single shared) task query
+;; is candidate-independent, so one map yields the IDENTICAL per-guard scores as
+;; N separate calls — only the bridge-call count drops (M -> 1). Default to the
+;; real backend; inject a fake in tests. The adapters:
 ;; =============================================================================
 
 (defn- max-cos
@@ -275,9 +288,13 @@
                               task)))))
 
 (defn make-scorer
-  "Select + construct the scorer from config (ADR 0016 amendment): :colbert
-   (DEFAULT) or :embedding. Default real backend; tests bypass this and inject a
-   fake scorer directly into score-candidate / penalize-candidates."
+  "Select + construct the PER-CANDIDATE scorer from config (ADR 0016 amendment):
+   :colbert (DEFAULT) or :embedding. Default real backend; tests bypass this and
+   inject a fake scorer directly into score-candidate / penalize-candidates.
+
+   NB: this is the N-call (one bridge round-trip per candidate) seam, retained for
+   score-candidate's pure contract + the proto. The HOT PATH uses make-batch-scorer
+   (EL-5.1 — one call for the whole batch)."
   [ctx {:keys [scorer] :or {scorer (:scorer default-penalty-config)} :as config}]
   (case scorer
     :embedding (embedding-scorer config)
@@ -286,6 +303,112 @@
     ;; typo'd operator config surfaces (never silently mis-score).
     (do (mu/log ::unknown-scorer :scorer scorer :falling-back-to :colbert)
         (colbert-scorer ctx config))))
+
+;; =============================================================================
+;; BATCH SCORERS (EL-5.1) — one bridge/embed call for the WHOLE candidate set.
+;;
+;; A batch scorer is a FACTORY:
+;;   (batch-scorer candidates task) -> (fn [candidate] {:cos-avoid :cos-good})
+;; It eagerly gathers the DISTINCT guard strings across ALL candidates, makes the
+;; SINGLE backend call up front, builds a content->normalized-score map, and
+;; returns a PURE per-candidate lookup that maxes over each candidate's own guards
+;; from that shared map. The returned lookup never touches the bridge.
+;; =============================================================================
+
+(defn- distinct-guards
+  "All DISTINCT non-blank guard strings across the candidate set, split into the
+   :avoid and :good universes (deduped within each), and the combined distinct
+   document set for ONE rerank/embed call. Reuses avoid-strings/positive-strings."
+  [candidates]
+  (let [non-blank (fn [ss] (remove (fn [s] (or (nil? s) (str/blank? s))) ss))
+        avoid (vec (distinct (non-blank (mapcat avoid-strings candidates))))
+        good  (vec (distinct (non-blank (mapcat positive-strings candidates))))
+        docs  (vec (distinct (concat avoid good)))]
+    {:avoid avoid :good good :docs docs}))
+
+(defn- candidate-cosines-fn
+  "Given a content->normalized-score map (the SHARED scores from the single
+   batched call), return a pure per-candidate lookup
+     (fn [candidate] -> {:cos-avoid :cos-good})
+   that maxes each candidate's avoid-strings / positive-strings over the map.
+   A guard absent from the map (e.g. blank, never scored) contributes nothing; a
+   side with no scored guards is 0.0 (never fabricated — the conservative side)."
+  [score-map]
+  (let [max-over (fn [strings]
+                   (let [vs (keep score-map strings)]
+                     (if (seq vs) (apply max vs) 0.0)))]
+    (fn [candidate]
+      {:cos-avoid (max-over (avoid-strings candidate))
+       :cos-good  (max-over (positive-strings candidate))})))
+
+(defn batch-colbert-scorer
+  "The :colbert BATCH backend (DEFAULT, EL-5.1). Returns a factory
+     (fn [candidates task] -> (fn [candidate] {:cos-avoid :cos-good}))
+   that makes EXACTLY ONE colbert/rerank call over the DISTINCT guard set across
+   ALL candidates (one shared task query), normalizes each score, and serves every
+   candidate from the shared map. rerank-fn / norm-fn default to the real colbert
+   interface; tests inject a stubbed rerank-fn (with a call counter — the headline
+   guardrail).
+
+   RESULTS-NEUTRAL: MaxSim(query, doc) is per-doc independent of the other docs in
+   the call, and all candidates share the same task query, so the shared map gives
+   the IDENTICAL per-guard scores as the N-call colbert-scorer."
+  ([ctx config] (batch-colbert-scorer ctx config
+                                      (fn [opts] (colbert/rerank ctx opts))
+                                      colbert/normalize-colbert-score))
+  ([_ctx {:keys [colbert-norm]} rerank-fn norm-fn]
+   (let [{:keys [max-score method]
+          :or {max-score (:max-score (:colbert-norm default-penalty-config))
+               method (:method (:colbert-norm default-penalty-config))}} colbert-norm
+         norm (fn [score] (norm-fn score :max-score max-score :method method))]
+     (fn [candidates task]
+       (let [{:keys [docs]} (distinct-guards candidates)]
+         (if (empty? docs)
+           ;; No guards anywhere => no bridge round-trip; every candidate {0,0}.
+           (fn [_candidate] {:cos-avoid 0.0 :cos-good 0.0})
+           (let [res (rerank-fn {:query task :documents docs})
+                 score-map (into {} (map (juxt :content (comp norm :score))) res)]
+             (candidate-cosines-fn score-map))))))))
+
+(defn batch-embedding-scorer
+  "The :embedding BATCH backend (EL-5.1). Returns a factory
+     (fn [candidates task] -> (fn [candidate] {:cos-avoid :cos-good}))
+   that embeds the task ONCE and the DISTINCT guard set ONCE (across ALL
+   candidates), builds a content->cosine map, and serves every candidate from it.
+   The embedding MODEL is config-swappable via :embedding-model. Pure given
+   embed-fn; tests pass a deterministic fake embed-fn so no DJL model loads.
+
+   Same RESULTS-NEUTRAL property as the N-call embedding-scorer: cosine(task,
+   guard) is independent of the other guards, so the shared map matches."
+  ([config] (batch-embedding-scorer config embedding/embed-text))
+  ([{:keys [embedding-model]} embed-fn]
+   (let [embed (if embedding-model
+                 (fn [s] (embed-fn s {:model-id embedding-model}))
+                 embed-fn)]
+     (fn [candidates task]
+       (let [task-emb (embed task)]
+         (if (nil? task-emb)
+           ;; Can't embed the task — no penalty source (fail open) for everyone.
+           (fn [_candidate] {:cos-avoid 0.0 :cos-good 0.0})
+           (let [{:keys [docs]} (distinct-guards candidates)
+                 score-map (into {}
+                                 (keep (fn [s]
+                                         (when-let [e (embed s)]
+                                           [s (embedding/cosine-similarity task-emb e)])))
+                                 docs)]
+             (candidate-cosines-fn score-map))))))))
+
+(defn make-batch-scorer
+  "Select + construct the BATCH scorer factory from config (EL-5.1): :colbert
+   (DEFAULT) or :embedding. Returns (fn [candidates task] -> per-candidate-fn).
+   Default real backend; tests bypass this and inject a fake batch factory (or use
+   the deterministic stub rerank-fn / embed-fn). Mirrors make-scorer's selection."
+  [ctx {:keys [scorer] :or {scorer (:scorer default-penalty-config)} :as config}]
+  (case scorer
+    :embedding (batch-embedding-scorer config)
+    :colbert   (batch-colbert-scorer ctx config)
+    (do (mu/log ::unknown-scorer :scorer scorer :falling-back-to :colbert)
+        (batch-colbert-scorer ctx config))))
 
 ;; =============================================================================
 ;; score-candidate / penalize-candidates — the PASS. Now scorer-driven.
@@ -317,33 +440,72 @@
      :cos-good cos-good
      :penalty (domain-penalty cos-avoid cos-good config)}))
 
+(defn- assoc-penalty
+  "Stamp one candidate with {:cos-avoid :cos-good :domain-penalty} and its
+   penalized :fitness-score, given its already-computed contrast cosines."
+  [candidate cos-avoid cos-good config]
+  (let [cos-avoid (double (or cos-avoid 0.0))
+        cos-good  (double (or cos-good 0.0))
+        penalty   (domain-penalty cos-avoid cos-good config)]
+    (-> candidate
+        (assoc :cos-avoid cos-avoid :cos-good cos-good :domain-penalty penalty)
+        (assoc :fitness-score (apply-penalty (:fitness-score candidate) penalty)))))
+
 (defn penalize-candidates
-  "EL-5 penalty PASS: given enriched candidates (each carrying :fitness-score +
-   :avoid-when/:content/:strengths from EL-2) and the task string, compute the
-   contrastive domain penalty per candidate via the SELECTED scorer, multiply it
-   into :fitness-score, stamp :domain-penalty + :cos-avoid + :cos-good for
-   observability, and RE-SORT by the new fitness (descending). Candidates without
-   a usable fitness (:colbert-fallback, nil) keep nil fitness and sort last.
-   Output map shape is otherwise unchanged (the contract
+  "EL-5 penalty PASS (EL-5.1: ONE bridge call for the whole batch, not N): given
+   enriched candidates (each carrying :fitness-score + :avoid-when/:content/
+   :strengths from EL-2) and the task string, compute the contrastive domain
+   penalty per candidate, multiply it into :fitness-score, stamp :domain-penalty +
+   :cos-avoid + :cos-good for observability, and RE-SORT by the new fitness
+   (descending). Candidates without a usable fitness (:colbert-fallback, nil) keep
+   nil fitness and sort last. Output map shape is otherwise unchanged (the contract
    {:document-id :reasoning :fitness-score} is preserved; the extra keys are
    additive observability).
 
-   The scorer is built from config (default :colbert) once per pass and reused
-   across candidates. Pure given the scorer — tests pass a fake scorer + config
-   for full determinism (no ColBERT/LLM/DJL)."
+   EL-5.1 SCORING: the SELECTED backend's BATCH scorer factory (make-batch-scorer)
+   is invoked ONCE per pass — it makes EXACTLY ONE colbert/rerank (or one
+   embed-task + one embed-distinct-guards) call over the DISTINCT guard set across
+   ALL candidates and returns a pure per-candidate lookup. This is RESULTS-NEUTRAL
+   vs the old per-candidate (N-call) path (per-doc MaxSim/cosine is set-independent
+   under the shared task query) and collapses M bridge round-trips into 1.
+
+   FAIL OPEN: if the single batched call throws (e.g. the ColBERT bridge is
+   unavailable), EVERY candidate scores {0,0} -> penalty 0, the LLM ordering is
+   left UNTOUCHED (never a fabricated penalty), matching the reranker's own
+   try/catch fallback.
+
+   Pure given the backend — the 5-arity injects a PER-CANDIDATE scorer
+   ((scorer candidate task) -> {:cos-avoid :cos-good}) for full determinism (no
+   ColBERT/LLM/DJL); used by the unit re-sort/fail-open tests + the proto. The
+   4-arity is the production hot path (batch)."
   ([ctx candidates task]
    (penalize-candidates ctx candidates task default-penalty-config))
   ([ctx candidates task config]
-   (penalize-candidates ctx candidates task config (make-scorer ctx config)))
+   ;; PRODUCTION HOT PATH (EL-5.1): one batched backend call for all candidates.
+   ;; FAIL OPEN around the SINGLE call: a backend outage => every candidate {0,0}.
+   (let [per-candidate-cosines
+         (try
+           (let [batch-factory (make-batch-scorer ctx config)
+                 lookup (batch-factory candidates task)]
+             ;; Force the lookup per candidate now (still inside the try) so a
+             ;; lazily-deferred backend error is caught here, not downstream.
+             (mapv (fn [c] (or (lookup c) {:cos-avoid 0.0 :cos-good 0.0})) candidates))
+           (catch Throwable t
+             (mu/log ::batch-scorer-failed :error (.getMessage t)
+                     :candidate-count (count candidates))
+             (mapv (constantly {:cos-avoid 0.0 :cos-good 0.0}) candidates)))]
+     (->> (map (fn [c {:keys [cos-avoid cos-good]}]
+                 (assoc-penalty c cos-avoid cos-good config))
+               candidates per-candidate-cosines)
+          (sort-by (fn [c] (or (:fitness-score c) -1.0)) >)
+          vec)))
   ([_ctx candidates task config scorer]
+   ;; PER-CANDIDATE injected-scorer seam (backward-compatible determinism path):
+   ;; score-candidate already fails open per-candidate around the scorer call.
    (->> candidates
         (mapv (fn [c]
-                (let [{:keys [cos-avoid cos-good penalty]}
+                (let [{:keys [cos-avoid cos-good]}
                       (score-candidate c task scorer config)]
-                  (-> c
-                      (assoc :cos-avoid cos-avoid
-                             :cos-good cos-good
-                             :domain-penalty penalty)
-                      (assoc :fitness-score (apply-penalty (:fitness-score c) penalty))))))
+                  (assoc-penalty c cos-avoid cos-good config))))
         (sort-by (fn [c] (or (:fitness-score c) -1.0)) >)
         vec)))

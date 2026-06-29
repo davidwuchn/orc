@@ -63,7 +63,12 @@
 (def child-id->parent (into {} (for [[n p] children] [(derive-child-id n p) p])))
 (defn child-id? [id] (contains? child-id->name id))
 (defn display-name [id]
-  (or (parent-name-by-id id) (child-id->name id) (str "OTHER/" (subs (str id) 0 8))))
+  (or (parent-name-by-id id) (child-id->name id)
+      ;; Defensive: an OOD structural classify-task can return an empty/nil
+      ;; :assigned-tree-id (no structural match) — render it without crashing the
+      ;; OOD force-fit verdict on (subs "" 0 8). Harness display only.
+      (let [s (str id)]
+        (if (str/blank? s) "OTHER/<none>" (str "OTHER/" (subs s 0 (min 8 (count s))))))))
 
 ;; The expected child per child-targeted task (for margin computation).
 (def task->expected-child
