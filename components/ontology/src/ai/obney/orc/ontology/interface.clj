@@ -29,6 +29,7 @@
             [ai.obney.orc.ontology.core.commands] ;; Register defcommand handlers for tree profiles
             [ai.obney.orc.ontology.core.evolutionary-commands] ;; Register defcommand handlers for evolutionary builder
             [ai.obney.orc.ontology.core.todo-processors :as todo-processors] ;; Register todo processors for auto-learning
+            [ai.obney.orc.ontology.core.harvest] ;; EL-4: register the harvest processor
             [ai.obney.orc.ontology.core.reranker :as reranker]
             [ai.obney.orc.ontology.core.domain-penalty :as domain-penalty]
             [ai.obney.orc.ontology.core.task-classifier :as task-classifier]
@@ -185,6 +186,14 @@
    Returns 0 when no events have ticked the counter."
   [ctx target-type target-id]
   (rm/get-consolidation-delta ctx target-type target-id))
+
+(defn get-tree-class-judge-averages
+  "EL-4 (ADR 0015): return {judge-name -> mean-score} across a
+   :tree-class's lifetime, or nil when no judge scores exist for it.
+   Standing read-model queryable at harvest time; parity with the
+   consolidator's on-demand tree-class-aggregate-metrics :judge-averages."
+  [ctx tree-class-id]
+  (rm/get-tree-class-judge-averages ctx tree-class-id))
 
 (defn get-consolidation-budget
   "C-2a-3c: return the configured hourly consolidation budget for a
