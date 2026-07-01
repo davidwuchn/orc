@@ -264,7 +264,39 @@
                              (:assigned-tree-id result)
                              (double (or (:confidence result) 0.0))
                              (:was-fresh-mint? result)
-                             (count (:behaviors behavioral-result))))))
+                             (count (:behaviors behavioral-result))))
+            ;; CV-1 (ADR 0017) Part 1 — CONVERGENCE CAPTURE. On a fresh-mint
+            ;; (and only then — we are already past the :uncertain guard), ALSO
+            ;; record a provisional :tree-class description whose SEARCHABLE
+            ;; content is the task `signature` (the same instruction-aware text
+            ;; classify-task searched by). This puts the just-minted class into
+            ;; the corpus immediately, so the NEXT identical/similar signature
+            ;; retrieves + matches it (accrues) instead of scattering a new
+            ;; random-uuid — the capture EL-1b specified but never built.
+            ;; ONLY on fresh-mint: a MATCH or BUNDLE (:was-fresh-mint? false)
+            ;; records NOTHING, so a recurrence does not re-emit a description
+            ;; and thrash the ColBERT reindex (see orc-sheet-content-hash-thrash).
+            ;; Reuses record-tree-class-description (keys on the fresh-mint root
+            ;; UUID the classifier just assigned). Robust to turn timeouts — it
+            ;; does not depend on the RLM completing.
+            (when (:was-fresh-mint? result)
+              (cp/process-command
+                (assoc context :command
+                       {:command/name :ontology/record-tree-class-description
+                        :command/id (random-uuid)
+                        :command/timestamp (time/now)
+                        :target-id (:assigned-tree-id result)
+                        :body {:summary signature
+                               :capabilities []
+                               :strengths []
+                               :weaknesses []
+                               :representative-uses []
+                               :avoid-when []
+                               :version 1
+                               :consolidated-from-event-count 0}}))
+              (println (format "[DEBUG RLM] node '%s' CONVERGENCE-CAPTURE recorded provisional :tree-class description for %s"
+                               (or (:name node) (str (:id node)))
+                               (:assigned-tree-id result))))))
         ;; R-Inject: stash the full classifier payload on :context so
         ;; apply-r05-classifier-context can prepend it to the model's
         ;; Phase 1 prompt. :tree-id stays at the top level for downstream

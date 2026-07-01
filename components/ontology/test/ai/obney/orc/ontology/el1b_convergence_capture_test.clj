@@ -16,15 +16,17 @@
      fresh uuid. Below the bundle band -> mint fresh (unchanged). A distinct
      candidate (low fit) must NOT over-merge.
 
-   PART 2 — evidence-gate retrieval.
-     A :tree-class candidate is only retrievable once its consolidation total
-     clears the SEPARATE retrieval gate (default conservative). A one-off
-     (total < gate) is filtered OUT of candidates; a recurring class
-     (total >= gate) surfaces. PROVEN: the same class flips from filtered to
-     surfaced once its total crosses the gate.
-
-   :tree-fingerprint candidates are NOT gated (only the instruction-aware
-   :tree-class axis the emergence loop accrues on)."
+   PART 2 — retrieval-gate governs SURFACING, not accrual (CV-1, ADR 0017).
+     The gate no longer filters a :tree-class out of the MATCH/BUNDLE decision
+     (that candidacy-gate was the bootstrap deadlock: a described total-1 class
+     was hidden from the very matching that would grow it, so it could never
+     accrue past the gate). Decoupled: matching/bundling operate on the UNGATED
+     candidates so a below-gate described class IS matchable-for-accrual from
+     occurrence 1; the gate now MOVES to the SURFACED reference set
+     (:top-candidates the R-Inject prepend shows). A one-off (0 < total < gate)
+     is still kept out of the surfaced references (its noise-suppression role);
+     it flips to surfaced once its total crosses the gate. A curated seed
+     (total 0) and :tree-fingerprint candidates are never gated."
   (:require [clojure.test :refer [deftest testing is]]
             [ai.obney.orc.ontology.interface :as ontology]
             [ai.obney.orc.ontology.core.task-classifier :as tc]
@@ -146,11 +148,11 @@
 ;; PART 2 — evidence-gate retrieval (the SEPARATE retrieval gate)
 ;; =============================================================================
 
-(deftest gate-filters-one-off-tree-class-from-candidates
-  (testing "a :tree-class below the retrieval gate is NOT a candidate (filtered), so it cannot match or bundle"
+(deftest below-gate-tree-class-is-matchable-for-accrual-but-not-surfaced
+  (testing "CV-1: a below-gate :tree-class is MATCHED (accrues) but is kept OUT of the surfaced references"
     (let [one-off (random-uuid)]
       (with-redefs [ontology/search-descriptions
-                    ;; would clear the match threshold IF it were retrievable
+                    ;; clears the match threshold; below the retrieval gate
                     (fn [_ _] [(tree-class-candidate one-off 0.95 25.0)])
                     tc/get-consolidation-total* (totals-fn {one-off 1})]
         (let [r (ontology/classify-task {} {:task-signature "x"
@@ -158,13 +160,16 @@
                                             :bundle-threshold 0.5
                                             :retrieval-gate 5
                                             :walk-down? false})]
-          ;; one-off filtered -> no candidate -> confident no-match -> :novel fresh mint
-          (is (= :novel (:outcome r)) "below-gate one-off does not surface as a match")
-          (is (not= one-off (:assigned-tree-id r)) "the filtered one-off is not assigned")
-          (is (true? (:was-fresh-mint? r)))
+          ;; ACCRUAL: matching ignores the gate now, so a described total-1
+          ;; class is matched and its counter can grow (dissolves the deadlock).
+          (is (= :matched (:outcome r)) "below-gate class is matchable for accrual")
+          (is (= one-off (:assigned-tree-id r)) "assigned the below-gate class (it accrues)")
+          (is (false? (:was-fresh-mint? r)) "a match is not a fresh-mint scatter")
+          ;; SURFACING: the gate still keeps the one-off out of the references
+          ;; the R-Inject prepend shows (its noise-suppression role).
           (is (empty? (filterv #(= one-off (-> % :document-metadata :target-id))
                                (:top-candidates r)))
-              "the filtered one-off is absent from the surfaced candidate set"))))))
+              "the below-gate one-off is absent from the SURFACED reference set"))))))
 
 (deftest gate-passes-curated-seed-tree-class-at-total-zero
   (testing "a curated baseline :tree-class (total 0 — recorded description, never runtime-classified) is NOT gated"
@@ -183,8 +188,10 @@
           (is (= seed (:assigned-tree-id r)) "the seed class is assigned, not filtered"))))))
 
 (deftest gate-surfaces-recurring-tree-class-once-it-crosses
-  (testing "PROVEN: the SAME class flips from filtered to surfaced once its total crosses the gate"
+  (testing "CV-1: the SAME class is matched at both totals, but flips from NOT-surfaced to surfaced once its total crosses the gate"
     (let [recurring (random-uuid)
+          surfaced? (fn [r] (some #(= recurring (-> % :document-metadata :target-id))
+                                  (:top-candidates r)))
           run (fn [total]
                 (with-redefs [ontology/search-descriptions
                               (fn [_ _] [(tree-class-candidate recurring 0.95 25.0)])
@@ -195,10 +202,14 @@
                                               :retrieval-gate 5
                                               :walk-down? false})))]
       (let [below (run 1) at-gate (run 5)]
-        (is (= :novel (:outcome below)) "below gate: filtered -> no match")
-        (is (not= recurring (:assigned-tree-id below)))
-        (is (= :matched (:outcome at-gate)) "at/above gate: surfaces -> matches (>= threshold)")
-        (is (= recurring (:assigned-tree-id at-gate)) "the recurring class now wins")))))
+        ;; ACCRUAL is gate-independent now — the class is matched at both totals.
+        (is (= :matched (:outcome below)) "below gate: matchable for accrual")
+        (is (= recurring (:assigned-tree-id below)) "below gate: assigned (accrues)")
+        (is (= :matched (:outcome at-gate)) "at gate: still matched")
+        (is (= recurring (:assigned-tree-id at-gate)))
+        ;; SURFACING is what the gate governs — flips once total crosses it.
+        (is (not (surfaced? below)) "below gate: NOT surfaced as a reference")
+        (is (surfaced? at-gate) "at/above gate: surfaces as a reference")))))
 
 (deftest gate-does-not-filter-tree-fingerprint
   (testing "the gate only applies to the :tree-class axis; :tree-fingerprint candidates are untouched"

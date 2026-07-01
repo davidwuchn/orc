@@ -539,17 +539,24 @@
                           :granularity #{:tree-fingerprint :tree-class}
                           :rerank-with-intent classifier-intent
                           :k 5})
-        ;; EL-1b (ADR 0015) Part 2 — EVIDENCE GATE. A :tree-class is only a
-        ;; retrievable CANDIDATE once it has recurred past the retrieval gate
-        ;; (lifetime consolidation total >= gate). A one-off (junk) is filtered
-        ;; from candidacy here — it STILL accrues (the counter ticks on every
-        ;; assign), it just doesn't surface as noise. :tree-fingerprint
-        ;; candidates pass through untouched (the gate rides only the
-        ;; instruction-aware axis). The fallback flag below is read from the
-        ;; RAW top-1 (pre-gate) so reranker-fallback uncertainty is detected
-        ;; regardless of the gate.
+        ;; CV-1 (ADR 0017) — the retrieval gate governs SURFACING, not accrual.
+        ;; EL-1b originally filtered a :tree-class whose consolidation total was
+        ;; in (0, gate) OUT OF CANDIDACY. That was the bootstrap DEADLOCK: a
+        ;; described total-1 class was hidden from the very matching that would
+        ;; grow it, so it could never accrue past the gate and the loop never
+        ;; converged. Decouple the two roles:
+        ;;   - MATCH / BUNDLE / walk-down operate on the UNGATED candidates, so
+        ;;     a described below-gate class IS matchable-for-accrual from
+        ;;     occurrence 1 (its counter ticks on every assign → it converges).
+        ;;   - `surfaced-candidates` (the GATED view) is what leaves as
+        ;;     :top-candidates — the references the R-Inject prepend shows and
+        ;;     harvest candidacy reads. This preserves the gate's one-off
+        ;;     noise-suppression role for surfaced references only.
+        ;; The fallback flag is read from the RAW top-1 so reranker-fallback
+        ;; uncertainty is detected regardless of the gate.
         rerank-fallback?-raw (= :colbert-fallback (:rerank-source (first raw-candidates)))
-        candidates (gate-candidates ctx raw-candidates retrieval-gate)
+        candidates raw-candidates
+        surfaced-candidates (gate-candidates ctx raw-candidates retrieval-gate)
         top-1 (first candidates)
         top-score (or (:fitness-score top-1) 0.0)
         matched? (and top-1 (>= top-score threshold))
@@ -578,7 +585,7 @@
       rerank-fallback?
       {:assigned-tree-id nil
        :confidence       top-score
-       :top-candidates   (vec candidates)
+       :top-candidates   (vec surfaced-candidates)
        :reasoning        (or (:reasoning top-1)
                              "Reranker fell back to raw ColBERT; classification deferred (uncertain).")
        :outcome          :uncertain
@@ -603,7 +610,7 @@
       (if-let [bundle-id (bundle-decision candidates bundle-threshold threshold)]
         {:assigned-tree-id bundle-id
          :confidence       top-score
-         :top-candidates   (vec candidates)
+         :top-candidates   (vec surfaced-candidates)
          :reasoning        (or (:reasoning top-1)
                                "Below the match threshold but a strong near-miss to an existing tree-class; bundling onto it (convergence) rather than scattering a fresh class.")
          :was-fresh-mint?  false
@@ -613,7 +620,7 @@
          :rerank-fallback? rerank-fallback?}
         {:assigned-tree-id (random-uuid)
          :confidence       top-score
-         :top-candidates   (vec candidates)
+         :top-candidates   (vec surfaced-candidates)
          :reasoning        (or (:reasoning top-1)
                                (if (seq candidates)
                                  "Top candidate did not pass confidence threshold; minting fresh task class."
@@ -628,7 +635,7 @@
       {:assigned-tree-id (coerce-to-uuid
                            (-> top-1 :document-metadata :target-id))
        :confidence       top-score
-       :top-candidates   (vec candidates)
+       :top-candidates   (vec surfaced-candidates)
        :reasoning        (or (:reasoning top-1) "")
        :was-fresh-mint?  false
        :outcome          :matched
@@ -642,7 +649,7 @@
           ;; High-confidence top-1 → don't walk; return as-is
           {:assigned-tree-id top-1-id
            :confidence       top-score
-           :top-candidates   (vec candidates)
+           :top-candidates   (vec surfaced-candidates)
            :reasoning        (or (:reasoning top-1) "")
            :was-fresh-mint?  false
            :outcome          :matched
@@ -659,7 +666,7 @@
                                             threshold
                                             nil)]
             (-> walk-result
-                (assoc :top-candidates (vec candidates))
+                (assoc :top-candidates (vec surfaced-candidates))
                 (assoc :outcome :matched)
                 (assoc :rerank-fallback? rerank-fallback?))))))))
 
