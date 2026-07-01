@@ -591,7 +591,14 @@
     [:status {:optional true} [:enum :success :failure :partial :timeout]]
     ;; C-2a-2: wall-clock duration of Phase 2 execution. Optional for
     ;; the same reason :status is.
-    [:duration-ms {:optional true} :int]]
+    [:duration-ms {:optional true} :int]
+    ;; CV-2 (ADR 0017 decision 3): the emitted worked-DSL (sanitized, pure
+    ;; data) + the SOURCE (host/classified) sheet-id. The post-emit
+    ;; enrichment processor uses source-sheet-id to resolve the tree-class
+    ;; (sheet->class join) and records generated-tree as the class's
+    ;; :recommended-pattern. Both optional/backward-compatible.
+    [:generated-tree {:optional true} [:maybe :any]]
+    [:source-sheet-id {:optional true} [:maybe :uuid]]]
 
    ;; -------------------------------------------------------------------------
    ;; Versioning Commands
@@ -1035,6 +1042,10 @@
     [:status {:optional true} [:enum :success :failure :partial :timeout]]
     ;; C-2a-2: wall-clock duration of Phase 2 execution.
     [:duration-ms {:optional true} :int]
+    ;; CV-2 (ADR 0017 decision 3): emitted worked-DSL + source (host) sheet-id.
+    ;; Optional/backward-compatible — replayed older bookends carry neither.
+    [:generated-tree {:optional true} [:maybe :any]]
+    [:source-sheet-id {:optional true} [:maybe :uuid]]
     [:timestamp [:fn inst?]]]
 
    :sheet/tree-tick-completed

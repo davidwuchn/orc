@@ -826,6 +826,20 @@
    :version 1}
   [state event] (tree-class-judge-averages* state event))
 
+(defn get-tree-class-for-sheet
+  "CV-2 (ADR 0017 decision 3): return the :tree-class id assigned to
+   `source-sheet-id`, or nil when the sheet was never classified.
+
+   Reuses the tree-class-judge-averages read-model's :sheet->class map,
+   which the :ontology/task-classified reducer populates UNCONDITIONALLY
+   (independent of any judge scores) — exactly the sheet->class join the
+   EL-4 read-model already performs. The post-emit enrichment processor
+   uses this to route an emitted tree's worked-DSL onto the class the task
+   was assigned to."
+  [ctx source-sheet-id]
+  (get-in (rmp/project ctx :ontology/tree-class-judge-averages)
+          [:sheet->class source-sheet-id]))
+
 (defn get-tree-class-judge-averages
   "EL-4: return {judge-name -> mean-score} across this tree-class's lifetime,
    or nil when no scores exist for the class. Parity target: the

@@ -2548,6 +2548,12 @@
                                               generated-tree
                                               context
                                               {:sandbox-vars phase2-vars
+                                               ;; CV-2 (ADR 0017 decision 3):
+                                               ;; hand the emitted raw S-expr to
+                                               ;; the executor so its bookend can
+                                               ;; carry the worked-DSL for the
+                                               ;; post-emit tree-class enrichment.
+                                               :generated-tree-raw generated-tree-raw
                                                :blackboard (reduce-kv
                                                              (fn [acc k entry]
                                                                (assoc acc k (:value entry)))

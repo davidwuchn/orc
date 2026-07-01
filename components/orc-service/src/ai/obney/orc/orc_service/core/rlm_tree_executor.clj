@@ -518,7 +518,8 @@
                            the child sheet's leaf nodes. When absent for a
                            given key, falls back to inferring schema from
                            value type."
-  [tree context {:keys [sandbox-vars blackboard blackboard-schemas timeout-ms]
+  [tree context {:keys [sandbox-vars blackboard blackboard-schemas timeout-ms
+                        generated-tree-raw]
                  :or {timeout-ms 60000
                       blackboard-schemas {}}}]
   (println "[DEBUG Tree] execute-tree starting")
@@ -708,13 +709,26 @@
             _ (try
                 (cp/process-command
                   (assoc context :command
-                         {:command/id (random-uuid)
-                          :command/timestamp (time/now)
-                          :command/name :sheet/record-rlm-tree-execution-completion
-                          :sheet-id sheet-id
-                          :tick-id tick-id
-                          :trajectory trajectory
-                          :total-usage (or (:usage result) {})}))
+                         (cond-> {:command/id (random-uuid)
+                                  :command/timestamp (time/now)
+                                  :command/name :sheet/record-rlm-tree-execution-completion
+                                  :sheet-id sheet-id
+                                  :tick-id tick-id
+                                  :trajectory trajectory
+                                  :total-usage (or (:usage result) {})}
+                           ;; CV-2 (ADR 0017 decision 3): carry the emitted
+                           ;; worked-DSL (sanitized raw S-expr — pure data the
+                           ;; ontology can store + a model can read) + the
+                           ;; SOURCE (host/classified) sheet-id so the post-emit
+                           ;; enrichment processor resolves the tree-class via
+                           ;; the sheet->class join. Note `sheet-id` above is the
+                           ;; EPHEMERAL Phase-2 sheet; the classified sheet is
+                           ;; (:sheet-id context). Both optional/backward-compat.
+                           (some? generated-tree-raw)
+                           (assoc :generated-tree
+                                  (sanitize-tree-for-events generated-tree-raw))
+                           (some? (:sheet-id context))
+                           (assoc :source-sheet-id (:sheet-id context)))))
                 (catch Exception e
                   (println "[DEBUG Tree] Bookend emission failed:" (.getMessage e))))
             result-with-duration (assoc result :duration-ms duration-ms)]

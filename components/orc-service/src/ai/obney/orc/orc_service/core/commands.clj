@@ -1129,7 +1129,7 @@
    reads :tree-fingerprint from the event body directly (tag values must
    be UUIDs in event-store-v3, so we don't tag with the string fingerprint)."
   [{{:keys [sheet-id tick-id trajectory total-usage task-fingerprint
-            tree-fingerprint status duration-ms]} :command
+            tree-fingerprint status duration-ms generated-tree source-sheet-id]} :command
     :as _ctx}]
   {:command-result/events
    [(->event
@@ -1144,7 +1144,15 @@
                       :task-fingerprint task-fingerprint}}
         (some? tree-fingerprint) (assoc-in [:body :tree-fingerprint] tree-fingerprint)
         (some? status)           (assoc-in [:body :status] status)
-        (some? duration-ms)      (assoc-in [:body :duration-ms] duration-ms)))]})
+        (some? duration-ms)      (assoc-in [:body :duration-ms] duration-ms)
+        ;; CV-2 (ADR 0017 decision 3): carry the emitted worked-DSL + the
+        ;; SOURCE (host/classified) sheet-id so the post-emit enrichment
+        ;; processor can resolve the tree-class (sheet->class join) and
+        ;; record the DSL as a :strengths[].:recommended-pattern. Both
+        ;; optional/backward-compatible — a turn that times out before emit
+        ;; carries neither, so no enrichment fires (CV-1 floor still stands).
+        (some? generated-tree)   (assoc-in [:body :generated-tree] generated-tree)
+        (some? source-sheet-id)  (assoc-in [:body :source-sheet-id] source-sheet-id)))]})
 
 (defcommand :sheet fail-node-execution
   {:authorized? authenticated?}

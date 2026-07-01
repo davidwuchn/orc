@@ -195,6 +195,13 @@
   [ctx tree-class-id]
   (rm/get-tree-class-judge-averages ctx tree-class-id))
 
+(defn get-tree-class-for-sheet
+  "CV-2 (ADR 0017 decision 3): return the :tree-class id assigned to
+   `source-sheet-id` (via the task-classified sheet->class join), or nil
+   when the sheet was never classified."
+  [ctx source-sheet-id]
+  (rm/get-tree-class-for-sheet ctx source-sheet-id))
+
 (defn get-consolidation-budget
   "C-2a-3c: return the configured hourly consolidation budget for a
    target-type keyword. Falls back to default 100 when no per-target-type
