@@ -947,7 +947,12 @@
                       :version-number (:version-number snapshot)
                       :options (:options event)}
                (:instruction-overrides snapshot)
-               (assoc :instruction-overrides (:instruction-overrides snapshot)))))
+               (assoc :instruction-overrides (:instruction-overrides snapshot))
+               ;; G1 (ADR 0018): surface the opaque :tool-context per tick so
+               ;; execute-leaf-node can assoc it onto the leaf's context at any
+               ;; depth. Absent -> not stored (backward-compatible).
+               (:tool-context event)
+               (assoc :tool-context (:tool-context event)))))
     ;; No snapshot - legacy tick, no context stored
     state))
 

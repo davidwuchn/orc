@@ -2264,9 +2264,18 @@
           ;; Generate code using LLM
           (let [module (build-rlm-code-generation-module node inputs-preview history
                                                           blackboard @sandbox-vars @var-creation-times)
-                inputs {:task (:instruction node)
-                        :inputs-info (pr-str inputs-preview)
-                        :history (or (build-iteration-history history) "None")}
+                ;; G2 (ADR 0018): pass the :available-code-nodes VALUE into the
+                ;; runtime inputs so the module's declared field + catalog prompt
+                ;; note are non-empty and the model can reference catalog :code
+                ;; fns. Read from the same :rlm map the module builder reads
+                ;; (executor build-rlm-code-generation-module). Absent -> not
+                ;; added (no declared field either, so backward-compatible).
+                available-code-nodes (let [rlm (:rlm node)]
+                                       (when (map? rlm) (:available-code-nodes rlm)))
+                inputs (cond-> {:task (:instruction node)
+                                :inputs-info (pr-str inputs-preview)
+                                :history (or (build-iteration-history history) "None")}
+                         available-code-nodes (assoc :available-code-nodes available-code-nodes))
                 ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
                 ;; but preserve an explicit caller/node :use-function-calling? override.
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs

@@ -490,7 +490,10 @@
     [:inputs {:optional true} :map]
     [:use-version {:optional true} :int]
     [:force-draft {:optional true} :boolean]
-    [:options {:optional true} :map]]
+    [:options {:optional true} :map]
+    ;; G1 (ADR 0018): opaque per-tick tool context threaded to Phase-2 leaves.
+    ;; orc treats it as an opaque map; orc-sessions populates/consumes it.
+    [:tool-context {:optional true} :map]]
 
    :sheet/tick-node
    [:map
@@ -950,7 +953,10 @@
     [:inputs {:optional true} :map]
     [:execution-snapshot {:optional true} :map]
     [:version-number {:optional true} :int]
-    [:options {:optional true} :map]]
+    [:options {:optional true} :map]
+    ;; G1 (ADR 0018): opaque per-tick tool context, surfaced back at the leaf
+    ;; via the tick-execution-context read model. Absent for non-coding ticks.
+    [:tool-context {:optional true} :map]]
 
    :sheet/node-execution-started
    [:map

@@ -624,6 +624,14 @@
           ;; immediately. Without this check, the anomaly is dropped, no tick
           ;; events ever fire, and (deref p timeout-ms) hangs for the full
           ;; timeout budget before returning a misleading {:status :timeout}.
+          ;; G1 (ADR 0018): carry the OPAQUE :tool-context from the RLM
+          ;; execution context onto the tick-tree command so it survives the
+          ;; async command -> event -> processor boundary and reaches the
+          ;; Phase-2 leaf. orc does not interpret it. Absent -> not carried
+          ;; (backward-compatible; non-coding consumers see no change).
+          ;; Transitive: a nested execute-tree (a leaf that emits its own tree)
+          ;; reads :tool-context off ITS context the same way, re-threading it.
+          tool-context (:tool-context context)
           tick-cmd-result (cp/process-command
                             (assoc context :command
                                    (cond-> {:command/id (random-uuid)
@@ -633,7 +641,8 @@
                                             :tick-id tick-id
                                             :inputs (merge blackboard sandbox-vars)
                                             :options {:timeout-ms timeout-ms}}
-                                     parent-tick-id (assoc :parent-tick-id parent-tick-id))))
+                                     parent-tick-id (assoc :parent-tick-id parent-tick-id)
+                                     tool-context (assoc :tool-context tool-context))))
           tick-anomaly (:cognitect.anomalies/category tick-cmd-result)
           ;; If the command was rejected, short-circuit: deregister the pending
           ;; completion so the caller doesn't deref a promise that will never

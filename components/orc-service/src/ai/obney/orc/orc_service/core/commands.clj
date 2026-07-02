@@ -929,7 +929,8 @@
   "Start a tree tick (execute from root).
    When inputs are provided, builds a full execution snapshot for
    independent async execution with tick-scoped blackboard isolation."
-  [{{:keys [sheet-id tick-id parent-tick-id inputs use-version force-draft options]} :command
+  [{{:keys [sheet-id tick-id parent-tick-id inputs use-version force-draft options
+            tool-context]} :command
     :as context}]
   (let [new-tick-id (or tick-id (random-uuid))]
     (if inputs
@@ -956,7 +957,11 @@
                              :execution-snapshot snapshot}
                       parent-tick-id (assoc :parent-tick-id parent-tick-id)
                       (:version-number snapshot) (assoc :version-number (:version-number snapshot))
-                      options (assoc :options options))})]}))
+                      options (assoc :options options)
+                      ;; G1 (ADR 0018): carry the opaque :tool-context across the
+                      ;; async boundary so the tick-execution-context read model
+                      ;; can surface it back at the Phase-2 leaf.
+                      tool-context (assoc :tool-context tool-context))})]}))
       ;; Legacy UI tick: no snapshot, reads live sheet state
       (let [read-ctx (if (not= (:system-tenant-id context) (:tenant-id context))
                        (assoc context :tenant-id (:system-tenant-id context))
@@ -980,7 +985,10 @@
                       [:tick new-tick-id]}
               :body (cond-> {:sheet-id sheet-id
                              :tick-id new-tick-id}
-                      parent-tick-id (assoc :parent-tick-id parent-tick-id))})]})))))
+                      parent-tick-id (assoc :parent-tick-id parent-tick-id)
+                      ;; G1 (ADR 0018): opaque :tool-context also rides the
+                      ;; legacy (snapshot-less) tick path for symmetry.
+                      tool-context (assoc :tool-context tool-context))})]})))))
 (defcommand :sheet tick-node
   {:authorized? authenticated?}
   "Start a single node tick (for testing or manual execution)."

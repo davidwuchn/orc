@@ -993,6 +993,16 @@
                                    bb))
                                raw-blackboard
                                event-inputs)
+            ;; G1 (ADR 0018): read the opaque :tool-context that rode the
+            ;; tick-execution-context across the async boundary and assoc it
+            ;; onto the context handed to execute-leaf -> execute-code, so the
+            ;; leaf fn sees (:tool-context ctx). Absent -> leaf-context is the
+            ;; unchanged context (no behavior change for non-coding leaves).
+            ;; Works at any depth: composites resolve leaves through the same
+            ;; per-tick context.
+            tool-context (:tool-context (rm/get-tick-execution-context context tick-id))
+            leaf-context (cond-> context
+                           tool-context (assoc :tool-context tool-context))
             ;; Use provider from context, fall back to default, or use mock if nil
             provider (or dscloj-provider *default-dscloj-provider*)
             executor-type (or (:executor node) :ai)
@@ -1066,11 +1076,11 @@
                              ;; Code executor doesn't need provider
                              (= :code executor-type)
                              (executor/execute-leaf node blackboard nil
-                                                    :context context)
+                                                    :context leaf-context)
                              ;; AI executor with provider
                              provider
                              (executor/execute-leaf node blackboard provider
-                                                    :context context
+                                                    :context leaf-context
                                                     :stream stream-cfg)
                              ;; No provider - use mock
                              :else
