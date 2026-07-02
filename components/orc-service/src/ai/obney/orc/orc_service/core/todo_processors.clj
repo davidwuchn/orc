@@ -1199,13 +1199,23 @@
             ;; descriptions read-model. Without these, mint-behavior!
             ;; throws "requires a command context" and the agent's
             ;; mint call is lost.
-            (let [enriched-context (assoc context
-                                          :sheet-id sheet-id
-                                          :tick-id tick-id
-                                          ;; node-id rides along so RLM stream
-                                          ;; events (iteration/phase2) carry the
-                                          ;; hosting repl-researcher node.
-                                          :node-id node-id)
+            (let [;; CE-5b FIX B (ADR 0018): read the OPAQUE :tool-context that
+                  ;; FIX A stored on THIS tick's execution-context read model
+                  ;; (the same tick this repl-researcher node runs in) and
+                  ;; thread it into the context handed to
+                  ;; execute-repl-researcher -> execute-tree, whose Phase-2
+                  ;; child tick re-threads it to the emitted leaf. Mirrors
+                  ;; execute-leaf-node's read (rm/get-tick-execution-context).
+                  ;; Absent -> enriched-context unchanged (backward-compatible).
+                  tool-context (:tool-context (rm/get-tick-execution-context context tick-id))
+                  enriched-context (cond-> (assoc context
+                                                  :sheet-id sheet-id
+                                                  :tick-id tick-id
+                                                  ;; node-id rides along so RLM stream
+                                                  ;; events (iteration/phase2) carry the
+                                                  ;; hosting repl-researcher node.
+                                                  :node-id node-id)
+                                     tool-context (assoc :tool-context tool-context))
                   result (if provider
                            (executor/execute-repl-researcher node blackboard provider enriched-context)
                            {:status :failure :error "No DSCloj provider configured"})
