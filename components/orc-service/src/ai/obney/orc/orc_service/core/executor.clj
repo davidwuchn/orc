@@ -1678,10 +1678,28 @@
 
    U9: When (:rlm node) is a map containing :available-code-nodes (string), that
    catalog is surfaced as an extra dscloj input field so the model can use
-   the listed functions inside emit-tree! :code nodes."
-  [node inputs-preview history blackboard sandbox-vars-map var-creation-times]
+   the listed functions inside emit-tree! :code nodes.
+
+   CE-6b (ADR 0018): when mcp-tools is non-empty, the module advertises the
+   bound tools (re-housing the non-RLM researcher's tool-advertisement
+   pattern — declared :tools input + instructions section): tool names, the
+   fact that they are bound as directly callable functions in the Phase-1
+   sandbox, the generic call shape, and inline-effects guidance — and the
+   large-data emit-tree! example line drops its exclusivity claim. With
+   empty/absent mcp-tools the module is byte-identical to the pre-CE-6b
+   output (backward-compatible). Tool names come from the node config; no
+   tool semantics are hardcoded beyond the generic call shape."
+  ([node inputs-preview history blackboard sandbox-vars-map var-creation-times]
+   (build-rlm-code-generation-module node inputs-preview history blackboard
+                                     sandbox-vars-map var-creation-times
+                                     (or (:mcp-tools node) [])))
+  ([node inputs-preview history blackboard sandbox-vars-map var-creation-times mcp-tools]
   (let [rlm-config (let [rlm (:rlm node)] (if (map? rlm) rlm {}))
         available-code-nodes (get rlm-config :available-code-nodes)
+        has-mcp? (boolean (seq mcp-tools))
+        mcp-tool-list (str/join ", " mcp-tools)
+        has-namespaced? (some #(str/includes? % "/") mcp-tools)
+        example-tool (first mcp-tools)
         base-inputs [{:name :task
                       :spec :string
                       :description "The research task to complete"}
@@ -1695,7 +1713,14 @@
                      available-code-nodes
                      (conj {:name :available-code-nodes
                             :spec :string
-                            :description "Catalog of pre-built Clojure functions you can reference in emit-tree! :code nodes via {:fn \"ns/sym\" ...}. Read this carefully if present."}))]
+                            :description "Catalog of pre-built Clojure functions you can reference in emit-tree! :code nodes via {:fn \"ns/sym\" ...}. Read this carefully if present."})
+                     ;; CE-6b: re-housed from the non-RLM researcher module
+                     ;; (build-code-generation-module) — same input name and
+                     ;; description so the advertisement pattern is identical.
+                     has-mcp?
+                     (conj {:name :tools
+                            :spec :string
+                            :description "Available tools you can call as functions"}))]
     {:inputs all-inputs
    :outputs [{:name :reasoning
               :spec :string
@@ -1801,6 +1826,29 @@
                       "                            :reads [:text] :writes [:counts]}]\n"
                       "  - :final - Return validated output with {:keys [...]}\n"
                       "- The tree is stored for learning and can be reused\n\n"
+                      ;; CE-6b (ADR 0018): advertise the node's bound mcp-tools.
+                      ;; The sandbox has bound these since af7c718e, but nothing
+                      ;; in the SYSTEM prompt told the model they exist — the
+                      ;; live S6-lite forensic showed a task-level instruction
+                      ;; alone loses to the system-level emit-tree framing
+                      ;; (data-processing tree, zero tool calls, iteration 1).
+                      ;; Domain-agnostic: names + example come from the node's
+                      ;; own tool list; only the generic call shape is stated.
+                      (if has-mcp?
+                        (str "## Bound Tools\n\n"
+                             "The following tools are bound in your sandbox as directly callable functions: "
+                             mcp-tool-list "\n"
+                             "Each takes a single map of arguments and returns a result map:\n"
+                             "```clojure\n"
+                             "(" example-tool " {\"arg\" \"value\"})  ;; => result map\n"
+                             "```\n"
+                             (if has-namespaced?
+                               "Namespaced names (server/tool) are bound per-namespace — call them exactly as listed above.\n"
+                               "")
+                             "Perform workspace/file effects by calling these bound tools INLINE in your Phase-1 code "
+                             "(read → patch/write → verify) rather than emitting a tree for them. Reserve emit-tree! "
+                             "for genuinely parallel or structured sub-work.\n\n")
+                        "")
                       "## Default Mode: emit-tree!\n\n"
                       "**emit-tree! is your default execution mode.** For ANY non-trivial workflow — anything\n"
                       "with multiple steps, parallel sub-tasks, deterministic transforms alongside LLM calls,\n"
@@ -2125,7 +2173,13 @@
                       "  (final! {:answer (:analysis result)}))\n"
                       "```\n\n"
                       "## Example: Processing Large Data (PREFERRED - use emit-tree!)\n"
-                      "For ANY large data (documents, collections, etc.), ALWAYS use emit-tree!:\n"
+                      ;; CE-6b: when tools are bound, the large-data line must
+                      ;; not claim exclusivity — workspace/file effects belong
+                      ;; inline in Phase-1 via the bound tools. Without tools,
+                      ;; the strong data-processing guidance is unchanged.
+                      (if has-mcp?
+                        "For large DATA processing (documents, collections), use emit-tree!; for workspace/file effects, call your bound tools directly inline:\n"
+                        "For ANY large data (documents, collections, etc.), ALWAYS use emit-tree!:\n")
                       "```clojure\n"
                       "(emit-tree!\n"
                       "  [:sequence\n"
@@ -2152,7 +2206,7 @@
                       ;; at the end of the prompt so the model knows to read
                       ;; it before designing emit-tree! :code nodes.
                       (when available-code-nodes
-                        "\n\nA catalog of pre-built code-node functions is provided in the :available-code-nodes input above. Use them via [:code {:fn \"...\"}] in your emit-tree! tree when their semantics match what you need. Their input/output shapes are documented there.\n\n"))}))
+                        "\n\nA catalog of pre-built code-node functions is provided in the :available-code-nodes input above. Use them via [:code {:fn \"...\"}] in your emit-tree! tree when their semantics match what you need. Their input/output shapes are documented there.\n\n"))})))
 
 (defn execute-repl-researcher-rlm
   "Execute a repl-researcher node in RLM mode.
@@ -2262,8 +2316,12 @@
 
           :else
           ;; Generate code using LLM
+          ;; CE-6b (ADR 0018): pass the node's bound mcp-tools into the module
+          ;; builder (mirrors the non-RLM researcher call) so the Phase-1
+          ;; prompt ADVERTISES what the sandbox already binds.
           (let [module (build-rlm-code-generation-module node inputs-preview history
-                                                          blackboard @sandbox-vars @var-creation-times)
+                                                          blackboard @sandbox-vars @var-creation-times
+                                                          mcp-tools)
                 ;; G2 (ADR 0018): pass the :available-code-nodes VALUE into the
                 ;; runtime inputs so the module's declared field + catalog prompt
                 ;; note are non-empty and the model can reference catalog :code
@@ -2275,7 +2333,10 @@
                 inputs (cond-> {:task (:instruction node)
                                 :inputs-info (pr-str inputs-preview)
                                 :history (or (build-iteration-history history) "None")}
-                         available-code-nodes (assoc :available-code-nodes available-code-nodes))
+                         available-code-nodes (assoc :available-code-nodes available-code-nodes)
+                         ;; CE-6b: supply the declared :tools input's VALUE
+                         ;; (same joined-list shape as the non-RLM researcher).
+                         (seq mcp-tools) (assoc :tools (str/join ", " mcp-tools)))
                 ;; Default to marker parsing for historical OpenRouter/Gemini behavior,
                 ;; but preserve an explicit caller/node :use-function-calling? override.
                 ;; :with-metadata? true ensures dscloj returns {:outputs ... :usage ...} instead of just outputs
