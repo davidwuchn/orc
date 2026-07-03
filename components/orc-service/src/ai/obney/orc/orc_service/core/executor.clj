@@ -1901,6 +1901,11 @@
                              "Each iteration, prefer one of:\n"
                              "1. `(emit-tree! ...)` to make progress on the task, OR\n"
                              "2. `(final! {...})` to terminate when the work is done.\n\n"
+                             ;; CE-6c (ADR 0018): pairs with the dispatch guard —
+                             ;; the live forensic showed the model believing
+                             ;; emit-tree! returns tree outputs synchronously.
+                             "emit-tree! does NOT return tree outputs in the same iteration — "
+                             "never call final! in the same code block as emit-tree!.\n\n"
                              "Direct `(llm ...)` / `(code ...)` calls in Phase 1 are for "
                              "narrow inspection or decision flows — they should not be "
                              "your main work loop. If you find yourself iterating direct "
@@ -2532,6 +2537,44 @@
                                             :error enhanced-error
                                             :vars-created []})]
                     (recur (inc iteration) error-history))
+
+                  ;; CE-6c (ADR 0018): final!+emit-tree! same-iteration guard,
+                  ;; recursive mode ONLY. Live forensics: the model wrote
+                  ;; (do (store! ...) (emit-tree! [...]) ... (final! {...}))
+                  ;; in ONE iteration — believing emit-tree! returns tree
+                  ;; outputs synchronously. The final-output branch below is
+                  ;; checked BEFORE the :generated-tree branch, so the final!
+                  ;; was accepted and the emitted tree SILENTLY DISCARDED
+                  ;; (zero Phase-2 executions). Neither is applied: clear the
+                  ;; pending tree markers, discard the final, surface an
+                  ;; ITERATION ERROR in the history, and recur so the model
+                  ;; can choose one or the other. Terminal (non-recursive)
+                  ;; mode keeps today's behavior (final! wins).
+                  (and recursive-mode?
+                       final-output
+                       (contains? @sandbox-vars :generated-tree))
+                  (let [guard-error (str "You called (final! ...) in the same iteration as "
+                                         "(emit-tree! ...). The tree executes AFTER your code "
+                                         "returns, so its outputs were not available to your "
+                                         "final!. Neither was applied: the tree was not executed "
+                                         "and the final! was discarded. Either call "
+                                         "(emit-tree! ...) alone this iteration and inspect "
+                                         ":tree-results next iteration, or call (final! ...) alone.")
+                        ;; Clear the pending tree so the :generated-tree branch
+                        ;; can't fire on it later; the raw marker goes too —
+                        ;; it records a tree that was never executed.
+                        _ (swap! sandbox-vars dissoc :generated-tree :generated-tree-raw)
+                        guard-history (conj history
+                                            {:code code
+                                             :result nil
+                                             :stdout (:stdout exec-result)
+                                             :error guard-error
+                                             ;; Non-marker vars (e.g. store!
+                                             ;; calls) DID land and persist.
+                                             :vars-created (vec (remove #{:generated-tree
+                                                                          :generated-tree-raw}
+                                                                        new-vars))})]
+                    (recur (inc iteration) guard-history))
 
                   ;; final! was called - return the validated output
                   final-output
